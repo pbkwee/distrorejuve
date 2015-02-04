@@ -3,20 +3,33 @@ deghost is a cross-distro script to determine the vulnerability of a libc librar
 
 deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
 
-Attempts to improve the situation if it is.
+Attempts to fix:
 
     - Debian 7 => apt-get install
     - Debian 6 => fix up apt repositories for squeeze-lts and then apt-get install
     - Supported Ubuntus (12.04 LTS, 14.04 LTS, 14.10) => apt-get install
-    - Unsupported Ubuntus (others per EOL_UBUNTU_DISTROS variable) => convert to old-releases.ubuntu.com
-    - RHEL4, WBEL3, RH9, Lenny (Debian 5) and earlier Debians => nothing
+    - Lenny (Deb 5), or any Ubuntu use the --break-eggs options to dist-upgrade to Wheezy or Trusty LTS.  This will likely 
+        not work automatically, may leave you in dependency hell, and will likely change configs in ways you wish it hadn't.
+        
+Attempts to improve the situation:.
+        
+    - Unsupported Ubuntus (others per UNSUPPORTED_UBUNTU variable) => convert to old-releases.ubuntu.com
     
-Potential improvements to come:    
-    - Lenny.  Need to patch?  Maybe use squeeze .deb?
+No action available for the following (and older) distros:
+    
+    - RHEL4, WBEL3, RH9, Debian 4 => nothing
+        
+Potential improvements to come:
+
+    - Lenny.  Need to patch?  Maybe use squeeze .deb? (vs. the whole --break-eggs dist upgrade)
   
   Use with --source if you just wish to have the functions available to you for testing
   
   Run with --check if you just wish to check, but not change your server
+  
+  Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (supported) to wheezy (latest).  Note caveats above.
+  
+  Run with --break-eggs to dist upgrade any ubuntu to the latest LTS.  Note caveats above.
   
   Run with --usage to get this message
   

@@ -4,24 +4,36 @@ export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=text
 
 # https://wiki.ubuntu.com/Releases
-EOL_UBUNTU_DISTROS="breezy dapper edgy feisty gutsy hardy hoary intrepid jaunty karmic maverick natty oneiric quantal raring warty" 
-SUPPORTED_UBUNTU_DISTROS="lynx pangolin tahr unicorn"
+LTS_UBUNTU="dapper hardy lucid precise trusty"
+SUPPORTED_UBUNTU="lucid precise trusty utopic vivid" 
+UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic       maverick natty oneiric         quantal raring saucy"             
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty"
+NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic  maverick natty oneiric quantal raring saucy"
+
 function print_usage() {
   echo "deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235) and then patch that where possible.
 
 deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
 
-Attempts to improve the situation if it is.
+Attempts to fix:
 
     - Debian 7 => apt-get install
     - Debian 6 => fix up apt repositories for squeeze-lts and then apt-get install
     - Supported Ubuntus (12.04 LTS, 14.04 LTS, 14.10) => apt-get install
-    - Unsupported Ubuntus (others per EOL_UBUNTU_DISTROS variable) => convert to old-releases.ubuntu.com
-    - RHEL4, WBEL3, RH9, Lenny (Debian 5) and earlier Debians => nothing
+    - Lenny (Deb 5), or any Ubuntu use the --break-eggs options to dist-upgrade to Wheezy or Trusty LTS.  This will likely 
+        not work automatically, may leave you in dependency hell, and will likely change configs in ways you wish it hadn't.
+        
+Attempts to improve the situation:.
+        
+    - Unsupported Ubuntus (others per UNSUPPORTED_UBUNTU variable) => convert to old-releases.ubuntu.com
     
+No action available for the following (and older) distros:
+    
+    - RHEL4, WBEL3, RH9, Debian 4 => nothing
+        
 Potential improvements to come:
 
-    - Lenny.  Need to patch?  Maybe use squeeze .deb?
+    - Lenny.  Need to patch?  Maybe use squeeze .deb? (vs. the whole --break-eggs dist upgrade)
   
   Use with --source if you just wish to have the functions available to you for testing
   
@@ -63,7 +75,7 @@ function print_libc_versions() {
 # Checking current glibc version
 local prefix=${1:-prefix}
 [ -x /usr/bin/ldd ] && /usr/bin/ldd --version | grep -i libc | awk '{print "dss:lddver:'$prefix':" $0}'  
-[ -x /usr/bin/dpkg ] && /usr/bin/dpkg -l libc-bin | grep libc-bin | awk '{print "dss:dpkg:'$prefix':" $0}'
+[ -x /usr/bin/dpkg ] && /usr/bin/dpkg -l libc6 | grep libc6 | awk '{print "dss:dpkg:'$prefix':" $0}'
 [ -x /bin/rpm ] && /bin/rpm -qa glibc | awk '{print "dss:rpmqa:'$prefix':" $0}'
 return 0
 }
@@ -78,7 +90,7 @@ function print_CVE_2015_0235_vulnerable() {
 # based on some known good package versions https://security-tracker.debian.org/tracker/CVE-2015-0235
 # http://people.canonical.com/~ubuntu-security/cve/2015/CVE-2015-0235.html
 if [ ! -x /usr/rpm -a -x /usr/bin/dpkg ]; then
-   if dpkg -l | grep libc6 | egrep -qai '2\.13-38\+deb7u7|2\.11\.3-4\+deb6u4|2\.11\.1-0ubuntu7.20|2\.15-0ubuntu10.10|2\.19-10ubuntu2'; then
+   if dpkg -l | grep libc6 | egrep -qai '2\.13-38\+deb7u7|2\.11\.3-4\+deb6u4|2\.11\.1-0ubuntu7.20|2\.15-0ubuntu10.10|2\.19-10ubuntu2|2\.19-0ubuntu6'; then
      echo "N"
      return 1
    fi
@@ -130,6 +142,7 @@ echo "dss:isvulnerable:$prefix: CVE_2015_0235$(print_CVE_2015_0235_vulnerable)"
 function print_info() {
 echo "dss:hostname: $(hostname)"
 echo "dss:date: $(date -u)"
+echo "dss:shell: $SHELL"
 echo "dss:dates: $(date -u +%s)"
 echo "dss:uptimes:$(cat /proc/uptime | awk '{print $1}')"
 echo "dss:uptime: $(uptime)"
@@ -163,6 +176,8 @@ if ! host google.com  >/dev/null 2>&1; then
 fi
 echo "dss:info: Checking for currently running exploits"
 ps auxf | grep -v '[g]host' | awk '{print "dss:psauxf:" $0}'
+echo "dss:info: Checking for room on host"
+df -m | awk '{print "dss:dfm:" $0}'
 return 0
 }
 
@@ -188,43 +203,37 @@ return 0
 
 function convert_old_ubuntu_repo() {
 [ ! -f /etc/apt/sources.list ] && return 0
+lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
+ 
 CODENAME=$1
 if [ -z "$CODENAME" ]; then echo "dss:error: We require a codename here.  e.g. convert_old_ubuntu_repo hardy"; return 1; fi
 
 ! egrep -qai "^deb.*ubuntu/ $CODENAME|^deb.*ubuntu $CODENAME" /etc/apt/sources.list && return 0
-if grep -qai '^deb .*old-releases.ubuntu.com' /etc/apt/sources.list; then echo "dss:info: Already running an 'old-releases' $CODENAME repository."; return 0; fi
+grep -qai '^deb .*old-releases.ubuntu.com' /etc/apt/sources.list && ! grep -qai "^deb.*archive.ub*$CODENAME" /etc/apt/sources.list && if ! grep -qai "^deb.*security.ub.*$CODENAME" /etc/apt/sources.list; then echo "dss:info: Already running an 'old-releases' $CODENAME repository."; return 0; fi
 
 prep_ghost_output_dir
 if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
 
-echo "dss:info: Commenting out expired $CODENAME repository and adding in the 'old-releases' repository"
+echo "dss:info: Commenting out expired $CODENAME repository"
 sed -i "s@^deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@#deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@" /etc/apt/sources.list
 sed -i "s@^deb http://security.ubuntu.com/ubuntu $CODENAME@#deb http://security.ubuntu.com/ubuntu $CODENAME@" /etc/apt/sources.list
+sed -i "s@^deb-src http://security.ubuntu.com/ubuntu $CODENAME@#deb-src http://security.ubuntu.com/ubuntu $CODENAME@" /etc/apt/sources.list
+sed -i "s@^deb\(.*\)archive\(.*\)$CODENAME@#deb\1archive\2$CODENAME@" /etc/apt/sources.list
+if ! grep -ai old-releases /etc/apt/sources.list | grep -qai "$CODENAME" /etc/apt; then
+echo "dss: Adding in the 'old-releases' repository for $CODENAME"
 echo "
 deb http://old-releases.ubuntu.com/ubuntu/ $CODENAME main restricted universe multiverse
 deb http://old-releases.ubuntu.com/ubuntu/ $CODENAME-updates main restricted universe multiverse
 deb http://old-releases.ubuntu.com/ubuntu/ $CODENAME-security main restricted universe multiverse" >> /etc/apt/sources.list
+fi
 
 return 0
 
 }
 
-
-function add_missing_squeeze_lts() {
-if [ -e /etc/apt/sources.list ] && grep -qai '^deb.*squeeze' /etc/apt/sources.list && ! grep -qai squeeze-lts /etc/apt/sources.list; then echo "
-deb http://http.debian.net/debian/ squeeze-lts main contrib non-free
-deb-src http://http.debian.net/debian/ squeeze-lts main contrib non-free
-" >> /etc/apt/sources.list
-echo "info: added missing squeeze-lts repos"
-fi 
-if [ -e /etc/apt/sources.list ] && grep -qai '^deb.*squeeze-lts' /etc/apt/sources.list ; then
-  # comment out non-lts entries
-  # the \S is for country code (.us. or .nz. etc.)
-  sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian/ squeeze@#deb http://ftp.\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
-  sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian squeeze@#deb http://ftp.\1.debian.org/debian squeeze@g"  /etc/apt/sources.list 
-  sed -i "s@^deb http://security.debian.org/ squeeze@#deb http://security.debian.org/ squeeze@" /etc/apt/sources.list
-  sed -i "s@^deb-src http://ftp.\(\S*\).debian.org/debian squeeze@#deb-src http://ftp.\1.debian.org/debian squeeze@" /etc/apt/sources.list
-  sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian/ stable@#deb http://ftp.\1.debian.org/debian/ stable@" /etc/apt/sources.list
+function add_missing_ubuntu_keys() {
+  [ ! -e /etc/apt/sources.list ] && return 0
+  [ ! -x /usr/bin/apt-key ] && return 0
   # import the lts key
   if ! apt-key list | grep -qai "46925553"; then
     echo "dss:info: installing the deb 7 2020 key"
@@ -233,21 +242,56 @@ if [ -e /etc/apt/sources.list ] && grep -qai '^deb.*squeeze-lts' /etc/apt/source
   fi
   if ! apt-key list | grep -qai "473041FA"; then
     # Debian Archive Automatic Signing Key (6.0/squeeze) <ftpmaster@debian.org>
+    echo "dss:info: installing the deb 6 key"
     gpg --recv-key AED4B06F473041FA
     gpg -a --export AED4B06F473041FA | apt-key add -
   fi
-  
+
+}
+
+function add_missing_debian_keys() {
+  [ ! -e /etc/apt/sources.list ] && return 0
+  [ ! -x /usr/bin/apt-key ] && return 0
+  # import the lts key
+  if ! apt-key list | grep -qai "46925553"; then
+    echo "dss:info: installing the deb 7 2020 key"
+    gpg --keyserver pgpkeys.mit.edu --recv-key  8B48AD6246925553      
+    gpg -a --export 8B48AD6246925553 | apt-key add -
+  fi
+  if ! apt-key list | grep -qai "473041FA"; then
+    # Debian Archive Automatic Signing Key (6.0/squeeze) <ftpmaster@debian.org>
+    echo "dss:info: installing the deb 6 key"
+    gpg --recv-key AED4B06F473041FA
+    gpg -a --export AED4B06F473041FA | apt-key add -
+  fi
+
+}
+function add_missing_squeeze_lts() {
+if [ -e /etc/apt/sources.list ] && grep -qai '^deb.*squeeze' /etc/apt/sources.list && ! grep -qai "^deb.*squeeze-lts" /etc/apt/sources.list; then echo "
+deb http://http.debian.net/debian/ squeeze-lts main contrib non-free
+deb-src http://http.debian.net/debian/ squeeze-lts main contrib non-free
+" >> /etc/apt/sources.list
+echo "info: added missing squeeze-lts repos"
+fi 
+[ -e /etc/apt/sources.list ] && if grep -qai '^deb.*squeeze-lts' /etc/apt/sources.list ; then
+  # comment out non-lts entries
+  # the \S is for country code (.us. or .nz. etc.)
+  sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian/ squeeze@#deb http://ftp.\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
+  sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian squeeze@#deb http://ftp.\1.debian.org/debian squeeze@g"  /etc/apt/sources.list 
+  sed -i "s@^deb http://security.debian.org/ squeeze@#deb http://security.debian.org/ squeeze@" /etc/apt/sources.list
+  sed -i "s@^deb-src http://ftp.\(\S*\).debian.org/debian squeeze@#deb-src http://ftp.\1.debian.org/debian squeeze@" /etc/apt/sources.list
+  sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian/ stable@#deb http://ftp.\1.debian.org/debian/ stable@" /etc/apt/sources.list
 fi
 
 return 0
 }
 
-function dist_upgrade_lenny_to_squeeze {
+function dist_upgrade_lenny_to_squeeze() {
 [ ! -e /etc/apt/sources.list ] && return 0
 if ! grep -qai '^deb.*lenny' -- /etc/apt/sources.list; then
   return 0
 fi
-if ! lsb_release -a | grep -qai lenny ; then
+if ! lsb_release -a 2>/dev/null| egrep -qai 'lenny|Linux 5' ; then
 return 0
 fi
 
@@ -265,10 +309,7 @@ export APT_LISTCHANGES_FRONTEND=text
     gpg -a --export AED4B06F473041FA | apt-key add -
   fi
 
-apt-get update
-dpkg --configure -a --force-confnew --force-confdef
-apt-get -y autoremove
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" upgrade
+apt_get_upgrade
 ret=$?
 apt-get -y autoremove
 if [ $ret -ne 0 ]; then
@@ -306,16 +347,10 @@ if ! grep -qai '^deb.*squeeze-lts' /etc/apt/sources.list; then
   echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
 fi
 
-dpkg --configure -a --force-confnew --force-confdef
-apt-get update
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" upgrade 
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
-dpkg --configure -a --force-confnew --force-confdef
-apt-get -y autoremove
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
+apt_get_dist_upgrade
 ret=$?
 if [ $ret -eq 0 ]; then
-	if lsb_release -a | grep -qai squeeze; then
+	if lsb_release -a 2>/dev/null| egrep -qai 'squeeze|Linux 6'; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are squeeze
 	  echo "dss:info: dist-upgrade from lenny to squeeze appears to have worked." 
 	  return 0; 
@@ -324,21 +359,23 @@ fi
 return 1
 }
 
-function dist_upgrade_squeeze_to_wheezy {
+function print_failed_dist_upgrade_tips() {
+  echo "In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
+  echo "In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
+  echo "after attempting a fix manuall, rerun the deghost command"
+}
+function dist_upgrade_squeeze_to_wheezy() {
 [ ! -e /etc/apt/sources.list ] && return 0
 if ! grep -qai '^deb.*squeeze' -- /etc/apt/sources.list; then
   return 0
 fi
-if ! lsb_release -a | grep -qai squeeze ; then
+if ! lsb_release -a 2>/dev/null| egrep -qai 'squeeze|inux 6' ; then
 return 0
 fi
 
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=text
-apt-get update
-dpkg --configure -a --force-confnew --force-confdef
-apt-get -y autoremove
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" upgrade
+apt_get_upgrade
 ret=$?
 apt-get -y autoremove
 if [ $ret -ne 0 ]; then
@@ -374,19 +411,14 @@ sed -i "s@^deb \(.*\)squeeze\(.*\)@#deb \1squeeze\2@" /etc/apt/sources.list
 
 if ! grep -qai '^deb.*wheezy' /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ wheezy main non-free contrib" >> /etc/apt/sources.list
+  echo "deb http://security.debian.org/ wheezy/updates main" >> /etc/apt/sources.list
   echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
 fi
 
-dpkg --configure -a --force-confnew --force-confdef
-apt-get update
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" upgrade 
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
-dpkg --configure -a --force-confnew --force-confdef
-apt-get -y autoremove
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
+apt_get_dist_upgrade
 ret=$?
 if [ $ret -eq 0 ]; then
-	if lsb_release -a | grep -qai wheeze; then
+	if lsb_release -a 2>/dev/null| egrep -qai 'wheeze|Linux 7'; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
 	  echo "dss:info: dist-upgrade from squeeze to wheezy appears to have worked." 
 	  return 0; 
@@ -396,9 +428,105 @@ return 1
 
 }
 
+function apt_get_upgrade() {
+[ ! -e /etc/apt/sources.list ] && return 1
+apt-get update
+dpkg --configure -a --force-confnew --force-confdef
+apt-get -y autoremove
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" upgrade
+ret=$?
+apt-get -y autoremove
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -f install
+if [ $ret -ne 0 ]; then
+  echo "dss:error: apt-get upgrade failed."
+  return 1
+fi
+return $ret
+}
+
+function apt_get_dist_upgrade() {
+apt_get_upgrade || return 1
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -f install
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" install dpkg
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
+# cope with 'one of those random things'
+if [ $? -ne 0] && apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade 2>&1 | grep "Could not perform immediate configuration on "; then
+  apt-get -f install libc6-dev
+  apt-get dist-upgrade -y -f -o APT::Immediate-Configure=0 -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"
+fi
+[ -e /var/log/syslog ] && [ -e /etc/my/my.cnf ] && if grep "unknown variable 'lc-messages-dir" /var/log/syslog; then
+  #lc-messages-dir        = /usr/share/mysql...
+  echo "dss: info: commenting out the my.cnf lc-messages-dir directive in case it is causing problems" 
+  sed -i "s@^lc-messages-dir\(.*\)@#lc-messages-dir\1@" /etc/my/my.cnf
+fi
+
+dpkg --configure -a --force-confnew --force-confdef
+apt-get -y autoremove
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
+return $?
+}
+
+
+function dist_upgrade_ubuntu_to_latest() {
+[ ! -e /etc/apt/sources.list ] && return 0
+lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
+export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=text
+
+apt_get_upgrade
+local candidates="$ALL_UBUNTU"
+for start in $ALL_UBUNTU; do 
+  current=$(lsb_release -a 2>/dev/null| grep -i Codename | awk '{print $2}')
+  # remove distros prior to us
+  candidates="$(echo $candidates | sed "s/$start//")"
+  candidates="$(echo $candidates | sed "s/$current//")"
+  # keep looping till we find our current distro
+  if [ "$current" != "$start" ]; then continue; fi
+  # all done
+  if [ -z "$candidates" ]; then return 0; fi
+  # if we are currently an lts, then we can move from lts to next lts and skip over the non-lts ones
+  if echo $LTS_UBUNTU | grep -qai $current; then
+    for remove in $NON_LTS_UBUNTU; do
+       candidates="$(echo $candidates | sed "s/$remove//")"
+    done
+  fi 
+  # comment out current sources entries
+  prep_ghost_output_dir
+  if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+  sed -i "s@^deb \(.*\)ubuntu.com\(.*\)@#deb \1ubuntu.com\2@" /etc/apt/sources.list
+  echo "dss:info: attempting a dist-upgrade from $current to $next."
+  # add in new repo names
+  local next=$(echo $candidates | awk '{print $1}')
+  if [ -z "$next" ]; then return 0; fi
+  if echo $UNSUPPORTED_UBUNTU | grep -qai $next; then
+    echo "deb http://old-releases.ubuntu.com/ubuntu/ $next main restricted universe multiverse" >> /etc/apt/sources.list
+    echo "deb http://old-releases.ubuntu.com/ubuntu/ $next-updates main restricted universe multiverse" >> /etc/apt/sources.list
+    echo "deb http://old-releases.ubuntu.com/ubuntu/ $next-security main restricted universe multiverse" >> /etc/apt/sources.list    
+  else
+    echo "deb http://archive.ubuntu.com/ubuntu/ $next main universe" >> /etc/apt/sources.list
+    echo "deb http://security.ubuntu.com/ubuntu/ $next-security main universe" >> /etc/apt/sources.list
+    echo "deb http://archive.ubuntu.com/ubuntu/ $next-updates main universe" >> /etc/apt/sources.list 
+  fi 
+  
+apt_get_dist_upgrade
+ret=$?
+if [ $ret -eq 0 ]; then
+  if lsb_release -a 2>/dev/null| grep -qai $next; then
+    # dist-upgrade returned ok, and lsb_release thinks we are wheezy
+    echo "dss:info: dist-upgrade from $current to $next appears to have worked." 
+    continue; 
+  fi
+  ret=1
+fi
+return $ret
+done
+
+}
+
 function convert_old_debian_repo() {
 # no apt sources nothing to do
 [ ! -f /etc/apt/sources.list ] && return 0
+lsb_release -a 2>/dev/null | grep -qai Ubuntu && return 0
 
 #deb http://http.us.debian.org/debian sarge main contrib non-free
 #deb http://non-us.debian.org/debian-non-US sarge/non-US main contrib non-free
@@ -410,7 +538,7 @@ function convert_old_debian_repo() {
 
 for name in lenny etch woody sarge; do 
 # no lenny stuff, nothing to do
-! grep -qai "^deb.*$name" /etc/apt/sources.list && continue
+! grep -qai "^deb.*debian.*$name" /etc/apt/sources.list && continue
 
 # already using archives, all good
 if grep -qai "^deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
@@ -465,13 +593,13 @@ if ! which dpkg >/dev/null 2>&1; then
   # echo "dss:info: dpkg not installed.  Skipping apt-get install"; 
   return 0; 
 fi
-if print_distro_info | grep Ubuntu | egrep -qai "$(echo $EOL_UBUNTU_DISTROS | sed 's/ /|/')"; then 
+if print_distro_info | grep Ubuntu | egrep -qai "$(echo $UNSUPPORTED_UBUNTU | sed 's/ /|/')"; then 
   echo "dss:info: Running an EOL Ubuntu.  Not doing an apt-get install -y libc6.  $(print_distro_info)"
   return 0
 fi
 
 if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then 
-  echo "dss:info: Attempting to apt-get install glibc"
+  echo "dss:info: Attempting to apt-get install libc6"
   apt-get update
   ret=$?
   if [ $ret -ne 0 ]; then
@@ -481,8 +609,20 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   POLICY_INSTALLED=$(echo $POLICY | grep Installed | sed -e   's/.*Installed: \(\S*\).*/\1/')
   POLICY_CANDIDATE=$(echo $POLICY | grep Candidate | sed -e   's/.*Candidate: \(\S*\).*/\1/')
   if [ ! -z "$POLICY_INSTALLED" -a "$POLICY_INSTALLED" == "$POLICY_CANDIDATE" ]; then
-    echo "dss:info: latest libc6 package already installed"
-    return 0
+    echo "dss:info: apt-cache policy reports the latest libc6 package already installed"
+    if grep -qai '^deb.*wheezy' /etc/apt/sources.list && ! grep -qai '^deb.*security\.deb.*wheezy' /etc/apt/sources.list; then
+       echo "dss:info: adding the wheezy security repository to the sources.list"
+       prep_ghost_output_dir
+       if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+       echo "deb http://security.debian.org/ wheezy/updates main" >> /etc/apt/sources.list
+       apt-get update
+    else
+      return 0
+    fi
+  fi
+  if [ 0 -ne $(find /var/lib/dpkg/updates -type f) ]; then
+    echo "dss:info: looks like there were some pending updates.  checking if they need configuring before proceeding with the libc6 install"
+    dpkg --configure -a --force-confnew --force-confdef
   fi
   apt-get -y install libc6
   ret=$?
@@ -594,6 +734,11 @@ return 1
 function fix_centos5_plus_via_yum_install() {
   is_fixed && return 0 
 if ! print_distro_info | egrep -i 'redhat|centos' | egrep -qai 'release.* 5|release.* 6|release.* 7' ; then return 0; fi
+if rpm -qa 2>&1 | grep -qai rpmdbnextiter ; then
+  # e.g. error: rpmdbNextIterator: skipping h#     489 Header V3 RSA/SHA256 Signature, key ID c105b9de: BAD
+  echo "dss:info: rpm database errors.  rebuilding the rpm db"
+  rpm --rebuilddb
+fi
 echo "dss:info: Doing a centos5-7 fix for $(print_distro_info)"
 if [ ! -x /usr/bin/yum ] ; then 
   #rpm http://centos5.rimuhosting.com/centos /5 os updates rimuhosting addons extras centosplus
@@ -647,7 +792,7 @@ convert_old_debian_repo || return $?
 
 # https://wiki.ubuntu.com/Releases
 # lucid server still current?
-for distro in $EOL_UBUNTU_DISTROS; do 
+for distro in $UNSUPPORTED_UBUNTU; do 
   convert_old_ubuntu_repo $distro || return $?
 done
 add_missing_squeeze_lts || return $?
@@ -664,6 +809,7 @@ report_unsupported || return $?
 return 0
 }
 
+ret=0
 if [ "--usage" = "${ACTION:-$1}" ] ; then
   print_usage
 elif [ "--check" = "${ACTION:-$1}" ] ; then
@@ -672,11 +818,31 @@ elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
   dist_upgrade_squeeze_to_wheezy
+  ret=$?
+  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
+  print_info
+  dist_upgrade_ubuntu_to_latest
+  ret=$?
+  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
+  ret=$?
+  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--source" = "${ACTION:-$1}" ] ; then 
   echo "dss: Loading deghost functions"
+elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then 
+  run
+  ret=$?
+  if ! is_fixed; then
+    dist_upgrade_lenny_to_squeeze
+    dist_upgrade_squeeze_to_wheezy
+    dist_upgrade_ubuntu_to_latest
+  fi
+  print_libc_versions afterfix
+  print_vulnerability_status afterfix
+  if [ $ret -eq 0 ] ; then true ; else false; fi
 else 
   run
   ret=$?

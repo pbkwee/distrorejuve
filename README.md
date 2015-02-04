@@ -3,6 +3,8 @@ deghost is a cross-distro script to determine the vulnerability of a libc librar
 
 deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
 
+See also http://rimuhosting.com/maintenance.jsp?server_maint_oid=195331653
+
 Attempts to fix:
 
     - Debian 7 => apt-get install

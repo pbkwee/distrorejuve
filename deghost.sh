@@ -1,5 +1,4 @@
 #!/bin/bash
-grep root /etc/passwd | grep tcsh &&  echo "dss:error: deghost.sh needs to be run as a script, rather than a set of commands on a tsch shell." && exit 1
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=text
 
@@ -14,6 +13,8 @@ function print_usage() {
   echo "deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235) and then patch that where possible.
 
 deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
+
+See also http://rimuhosting.com/maintenance.jsp?server_maint_oid=195331653
 
 Attempts to fix:
 
@@ -39,11 +40,15 @@ Potential improvements to come:
   
   Run with --check if you just wish to check, but not change your server
   
+  Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (supported) to wheezy (latest).  Note caveats above.
+  
+  Run with --break-eggs to dist upgrade any ubuntu to the latest LTS.  Note caveats above.
+  
   Run with --usage to get this message
   
   Run without an argument to try and fix your server
   
-  Written by Peter Bryant at http://lauchtimevps.com
+  Written by Peter Bryant at http://launchtimevps.com
   
   Latest version (or thereabouts) will be available at https://github.com/pbkwee/deghost
   "

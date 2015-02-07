@@ -103,16 +103,23 @@ if [ ! -x /usr/rpm -a -x /usr/bin/dpkg ]; then
      echo "Y"
      return 0
    fi
+   # some more that are probably also old/vuln
+   if dpkg -l | grep libc6 | egrep -qai '2\.4-1ubuntu12\.3|2\.10\.1-0ubuntu19|2\.10\.2-1    2\.11\.1-0ubuntu7|2\.11\.2-5|2\.13-38|2\.2\.5-11\.5|2\.2\.5-11\.8|2\.3\.2\.ds1-22|2\.3\.2\.ds1-22sa|2\.3\.6\.ds1-13|2\.3\.6\.ds1-13et|2\.3\.6\.ds1-13etch10|2\.3\.6\.ds1-13etch10+b1|2\.3\.6\.ds1-13etch2|2\.3\.6\.ds1-13etch8|2\.3\.6\.ds1-13etch9+b1|2\.3\.6\.ds1-8|2\.5-0ubuntu14|2\.6\.1-1ubuntu10|2\.7-10ubuntu4|2\.7-10ubuntu8\.3|2\.7-18|2\.7-18lenny2|2\.7-18lenny4|2\.8~20080505-0ubuntu9|2\.9-4ubuntu6\.3'; then
+     echo "Y"
+     return 0
+   fi
    echo "?"
    return 2
 fi
-rv=1
+vuln=0
+nonvuln=0
+unknown=0
 for glibc_nvr in $( rpm -q --qf '%{name}-%{version}-%{release}.%{arch}\n' glibc ); do
     glibc_ver=$( echo "$glibc_nvr" | awk -F- '{ print $2 }' )
     glibc_maj=$( echo "$glibc_ver" | awk -F. '{ print $1 }')
     glibc_min=$( echo "$glibc_ver" | awk -F. '{ print $2 }')
     if [ -z "$glibc_maj" -o -z "$glibc_maj" -o -z "$glibc_min" ]; then
-      rv=2
+      unknown=$(($unknown+1))
       continue
     fi
     #echo -n "- $glibc_nvr: "
@@ -120,22 +127,24 @@ for glibc_nvr in $( rpm -q --qf '%{name}-%{version}-%{release}.%{arch}\n' glibc 
         \( "$glibc_maj" -eq 2  -a  "$glibc_min" -ge 18 \) ]; then
         # fixed upstream version
         # echo 'not vulnerable'
-        true
+        nonvuln=$(($nonvuln+1))
     else
         # all RHEL updates include CVE in rpm %changelog
         if rpm -q --changelog "$glibc_nvr" | grep -q 'CVE-2015-0235'; then
             #echo "not vulnerable"
-            true
+            nonvuln=$(($nonvuln+1))
         else
             #echo "vulnerable"
-            rv=0
+            vuln=$(($vuln+1))
         fi
     fi
 done
 
-if [ $rv -eq 0 ] ; then echo "Y"; return 0; fi
-echo "N"
-return 1
+if [ $vuln -gt 0 ] ; then echo "Y"; return 0; fi
+if [ $unknown -gt 0 ]; then echo "?"; return 2; fi
+if [ $nonvuln -gt 0 ] ; then echo "N"; return 1; fi
+echo "?"
+return 2
 }
 
 # use print_vulnerability_status beforefix and print_vulnerability_status afterfix
@@ -239,28 +248,19 @@ return 0
 function add_missing_ubuntu_keys() {
   [ ! -e /etc/apt/sources.list ] && return 0
   [ ! -x /usr/bin/apt-key ] && return 0
+  print_distro_info | grep -qai ubuntu || return 0
   # import the lts key
-  if ! apt-key list | grep -qai "46925553"; then
-    echo "dss:info: installing the deb 7 2020 key"
-    gpg --keyserver pgpkeys.mit.edu --recv-key  8B48AD6246925553      
-    gpg -a --export 8B48AD6246925553 | apt-key add -
-  fi
-  if ! apt-key list | grep -qai "473041FA"; then
-    # Debian Archive Automatic Signing Key (6.0/squeeze) <ftpmaster@debian.org>
-    echo "dss:info: installing the deb 6 key"
-    gpg --recv-key AED4B06F473041FA
-    gpg -a --export AED4B06F473041FA | apt-key add -
-  fi
 
 }
 
 function add_missing_debian_keys() {
   [ ! -e /etc/apt/sources.list ] && return 0
   [ ! -x /usr/bin/apt-key ] && return 0
+  print_distro_info | grep -qai debian || return 0
   # import the lts key
   if ! apt-key list | grep -qai "46925553"; then
     echo "dss:info: installing the deb 7 2020 key"
-    gpg --keyserver pgpkeys.mit.edu --recv-key  8B48AD6246925553      
+    if ! gpg --recv-key  8B48AD6246925553 ; then gpg --keyserver pgpkeys.mit.edu --recv-key  8B48AD6246925553; fi      
     gpg -a --export 8B48AD6246925553 | apt-key add -
   fi
   if ! apt-key list | grep -qai "473041FA"; then
@@ -302,17 +302,7 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=text
-  # import the lts key
-  if ! apt-key list | grep -qai "46925553"; then
-    echo "dss:info: installing the deb 7 2020 key"
-    if ! gpg --recv-key  8B48AD6246925553 ; then gpg --keyserver pgpkeys.mit.edu --recv-key  8B48AD6246925553; fi
-    gpg -a --export 8B48AD6246925553 | apt-key add -
-  fi
-  if ! apt-key list | grep -qai "473041FA"; then
-    # Debian Archive Automatic Signing Key (6.0/squeeze) <ftpmaster@debian.org>
-    gpg --recv-key AED4B06F473041FA
-    gpg -a --export AED4B06F473041FA | apt-key add -
-  fi
+  add_missing_debian_keys
 
 apt_get_upgrade
 ret=$?
@@ -598,6 +588,9 @@ if ! which dpkg >/dev/null 2>&1; then
   # echo "dss:info: dpkg not installed.  Skipping apt-get install"; 
   return 0; 
 fi
+add_missing_debian_keys
+add_missing_ubuntu_keys
+
 if print_distro_info | grep Ubuntu | egrep -qai "$(echo $UNSUPPORTED_UBUNTU | sed 's/ /|/')"; then 
   echo "dss:info: Running an EOL Ubuntu.  Not doing an apt-get install -y libc6.  $(print_distro_info)"
   return 0
@@ -625,7 +618,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
       return 0
     fi
   fi
-  if [ 0 -ne $(find /var/lib/dpkg/updates -type f) ]; then
+  if [ -d /var/lib/dpkg/updates ] && [ 0 -ne $(find /var/lib/dpkg/updates -type f | wc -l) ]; then
     echo "dss:info: looks like there were some pending updates.  checking if they need configuring before proceeding with the libc6 install"
     dpkg --configure -a --force-confnew --force-confdef
   fi

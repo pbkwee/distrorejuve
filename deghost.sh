@@ -95,7 +95,7 @@ function print_CVE_2015_0235_vulnerable() {
 # based on some known good package versions https://security-tracker.debian.org/tracker/CVE-2015-0235
 # http://people.canonical.com/~ubuntu-security/cve/2015/CVE-2015-0235.html
 if [ ! -x /usr/rpm -a -x /usr/bin/dpkg ]; then
-   if dpkg -l | grep libc6 | egrep -qai '2\.13-38\+deb7u7|2\.11\.3-4\+deb6u4|2\.11\.1-0ubuntu7.20|2\.15-0ubuntu10.10|2\.19-10ubuntu2|2\.19-0ubuntu6'; then
+   if dpkg -l | grep libc6 | egrep -qai '2\.19-13|2\.19-15|2\.13-38\+deb7u7|2\.11\.3-4\+deb6u4|2\.11\.1-0ubuntu7.20|2\.15-0ubuntu10.10|2\.19-10ubuntu2|2\.19-0ubuntu6'; then
      echo "N"
      return 1
    fi

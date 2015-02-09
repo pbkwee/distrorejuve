@@ -300,6 +300,12 @@ if ! lsb_release -a 2>/dev/null| egrep -qai 'lenny|Linux 5' ; then
 return 0
 fi
 
+if dpkg -l | grep -qai dovecot; then
+  echo "changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
+  echo "apt-get remove dovecot-core if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
+  return 1
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=text
   add_missing_debian_keys
@@ -445,7 +451,7 @@ apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-conf
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" install dpkg
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
 # cope with 'one of those random things'
-if [ $? -ne 0] && apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade 2>&1 | grep "Could not perform immediate configuration on "; then
+if [ $? -ne 0 ] && apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade 2>&1 | grep "Could not perform immediate configuration on "; then
   apt-get -f install libc6-dev
   apt-get dist-upgrade -y -f -o APT::Immediate-Configure=0 -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"
 fi
@@ -465,6 +471,13 @@ return $?
 function dist_upgrade_ubuntu_to_latest() {
 [ ! -e /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
+
+if dpkg -l | grep -qai dovecot; then
+  echo "changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
+  echo "apt-get remove dovecot-core if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
+  return 1
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=text
 

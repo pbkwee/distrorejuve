@@ -205,13 +205,13 @@ if [ ! -f /etc/apt/sources.list  ]; then echo "dss:warn: Odd.  Debian distro but
 # 6.0.4
 if ! grep -qai "^6." /etc/debian_version; then return 0; fi
 
-if ! grep -qai "^deb.*stable" /etc/apt/sources.list ; then echo "dss:info: Not using 'stable' repo.  Not converting deb6 stable to squeeze"; return 0; fi
+if ! grep -qai "^ *deb.*stable" /etc/apt/sources.list ; then echo "dss:info: Not using 'stable' repo.  Not converting deb6 stable to squeeze"; return 0; fi
 
 prep_ghost_output_dir
 if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
 
-sed -i 's@^deb http://http.\(\S*\).debian.org/debian stable@deb http://http.\1.debian.org/debian squeeze@' /etc/apt/sources.list
-sed -i 's@^deb http://security.debian.org stable@deb http://security.debian.org squeeze@' /etc/apt/sources.list
+sed -i 's@^ *deb http://http.\(\S*\).debian.org/debian stable@deb http://http.\1.debian.org/debian squeeze@' /etc/apt/sources.list
+sed -i 's@^ *deb http://security.debian.org stable@deb http://security.debian.org squeeze@' /etc/apt/sources.list
 return 0
 }
 
@@ -222,17 +222,17 @@ lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
 CODENAME=$1
 if [ -z "$CODENAME" ]; then echo "dss:error: We require a codename here.  e.g. convert_old_ubuntu_repo hardy"; return 1; fi
 
-! egrep -qai "^deb.*ubuntu/ $CODENAME|^deb.*ubuntu $CODENAME" /etc/apt/sources.list && return 0
-grep -qai '^deb .*old-releases.ubuntu.com' /etc/apt/sources.list && ! grep -qai "^deb.*archive.ub*$CODENAME" /etc/apt/sources.list && if ! grep -qai "^deb.*security.ub.*$CODENAME" /etc/apt/sources.list; then echo "dss:info: Already running an 'old-releases' $CODENAME repository."; return 0; fi
+! egrep -qai "^ *deb.*ubuntu/ $CODENAME|^ *deb.*ubuntu $CODENAME" /etc/apt/sources.list && return 0
+grep -qai '^ *deb .*old-releases.ubuntu.com' /etc/apt/sources.list && ! grep -qai "^ *deb.*archive.ub*$CODENAME" /etc/apt/sources.list && if ! grep -qai "^ *deb.*security.ub.*$CODENAME" /etc/apt/sources.list; then echo "dss:info: Already running an 'old-releases' $CODENAME repository."; return 0; fi
 
 prep_ghost_output_dir
 if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
 
 echo "dss:info: Commenting out expired $CODENAME repository"
-sed -i "s@^deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@#deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@" /etc/apt/sources.list
-sed -i "s@^deb http://security.ubuntu.com/ubuntu $CODENAME@#deb http://security.ubuntu.com/ubuntu $CODENAME@" /etc/apt/sources.list
-sed -i "s@^deb-src http://security.ubuntu.com/ubuntu $CODENAME@#deb-src http://security.ubuntu.com/ubuntu $CODENAME@" /etc/apt/sources.list
-sed -i "s@^deb\(.*\)archive\(.*\)$CODENAME@#deb\1archive\2$CODENAME@" /etc/apt/sources.list
+sed -i "s@^ *deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@#deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@" /etc/apt/sources.list
+sed -i "s@^ *deb http://security.ubuntu.com/ubuntu $CODENAME@#deb http://security.ubuntu.com/ubuntu $CODENAME@" /etc/apt/sources.list
+sed -i "s@^ *deb-src http://security.ubuntu.com/ubuntu $CODENAME@#deb-src http://security.ubuntu.com/ubuntu $CODENAME@" /etc/apt/sources.list
+sed -i "s@^ *deb\(.*\)archive\(.*\)$CODENAME@#deb\1archive\2$CODENAME@" /etc/apt/sources.list
 if ! grep -ai old-releases /etc/apt/sources.list | grep -qai "$CODENAME" /etc/apt; then
 echo "dss: Adding in the 'old-releases' repository for $CODENAME"
 echo "
@@ -272,20 +272,20 @@ function add_missing_debian_keys() {
 
 }
 function add_missing_squeeze_lts() {
-if [ -e /etc/apt/sources.list ] && grep -qai '^deb.*squeeze' /etc/apt/sources.list && ! grep -qai "^deb.*squeeze-lts" /etc/apt/sources.list; then echo "
+if [ -e /etc/apt/sources.list ] && grep -qai '^ *deb.*squeeze' /etc/apt/sources.list && ! grep -qai "^ *deb.*squeeze-lts" /etc/apt/sources.list; then echo "
 deb http://http.debian.net/debian/ squeeze-lts main contrib non-free
 deb-src http://http.debian.net/debian/ squeeze-lts main contrib non-free
 " >> /etc/apt/sources.list
 echo "info: added missing squeeze-lts repos"
 fi 
-[ -e /etc/apt/sources.list ] && if grep -qai '^deb.*squeeze-lts' /etc/apt/sources.list ; then
+[ -e /etc/apt/sources.list ] && if grep -qai '^ *deb.*squeeze-lts' /etc/apt/sources.list ; then
   # comment out non-lts entries
   # the \S is for country code (.us. or .nz. etc.)
-  sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian/ squeeze@#deb http://ftp.\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
-  sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian squeeze@#deb http://ftp.\1.debian.org/debian squeeze@g"  /etc/apt/sources.list 
-  sed -i "s@^deb http://security.debian.org/ squeeze@#deb http://security.debian.org/ squeeze@" /etc/apt/sources.list
-  sed -i "s@^deb-src http://ftp.\(\S*\).debian.org/debian squeeze@#deb-src http://ftp.\1.debian.org/debian squeeze@" /etc/apt/sources.list
-  sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian/ stable@#deb http://ftp.\1.debian.org/debian/ stable@" /etc/apt/sources.list
+  sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian/ squeeze@#deb http://ftp.\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
+  sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian squeeze@#deb http://ftp.\1.debian.org/debian squeeze@g"  /etc/apt/sources.list 
+  sed -i "s@^ *deb http://security.debian.org/ squeeze@#deb http://security.debian.org/ squeeze@" /etc/apt/sources.list
+  sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian squeeze@#deb-src http://ftp.\1.debian.org/debian squeeze@" /etc/apt/sources.list
+  sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian/ stable@#deb http://ftp.\1.debian.org/debian/ stable@" /etc/apt/sources.list
 fi
 
 return 0
@@ -293,7 +293,7 @@ return 0
 
 function dist_upgrade_lenny_to_squeeze() {
 [ ! -e /etc/apt/sources.list ] && return 0
-if ! grep -qai '^deb.*lenny' -- /etc/apt/sources.list; then
+if ! grep -qai '^ *deb.*lenny' -- /etc/apt/sources.list; then
   return 0
 fi
 if ! lsb_release -a 2>/dev/null| egrep -qai 'lenny|Linux 5' ; then
@@ -319,10 +319,10 @@ if [ $ret -ne 0 ]; then
 fi
   
 for name in lenny ; do 
-! grep -qai "^deb.*$name" /etc/apt/sources.list && continue
+! grep -qai "^ *deb.*$name" /etc/apt/sources.list && continue
 
 # already using archives, all good
-if grep -qai "^deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
+if grep -qai "^ *deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
   echo "dss:info: This is a $name distro, and already has archive.debian in the repository."
   continue
 fi
@@ -331,18 +331,18 @@ prep_ghost_output_dir
 if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
 
 # comment out the old entries
-sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
-sed -i "s@^deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
-sed -i "s@^deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
-sed -i "s@^deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
+sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
+sed -i "s@^ *deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
 done
 
 # disable the archive repositories
-sed -i "s@^deb http://archive.debian.org@#deb http://archive.debian.org@" /etc/apt/sources.list
+sed -i "s@^ *deb http://archive.debian.org@#deb http://archive.debian.org@" /etc/apt/sources.list
 
-if ! grep -qai '^deb.*squeeze-lts' /etc/apt/sources.list; then
+if ! grep -qai '^ *deb.*squeeze-lts' /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ squeeze main non-free contrib" >> /etc/apt/sources.list
   echo "deb http://http.us.debian.org/debian/ squeeze-lts main non-free contrib" >> /etc/apt/sources.list
   echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
@@ -367,7 +367,7 @@ function print_failed_dist_upgrade_tips() {
 }
 function dist_upgrade_squeeze_to_wheezy() {
 [ ! -e /etc/apt/sources.list ] && return 0
-if ! grep -qai '^deb.*squeeze' -- /etc/apt/sources.list; then
+if ! grep -qai '^ *deb.*squeeze' -- /etc/apt/sources.list; then
   return 0
 fi
 if ! lsb_release -a 2>/dev/null| egrep -qai 'squeeze|inux 6' ; then
@@ -385,10 +385,10 @@ if [ $ret -ne 0 ]; then
 fi
   
 for name in squeeze squeeze-lts ; do 
-! grep -qai "^deb.*$name" /etc/apt/sources.list && continue
+! grep -qai "^ *deb.*$name" /etc/apt/sources.list && continue
 
 # already using archives, all good
-if grep -qai "^deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
+if grep -qai "^ *deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
   echo "dss:info: This is a $name distro, and already has archive.debian in the repository."
   continue
 fi
@@ -397,20 +397,20 @@ prep_ghost_output_dir
 if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
 
 # comment out the old entries
-sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
-sed -i "s@^deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
-sed -i "s@^deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
-sed -i "s@^deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
+sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
+sed -i "s@^ *deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
 done
 
 # disable the archive repositories
-sed -i "s@^deb http://archive.debian.org@#deb http://archive.debian.org@" /etc/apt/sources.list
+sed -i "s@^ *deb http://archive.debian.org@#deb http://archive.debian.org@" /etc/apt/sources.list
 # disable the squeeze repositories.  e.g. deb http://http.us.debian.org/debian/ squeeze-lts main non-free contrib
-sed -i "s@^deb \(.*\)squeeze\(.*\)@#deb \1squeeze\2@" /etc/apt/sources.list
+sed -i "s@^ *deb \(.*\)squeeze\(.*\)@#deb \1squeeze\2@" /etc/apt/sources.list
 
-if ! grep -qai '^deb.*wheezy' /etc/apt/sources.list; then
+if ! grep -qai '^ *deb.*wheezy' /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ wheezy main non-free contrib" >> /etc/apt/sources.list
   echo "deb http://security.debian.org/ wheezy/updates main" >> /etc/apt/sources.list
   echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
@@ -501,7 +501,8 @@ for start in $ALL_UBUNTU; do
   # comment out current sources entries
   prep_ghost_output_dir
   if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
-  sed -i "s@^deb \(.*\)ubuntu.com\(.*\)@#deb \1ubuntu.com\2@" /etc/apt/sources.list
+  # comment out package entries
+  sed -i "s@^ *deb \(.*\)ubuntu.com\(.*\)@#deb \1ubuntu.com\2@" /etc/apt/sources.list
   echo "dss:info: attempting a dist-upgrade from $current to $next."
   # add in new repo names
   local next=$(echo $candidates | awk '{print $1}')
@@ -546,10 +547,10 @@ lsb_release -a 2>/dev/null | grep -qai Ubuntu && return 0
 
 for name in lenny etch woody sarge; do 
 # no lenny stuff, nothing to do
-! grep -qai "^deb.*debian.*$name" /etc/apt/sources.list && continue
+! grep -qai "^ *deb.*debian.*$name" /etc/apt/sources.list && continue
 
 # already using archives, all good
-if grep -qai "^deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
+if grep -qai "^ *deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
   echo "dss:info: This is a $name distro, and already has archive.debian in the repository."
   continue
 fi
@@ -558,12 +559,12 @@ prep_ghost_output_dir
 if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
 
 # comment out the old entries
-sed -i "s@^deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
-sed -i "s@^deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
-sed -i "s@^deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
-sed -i "s@^deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
+sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
+sed -i "s@^ *deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
 
 echo "deb http://archive.debian.org/debian/ $name main non-free contrib" >> /etc/apt/sources.list
 echo "dss:info: $name apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
@@ -621,7 +622,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   POLICY_CANDIDATE=$(echo $POLICY | grep Candidate | sed -e   's/.*Candidate: \(\S*\).*/\1/')
   if [ ! -z "$POLICY_INSTALLED" -a "$POLICY_INSTALLED" == "$POLICY_CANDIDATE" ]; then
     echo "dss:info: apt-cache policy reports the latest libc6 package already installed"
-    if grep -qai '^deb.*wheezy' /etc/apt/sources.list && ! grep -qai '^deb.*security\.deb.*wheezy' /etc/apt/sources.list; then
+    if grep -qai '^ *deb.*wheezy' /etc/apt/sources.list && ! grep -qai '^ *deb.*security\.deb.*wheezy' /etc/apt/sources.list; then
        echo "dss:info: adding the wheezy security repository to the sources.list"
        prep_ghost_output_dir
        if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi

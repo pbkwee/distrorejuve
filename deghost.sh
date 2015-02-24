@@ -516,7 +516,8 @@ for start in $ALL_UBUNTU; do
     echo "deb http://security.ubuntu.com/ubuntu/ $next-security main universe" >> /etc/apt/sources.list
     echo "deb http://archive.ubuntu.com/ubuntu/ $next-updates main universe" >> /etc/apt/sources.list 
   fi 
-  
+  # Old apache version contains 'Include /etc/apache2/httpd.conf'. Can be 'touch'ed to recreate
+  [ -d /etc/apache2 ] && [ ! -f /etc/apache2/httpd.conf ] && touch /etc/apache2/httpd.conf
 apt_get_dist_upgrade
 ret=$?
 if [ $ret -eq 0 ]; then

@@ -46,6 +46,12 @@ Potential improvements to come:
   
   Run with --usage to get this message
   
+  Run with --to-wheezy to get from squeeze to wheezy
+  
+  Run with --to-jessie to get from squeeze or lenny or wheezy to jessie (8)
+  
+  Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
+  
   Run without an argument to try and fix your server
   
   Written by Peter Bryant at http://launchtimevps.com
@@ -366,11 +372,25 @@ function print_failed_dist_upgrade_tips() {
   echo "after attempting a fix manuall, rerun the deghost command"
 }
 function dist_upgrade_squeeze_to_wheezy() {
+export old_distro=squeeze
+export old_ver="inux 6"
+export new_distro=wheezy
+dist_upgrade_x_to_y
+}
+
+function dist_upgrade_wheezy_to_jessie() {
+export old_distro=wheezy
+export old_ver="inux 7"
+export new_distro=jessie
+dist_upgrade_x_to_y
+}
+
+function dist_upgrade_x_to_y() {
 [ ! -e /etc/apt/sources.list ] && return 0
-if ! grep -qai '^ *deb.*squeeze' -- /etc/apt/sources.list; then
+if ! grep -qai "^ *deb.*$old_distro" -- /etc/apt/sources.list; then
   return 0
 fi
-if ! lsb_release -a 2>/dev/null| egrep -qai 'squeeze|inux 6' ; then
+if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
 return 0
 fi
 
@@ -380,11 +400,11 @@ apt_get_upgrade
 ret=$?
 apt-get -y autoremove
 if [ $ret -ne 0 ]; then
-  echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_squeeze_to_wheezy"
+  echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_${old_distro}_to_${new_distro}"
   return 1
 fi
   
-for name in squeeze squeeze-lts ; do 
+for name in $old_distro ${old_distro}-lts ; do 
 ! grep -qai "^ *deb.*$name" /etc/apt/sources.list && continue
 
 # already using archives, all good
@@ -408,20 +428,21 @@ done
 # disable the archive repositories
 sed -i "s@^ *deb http://archive.debian.org@#deb http://archive.debian.org@" /etc/apt/sources.list
 # disable the squeeze repositories.  e.g. deb http://http.us.debian.org/debian/ squeeze-lts main non-free contrib
-sed -i "s@^ *deb \(.*\)squeeze\(.*\)@#deb \1squeeze\2@" /etc/apt/sources.list
+sed -i "s@^ *deb \(.*\)${old_distro}\(.*\)@#deb \1${old_distro}\2@" /etc/apt/sources.list
 
-if ! grep -qai '^ *deb.*wheezy' /etc/apt/sources.list; then
-  echo "deb http://http.us.debian.org/debian/ wheezy main non-free contrib" >> /etc/apt/sources.list
-  echo "deb http://security.debian.org/ wheezy/updates main" >> /etc/apt/sources.list
+if ! grep -qai "^ *deb.*${new_distro}" /etc/apt/sources.list; then
+  echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
+  echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
   echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
 fi
 
 apt_get_dist_upgrade
 ret=$?
+apt-get -y autoremove
 if [ $ret -eq 0 ]; then
-	if lsb_release -a 2>/dev/null| egrep -qai 'wheeze|Linux 7'; then
+	if lsb_release -a 2>/dev/null| egrep -qai '${new_distro}'; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
-	  echo "dss:info: dist-upgrade from squeeze to wheezy appears to have worked." 
+	  echo "dss:info: dist-upgrade from ${old_distro} to ${new_distro} appears to have worked." 
 	  return 0; 
 	fi
 fi
@@ -831,6 +852,13 @@ elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
   dist_upgrade_squeeze_to_wheezy
+  ret=$?
+  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
+  print_info
+  dist_upgrade_lenny_to_squeeze
+  dist_upgrade_squeeze_to_wheezy
+  dist_upgrade_wheezy_to_jessie
   ret=$?
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then

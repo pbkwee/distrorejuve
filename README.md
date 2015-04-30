@@ -1,4 +1,5 @@
-# deghost
+#deghost
+
 deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235) and then patch that where possible.
 
 deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
@@ -24,19 +25,28 @@ No action available for the following (and older) distros:
 Potential improvements to come:
 
     - Lenny.  Need to patch?  Maybe use squeeze .deb? (vs. the whole --break-eggs dist upgrade)
+
+Arguments:
   
-  Use with --source if you just wish to have the functions available to you for testing
-  
-  Run with --check if you just wish to check, but not change your server
-  
-  Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (supported) to wheezy (latest).  Note caveats above.
-  
-  Run with --break-eggs to dist upgrade any ubuntu to the latest LTS.  Note caveats above.
-  
-  Run with --usage to get this message
-  
-  Run without an argument to try and fix your server
-  
-  Written by Peter Bryant at http://launchtimevps.com
-  
-  Latest version (or thereabouts) will be available at https://github.com/pbkwee/deghost
+Use with --source if you just wish to have the functions available to you for testing
+
+Run with --check if you just wish to check, but not change your server
+
+Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (supported) to wheezy (latest).  Note caveats above.
+
+Run with --break-eggs to dist upgrade any ubuntu to the latest LTS.  Note caveats above.
+
+Run with --usage to get this message
+
+Run with --to-wheezy to get from squeeze to wheezy
+
+Run with --to-jessie to get from squeeze or lenny or wheezy to jessie (8)
+
+Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
+
+Run without an argument to try and fix your server
+
+Written by Peter Bryant at http://launchtimevps.com
+
+Latest version (or thereabouts) will be available at https://github.com/pbkwee/deghost
+

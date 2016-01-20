@@ -297,10 +297,8 @@ fi
   sed -i "s@^ *deb http://security.debian.org/ squeeze@#deb http://security.debian.org/ squeeze@" /etc/apt/sources.list
   sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian squeeze@#deb-src http://ftp.\1.debian.org/debian squeeze@" /etc/apt/sources.list
   sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian/ stable@#deb http://ftp.\1.debian.org/debian/ stable@" /etc/apt/sources.list
-  # deb-src http://httpredir.debian.org/debian/ squeeze main contrib non-free
-  sed -i "s@^ *deb http://\(\S*\).debian.org/debian squeeze@#deb http://\1.debian.org/debian squeeze@" /etc/apt/sources.list
-  sed -i "s@^ *deb-src http://\(\S*\).debian.org/debian squeeze@#deb http://\1.debian.org/debian squeeze@" /etc/apt/sources.list
-
+  sed -i "s@^ *deb http://\(\S*\).debian.org/debian/ squeeze@#deb http://\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
+  sed -i "s@^ *deb-src http://\(\S*\).debian.org/debian/ squeeze@#deb http://\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
 fi
 
 return 0

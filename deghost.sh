@@ -57,6 +57,10 @@ Run with --to-jessie to get from squeeze or lenny or wheezy to jessie (8)
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
+Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc where we can).
+
+Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to jessie.
+
 Run without an argument to try and fix your server
 
 Written by Peter Bryant at http://launchtimevps.com
@@ -171,6 +175,7 @@ echo "dss:shell: $SHELL"
 echo "dss:dates: $(date -u +%s)"
 echo "dss:uptimes:$(cat /proc/uptime | awk '{print $1}')"
 echo "dss:uptime: $(uptime)"
+echo "dss:kernel: $(uname -a)"
 print_libc_versions
 echo "dss:Redhat-release: $([ ! -f /etc/redhat-release ] && echo 'NA'; [ -f /etc/redhat-release ] && cat /etc/redhat-release)"
 echo "dss:Debian-version: $([ ! -f /etc/debian_version ] && echo 'NA'; [ -f /etc/debian_version ] && cat /etc/debian_version)"
@@ -315,12 +320,10 @@ fi
 
 if dpkg -l | grep -qai '^ii.*dovecot'; then
   echo "changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "apt-get remove dovecot-core if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
+  echo "apt-get remove dovecot-core / dovecot-common  if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
   return 1
 fi
 
-export DEBIAN_FRONTEND=noninteractive
-export APT_LISTCHANGES_FRONTEND=text
   add_missing_debian_keys
 
 apt_get_upgrade
@@ -401,8 +404,6 @@ if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
 return 0
 fi
 
-export DEBIAN_FRONTEND=noninteractive
-export APT_LISTCHANGES_FRONTEND=text
 apt_get_upgrade
 ret=$?
 apt-get -y autoremove
@@ -458,10 +459,12 @@ return 1
 }
 
 function apt_get_upgrade() {
-[ ! -e /etc/apt/sources.list ] && return 1
+[ ! -e /etc/apt/sources.list ] && return 0
+[ -e /etc/redhat-release ] && return 0
 apt-get update
 dpkg --configure -a --force-confnew --force-confdef
 apt-get -y autoremove
+echo "dss:info: running an apt-get upgrade"
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" upgrade
 ret=$?
 apt-get -y autoremove
@@ -474,6 +477,7 @@ return $ret
 }
 
 function apt_get_dist_upgrade() {
+[ ! -e /etc/apt/sources.list ] && return 0
 apt_get_upgrade || return 1
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -f install
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" install dpkg
@@ -502,12 +506,9 @@ lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
 
 if dpkg -l | grep -qai '^ii.*dovecot'; then
   echo "changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "apt-get remove dovecot-core if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
+  echo "apt-get remove dovecot-core / dovecot-common if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
   return 1
 fi
-
-export DEBIAN_FRONTEND=noninteractive
-export APT_LISTCHANGES_FRONTEND=text
 
 apt_get_upgrade
 local candidates="$ALL_UBUNTU"
@@ -696,6 +697,23 @@ echo "dss:warn: libc6 not installed.  Not running apt-get install libc6"
 return 0
 }
 
+function yum_upgrade() {
+  [ ! -f /etc/redhat-release ] && return 0
+  yum_enable_rhel4 || return 0
+  if ! which yum >/dev/null 2>&1; then echo "dss:info: yum not found."; return 1; fi
+  local QOPT=" -q"
+  yum --version >/dev/null && ! yum -q --version 2>/dev/null >/dev/null && QOPT=
+  yum -y install yum rpm > /dev/null 2>&1
+
+  # handy tools to make life better
+  yum $QOPT -y install yum-utils yum-verify
+
+  echo "dss:info: running yum upgrade"
+  yum $QOPT -y upgrade
+  ret=$?
+  return $ret
+}
+
 function yum_enable_rhel4() {
 [ ! -f /etc/redhat-release ] && return 0
 ! grep -qai 'release.* 4' /etc/redhat-release && return 0
@@ -771,16 +789,13 @@ echo "dss:warn: There is currently no autopatch option for $(print_distro_info)"
 return 1
 }
 
-
-function fix_centos5_plus_via_yum_install() {
-  is_fixed && return 0 
+function improve_yum_setup() {
 if ! print_distro_info | egrep -i 'redhat|centos' | egrep -qai 'release.* 5|release.* 6|release.* 7' ; then return 0; fi
 if rpm -qa 2>&1 | grep -qai rpmdbnextiter ; then
   # e.g. error: rpmdbNextIterator: skipping h#     489 Header V3 RSA/SHA256 Signature, key ID c105b9de: BAD
   echo "dss:info: rpm database errors.  rebuilding the rpm db"
   rpm --rebuilddb
 fi
-echo "dss:info: Doing a centos5-7 fix for $(print_distro_info)"
 if [ ! -x /usr/bin/yum ] ; then 
   #rpm http://centos5.rimuhosting.com/centos /5 os updates rimuhosting addons extras centosplus
   if [ ! -f /etc/apt/sources.list ]; then
@@ -802,22 +817,27 @@ if [ ! -x /usr/bin/which ]; then
   yum install -y which
 fi
 
-yum install -y glibc
-ret=$?
 # this file was added by us, but with wrong name (ending in s).
 [ -f /etc/yum.repos.d/CentOS-Base.repos ] && [ -f /etc/yum.repos.d/CentOS-Base.repo ] && rm /etc/yum.repos.d/CentOS-Base.repos 
-if ! is_fixed && print_distro_info | egrep -i 'redhat|centos' | egrep -qai 'release.* 5' && [ ! -f /etc/yum.repos.d/CentOS-Base.repo ] && [ -d /etc/yum.repos.d ] ; then
- echo "dss:warn: Still vulnerable after a yum install glibc.  Installing a different CentOS-Base.repo"
+if print_distro_info | egrep -i 'redhat|centos' | egrep -qai 'release.* 5' && [ ! -f /etc/yum.repos.d/CentOS-Base.repo ] && [ -d /etc/yum.repos.d ] ; then
  wget -nc -O /etc/yum.repos.d/CentOS-Base.repo http://downloads.rimuhosting.com/CentOS-Base.repos.v5
- yum install -y glibc
- ret=$?
 fi
-echo "dss:fixmethod: yum install glibc" 
-return $ret
+return 0
+}
+
+function fix_centos5_plus_via_yum_install() {
+  is_fixed && return 0 
+  improve_yum_setup || return 1
+  if ! print_distro_info | egrep -i 'redhat|centos' | egrep -qai 'release.* 5|release.* 6|release.* 7' ; then return 0; fi
+  echo "dss:info: Doing a centos5-7 fix for $(print_distro_info)"
+  yum install -y glibc
+  ret=$?
+  echo "dss:fixmethod: yum install glibc" 
+  return $ret
 }
 
 
-function run() {
+function fix_vuln() {
 print_vulnerability_status beforefix
 print_libc_versions beforefix || return $?
 print_info
@@ -850,6 +870,45 @@ report_unsupported || return $?
 return 0
 }
 
+function packages_upgrade() {
+
+# improve apt sources
+convert_deb_6_stable_repo_to_squeeze  || return $?
+convert_old_debian_repo || return $?
+
+# https://wiki.ubuntu.com/Releases
+# lucid server still current?
+for distro in $UNSUPPORTED_UBUNTU; do 
+  convert_old_ubuntu_repo $distro || return $?
+done
+add_missing_squeeze_lts || return $?
+
+fix_missing_lsb_release
+
+fix_via_apt_install #|| return $?
+
+yum_enable_rhel4 || return $?
+
+improve_yum_setup || return $?
+
+add_missing_debian_keys || return $?
+
+apt_get_upgrade || return $?
+
+yum_upgrade || return $?
+
+}
+
+function dist_upgrade() {
+  packages_upgrade
+  dist_upgrade_lenny_to_squeeze
+  dist_upgrade_squeeze_to_wheezy
+  dist_upgrade_wheezy_to_jessie
+  dist_upgrade_ubuntu_to_latest
+  packages_upgrade
+}
+
+
 ret=0
 if [ "--usage" = "${ACTION:-$1}" ] ; then
   print_usage
@@ -880,19 +939,23 @@ elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--source" = "${ACTION:-$1}" ] ; then 
   echo "dss: Loading deghost functions"
+elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
+  print_info
+  packages_upgrade
+elif [ "--dist-upgrade" = "${ACTION:-$1}" ] ; then
+  print_info
+  dist_upgrade
 elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then 
-  run
+  fix_vuln
   ret=$?
   if ! is_fixed; then
-    dist_upgrade_lenny_to_squeeze
-    dist_upgrade_squeeze_to_wheezy
-    dist_upgrade_ubuntu_to_latest
+    dist_upgrade
   fi
   print_libc_versions afterfix
   print_vulnerability_status afterfix
   if [ $ret -eq 0 ] ; then true ; else false; fi
 else 
-  run
+  fix_vuln
   ret=$?
   print_libc_versions afterfix
   print_vulnerability_status afterfix

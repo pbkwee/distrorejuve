@@ -27,7 +27,7 @@ Attempts to fix:
     - Lenny (Deb 5), or any Ubuntu use the --break-eggs options to dist-upgrade to Wheezy or Trusty LTS.  This will likely 
         not work automatically, may leave you in dependency hell, and will likely change configs in ways you wish it hadn't.
         
-Attempts to improve the situation:.
+Attempts to improve the situation:
         
     - Unsupported Ubuntus (others per UNSUPPORTED_UBUNTU variable) => convert to old-releases.ubuntu.com
     
@@ -35,10 +35,6 @@ No action available for the following (and older) distros:
     
     - RHEL4, WBEL3, RH9, Debian 4 => nothing
         
-Potential improvements to come:
-
-    - Lenny.  Need to patch?  Maybe use squeeze .deb? (vs. the whole --break-eggs dist upgrade)
-
 Arguments:
   
 Use with --source if you just wish to have the functions available to you for testing
@@ -216,7 +212,8 @@ for glibc_nvr in $( rpm -q --qf '%{name}-%{version}-%{release}.%{arch}\n' glibc 
     fi
     #echo -n "- $glibc_nvr: "
     if [ "$glibc_maj" -gt 2   -o  \
-        \( "$glibc_maj" -eq 2  -a  "$glibc_min" -ge 22 \) ]; then
+        \( "$glibc_maj" -eq 2  -a  "$glibc_min" -ge 22 \) -o \
+        \( "$glibc_maj" -eq 2  -a  "$glibc_min" -le 8 \) ]; then
         # fixed upstream version
         # echo 'not vulnerable'
         nonvuln=$(($nonvuln+1))

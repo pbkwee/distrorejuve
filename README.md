@@ -1,6 +1,6 @@
 #deghost
 
-deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235) and then patch that where possible.
+deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235 or CVE-2015-7547) and then patch that where possible.
 
 deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
 
@@ -22,10 +22,6 @@ No action available for the following (and older) distros:
     
     - RHEL4, WBEL3, RH9, Debian 4 => nothing
         
-Potential improvements to come:
-
-    - Lenny.  Need to patch?  Maybe use squeeze .deb? (vs. the whole --break-eggs dist upgrade)
-
 Arguments:
   
 Use with --source if you just wish to have the functions available to you for testing
@@ -43,6 +39,10 @@ Run with --to-wheezy to get from squeeze to wheezy
 Run with --to-jessie to get from squeeze or lenny or wheezy to jessie (8)
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
+
+Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc where we can).
+
+Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to jessie.
 
 Run without an argument to try and fix your server
 

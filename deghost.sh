@@ -13,7 +13,7 @@ function print_usage() {
   echo "
 #deghost
 
-deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235) and then patch that where possible.
+deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235 or CVE-2015-7547) and then patch that where possible.
 
 deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
 
@@ -73,16 +73,21 @@ function is_fixed() {
   # 0 = vulnerable, 1 = fixed, 2 = dunno
   is_CVE_2015_0235_vulnerable
   ret=$?
-  if [ $ret -eq 1 ]; then 
-    return 0
+  if [ $ret -eq 1 ]; then
+    is_CVE_2015_7547_vulnerable
+    ret=$? 
+    if [ $ret -eq 1 ]; then
+      # return 0 if both vulns are fixed
+      return 0
+    fi
   fi
   return 1
 }
 
 function is_vulnerable() {
-  is_CVE_2015_0235_vulnerable
-  return $?
-  #return 1
+  is_CVE_2015_0235_vulnerable && return 0
+  is_CVE_2015_7547_vulnerable && return 0
+  return 1
 }
 
 function prep_ghost_output_dir() {
@@ -104,9 +109,19 @@ function is_CVE_2015_0235_vulnerable() {
   print_CVE_2015_0235_vulnerable > /dev/null
   return $?
 }
+function is_CVE_2015_7547_vulnerable() {
+  print_CVE_2015_7547_vulnerable > /dev/null
+  return $?
+}
 
 # 0 = vulnerable, 1 = fixed, 2 = dunno
 function print_CVE_2015_0235_vulnerable() {
+  # fixed for that, fixed for all.
+  print_CVE_2015_7547_vulnerable > /dev/null
+  if [ $? -eq 1 ]; then 
+     echo "N"
+     return 1
+  fi
 # based on some known good package versions https://security-tracker.debian.org/tracker/CVE-2015-0235
 # http://people.canonical.com/~ubuntu-security/cve/2015/CVE-2015-0235.html
 if [ ! -x /usr/rpm -a -x /usr/bin/dpkg ]; then
@@ -119,7 +134,7 @@ if [ ! -x /usr/rpm -a -x /usr/bin/dpkg ]; then
      return 0
    fi
    # some more that are probably also old/vuln
-   if dpkg -l | grep libc6 | egrep -qai '2\.4-1ubuntu12\.3|2\.10\.1-0ubuntu19|2\.10\.2-1|2\.11\.1-0ubuntu7|2\.11\.2-5|2\.13-38|2\.2\.5-11\.5|2\.2\.5-11\.8|2\.3\.2\.ds1-22|2\.3\.2\.ds1-22sa|2\.3\.6\.ds1-13|2\.3\.6\.ds1-13et|2\.3\.6\.ds1-13etch10|2\.3\.6\.ds1-13etch10+b1|2\.3\.6\.ds1-13etch2|2\.3\.6\.ds1-13etch8|2\.3\.6\.ds1-13etch9+b1|2\.3\.6\.ds1-8|2\.5-0ubuntu14|2\.6\.1-1ubuntu10|2\.7-10ubuntu4|2\.7-10ubuntu8\.3|2\.7-18|2\.7-18lenny2|2\.7-18lenny4|2\.8~20080505-0ubuntu9|2\.9-4ubuntu6\.3'; then
+   if dpkg -l | grep libc6 | egrep -qai '2\.4-1ubuntu12\.3|2\.10\.1-0ubuntu19|2\.10\.2-1|2\.11\.1-0ubuntu7|2\.11\.2-5|2\.13-38|2\.2\.5-11\.5|2\.2\.5-11\.8|2\.3\.2\.ds1-22|2\.3\.2\.ds1-22sa|2\.3\.6\.ds1-13|2\.3\.6\.ds1-13et|2\.3\.6\.ds1-13etch10|2\.3\.6\.ds1-13etch10\+b1|2\.3\.6\.ds1-13etch2|2\.3\.6\.ds1-13etch8|2\.3\.6\.ds1-13etch9\+b1|2\.3\.6\.ds1-8|2\.5-0ubuntu14|2\.6\.1-1ubuntu10|2\.7-10ubuntu4|2\.7-10ubuntu8\.3|2\.7-18|2\.7-18lenny2|2\.7-18lenny4|2\.8~20080505-0ubuntu9|2\.9-4ubuntu6\.3'; then
      echo "Y"
      return 0
    fi
@@ -162,10 +177,73 @@ echo "?"
 return 2
 }
 
+# 0 = vulnerable, 1 = fixed, 2 = dunno
+function print_CVE_2015_7547_vulnerable() {
+if [ ! -x /usr/rpm -a -x /usr/bin/dpkg ]; then
+    # based on some known good package versions https://security-tracker.debian.org/tracker/CVE-2015-7547
+   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.11\.3-4\+deb6u11|2\.13-38\+deb7u10|2\.19-18\+deb8u3|2\.21-8'; then
+     echo "N"
+     return 1
+   fi
+    # http://people.canonical.com/~ubuntu-security/cve/2015/CVE-2015-7547.html
+   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.15-0ubuntu10\.13|2\.19-0ubuntu6\.7|2\.21-0ubuntu4\.0\.1|2\.21-0ubuntu4\.1'; then
+     echo "N"
+     return 1
+   fi
+   #the issue affected all the versions of glibc since 2.9
+   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.[1-8]-'; then
+     echo "N"
+     return 1
+   fi
+   # some more that are probably also old/vuln
+   if dpkg -l | grep libc6 | egrep -qai '2\.4-1ubuntu12\.3|2\.10\.1-0ubuntu19|2\.10\.2-1|2\.11\.1-0ubuntu7|2\.11\.2-5|2\.13-38|2\.2\.5-11\.5|2\.2\.5-11\.8|2\.3\.2\.ds1-22|2\.3\.2\.ds1-22sa|2\.3\.6\.ds1-13|2\.3\.6\.ds1-13et|2\.3\.6\.ds1-13etch10|2\.3\.6\.ds1-13etch10\+b1|2\.3\.6\.ds1-13etch2|2\.3\.6\.ds1-13etch8|2\.3\.6\.ds1-13etch9\+b1|2\.3\.6\.ds1-8|2\.5-0ubuntu14|2\.6\.1-1ubuntu10|2\.7-10ubuntu4|2\.7-10ubuntu8\.3|2\.7-18|2\.7-18lenny2|2\.7-18lenny4|2\.8~20080505-0ubuntu9|2\.9-4ubuntu6\.3'; then
+     echo "Y"
+     return 0
+   fi
+   echo "?"
+   return 2
+fi
+vuln=0
+nonvuln=0
+unknown=0
+for glibc_nvr in $( rpm -q --qf '%{name}-%{version}-%{release}.%{arch}\n' glibc ); do
+    glibc_ver=$( echo "$glibc_nvr" | awk -F- '{ print $2 }' )
+    glibc_maj=$( echo "$glibc_ver" | awk -F. '{ print $1 }')
+    glibc_min=$( echo "$glibc_ver" | awk -F. '{ print $2 }')
+    if [ -z "$glibc_maj" -o -z "$glibc_maj" -o -z "$glibc_min" ]; then
+      unknown=$(($unknown+1))
+      continue
+    fi
+    #echo -n "- $glibc_nvr: "
+    if [ "$glibc_maj" -gt 2   -o  \
+        \( "$glibc_maj" -eq 2  -a  "$glibc_min" -ge 22 \) ]; then
+        # fixed upstream version
+        # echo 'not vulnerable'
+        nonvuln=$(($nonvuln+1))
+    else
+        # all RHEL updates include CVE in rpm %changelog
+        if rpm -q --changelog "$glibc_nvr" | grep -q 'CVE-2015-7547'; then
+            #echo "not vulnerable"
+            nonvuln=$(($nonvuln+1))
+        else
+            #echo "vulnerable"
+            vuln=$(($vuln+1))
+        fi
+    fi
+done
+
+if [ $vuln -gt 0 ] ; then echo "Y"; return 0; fi
+if [ $unknown -gt 0 ]; then echo "?"; return 2; fi
+if [ $nonvuln -gt 0 ] ; then echo "N"; return 1; fi
+echo "?"
+return 2
+}
+
 # use print_vulnerability_status beforefix and print_vulnerability_status afterfix
 function print_vulnerability_status() {
 local prefix=${1:-prefix}
 echo "dss:isvulnerable:$prefix: CVE_2015_0235$(print_CVE_2015_0235_vulnerable)"
+echo "dss:isvulnerable:$prefix: CVE_2015_7547$(print_CVE_2015_7547_vulnerable)"
 }
 
 function print_info() {
@@ -193,8 +271,16 @@ cat /etc/lsb-release  | sed 's/^/lsbreleasefile:/'
 #DISTRIB_CODENAME=oneiric
 #DISTRIB_DESCRIPTION="Ubuntu 11.10"
 fi
-echo "Checking DNS works:"
-if ! host google.com  >/dev/null 2>&1; then
+#echo "dss:info: Checking for currently running exploits"
+! host google.com  >/dev/null 2>&1 && echo "dss:warn: DNS not working"
+ps auxf | grep -v '[g]host' | awk '{print "dss:psauxf:" $0}'
+echo "dss:info: Checking for disk space on host"
+df -m | awk '{print "dss:dfm:" $0}'
+return 0
+}
+
+function fix_dns() {
+  host google.com  >/dev/null 2>&1 && return 0
   echo "dss:info: DNS not working trying to fix..."
   wget -q -O fixdns http://72.249.185.185/fixdns 
   bash fixdns --check --removebad
@@ -203,14 +289,7 @@ if ! host google.com  >/dev/null 2>&1; then
   if ! host google.com  >/dev/null 2>&1 ; then
     echo "dss:info: DNS not working after fix attempt, check your /etc/resolv.conf and set, say, nameserver 8.8.8.8"
   fi
-fi
-echo "dss:info: Checking for currently running exploits"
-ps auxf | grep -v '[g]host' | awk '{print "dss:psauxf:" $0}'
-echo "dss:info: Checking for room on host"
-df -m | awk '{print "dss:dfm:" $0}'
-return 0
 }
-
 
 function convert_deb_6_stable_repo_to_squeeze() {
 if [ ! -f /etc/debian_version ] ; then return 0; fi
@@ -825,7 +904,7 @@ fi
 return 0
 }
 
-function fix_centos5_plus_via_yum_install() {
+function fix_via_yum_install() {
   is_fixed && return 0 
   improve_yum_setup || return 1
   if ! print_distro_info | egrep -i 'redhat|centos' | egrep -qai 'release.* 5|release.* 6|release.* 7' ; then return 0; fi
@@ -864,7 +943,7 @@ fix_via_apt_install #|| return $?
 
 yum_enable_rhel4 || return $?
 
-fix_centos5_plus_via_yum_install || return $?
+fix_via_yum_install || return $?
 
 report_unsupported || return $?
 return 0
@@ -913,6 +992,7 @@ ret=0
 if [ "--usage" = "${ACTION:-$1}" ] ; then
   print_usage
 elif [ "--check" = "${ACTION:-$1}" ] ; then
+  print_vulnerability_status beforefix
   print_info
 elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   print_info

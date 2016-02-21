@@ -186,8 +186,8 @@ if [ ! -x /usr/rpm -a -x /usr/bin/dpkg ]; then
      echo "N"
      return 1
    fi
-   #the issue affected all the versions of glibc since 2.9
-   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.[1-8]-'; then
+   #the issue affected all the versions of glibc since 2.9 e.g. to match 2.3.6.ds1-13etch10+b1  or 2.6-blah 
+   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.[1-8][-.]'; then
      echo "N"
      return 1
    fi
@@ -723,20 +723,21 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   if [ $ret -ne 0 ]; then
     echo "dss:warn: there was an error doing an apt-get update"
   fi
+  for distro in wheezy jessie; do 
+    if grep -qai "^ *deb.*$distro" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.*$distro" /etc/apt/sources.list; then
+       echo "dss:info: adding the $distro security repository to the sources.list"
+       prep_ghost_output_dir
+       if [ ! -e /root/deghostinfo/sources.list.$$ ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list.$$"; cp /etc/apt/sources.list /root/deghostinfo/sources.list.$$; fi
+       echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
+       apt-get update
+    fi
+  done
   POLICY=$(apt-cache policy libc6)
   POLICY_INSTALLED=$(echo $POLICY | grep Installed | sed -e   's/.*Installed: \(\S*\).*/\1/')
   POLICY_CANDIDATE=$(echo $POLICY | grep Candidate | sed -e   's/.*Candidate: \(\S*\).*/\1/')
   if [ ! -z "$POLICY_INSTALLED" -a "$POLICY_INSTALLED" == "$POLICY_CANDIDATE" ]; then
     echo "dss:info: apt-cache policy reports the latest libc6 package already installed"
-    if grep -qai '^ *deb.*wheezy' /etc/apt/sources.list && ! grep -qai '^ *deb.*security\.deb.*wheezy' /etc/apt/sources.list; then
-       echo "dss:info: adding the wheezy security repository to the sources.list"
-       prep_ghost_output_dir
-       if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
-       echo "deb http://security.debian.org/ wheezy/updates main" >> /etc/apt/sources.list
-       apt-get update
-    else
-      return 0
-    fi
+    return 0
   fi
   if [ -d /var/lib/dpkg/updates ] && [ 0 -ne $(find /var/lib/dpkg/updates -type f | wc -l) ]; then
     echo "dss:info: looks like there were some pending updates.  checking if they need configuring before proceeding with the libc6 install"

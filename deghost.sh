@@ -4,8 +4,8 @@ export APT_LISTCHANGES_FRONTEND=text
 
 # https://wiki.ubuntu.com/Releases
 LTS_UBUNTU="dapper hardy lucid precise trusty"
-SUPPORTED_UBUNTU="lucid precise trusty utopic vivid" 
-UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic       maverick natty oneiric         quantal raring saucy"             
+SUPPORTED_UBUNTU="lucid precise trusty utopic" 
+UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic       maverick natty oneiric         quantal raring saucy vivid"             
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty"
 NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic  maverick natty oneiric quantal raring saucy"
 

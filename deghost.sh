@@ -3,11 +3,12 @@ export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=text
 
 # https://wiki.ubuntu.com/Releases
+# when updating, keep them in their release order to safety
 LTS_UBUNTU="dapper hardy lucid precise trusty"
-SUPPORTED_UBUNTU="lucid precise trusty utopic" 
-UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic       maverick natty oneiric         quantal raring saucy vivid"             
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty"
-NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic  maverick natty oneiric quantal raring saucy"
+SUPPORTED_UBUNTU="precise trusty wily" 
+UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic       maverick natty oneiric         quantal raring saucy vivid lucid utopic"             
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid "
+NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic  maverick natty oneiric quantal raring saucy utopic vivd"
 
 function print_usage() {
   echo "
@@ -832,7 +833,13 @@ return 0
 }
 
 function report_unsupported() {
-  is_fixed && return 0 
+  is_fixed && return 0
+  
+  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep Ubuntu | egrep -qai "$(echo $UNSUPPORTED_UBUNTU | sed 's/ /|/')"; then 
+    echo "dss:info: Running an EOL Ubuntu.  No package updates available.  dist upgrade to the latest lts"
+    return 1
+fi
+   
 if [ ! -f /etc/redhat-release ]; then return 0; fi
 if grep -qai 'Shrike' /etc/redhat-release; then 
   # RH9

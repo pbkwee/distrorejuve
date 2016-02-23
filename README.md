@@ -8,15 +8,15 @@ See also http://rimuhosting.com/maintenance.jsp?server_maint_oid=195331653
 
 Attempts to fix:
 
-    - Debian 7 => apt-get install
-    - Debian 6 => fix up apt repositories for squeeze-lts and then apt-get install
+    - Debian 6 and 7 => apt-get install
     - Supported Ubuntus (12.04 LTS, 14.04 LTS, 14.10) => apt-get install
     - Lenny (Deb 5), or any Ubuntu use the --break-eggs options to dist-upgrade to Wheezy or Trusty LTS.  This will likely 
         not work automatically, may leave you in dependency hell, and will likely change configs in ways you wish it hadn't.
         
-Attempts to improve the situation:.
+Attempts to improve the situation:
         
     - Unsupported Ubuntus (others per UNSUPPORTED_UBUNTU variable) => convert to old-releases.ubuntu.com
+    - Apt repositories switch squeeze to squeeze-lts (which gets updates until 2016-02).
     
 No action available for the following (and older) distros:
     
@@ -26,7 +26,7 @@ Arguments:
   
 Use with --source if you just wish to have the functions available to you for testing
 
-Run with --check if you just wish to check, but not change your server
+Run with --check (or no argument) if you just wish to check, but not change your server
 
 Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (supported) to wheezy (latest).  Note caveats above.
 
@@ -44,9 +44,10 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to jessie.
 
-Run without an argument to try and fix your server
+Run with --fix-vuln to try and fix your server (doing minimal change e.g. just an apt-get install of the affected package).
 
 Written by Peter Bryant at http://launchtimevps.com
 
 Latest version (or thereabouts) will be available at https://github.com/pbkwee/deghost
+
 

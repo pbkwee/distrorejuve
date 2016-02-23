@@ -40,7 +40,9 @@ Arguments:
   
 Use with --source if you just wish to have the functions available to you for testing
 
-Run with --check if you just wish to check, but not change your server
+Run with --check if you just wish to check, but not change your server (default)
+
+Run with --fix_vuln if you want the script to install the patched software
 
 Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (supported) to wheezy (latest).  Note caveats above.
 
@@ -999,6 +1001,12 @@ if [ "--usage" = "${ACTION:-$1}" ] ; then
 elif [ "--check" = "${ACTION:-$1}" ] ; then
   print_vulnerability_status beforefix
   print_info
+elif [ "--fix_vuln" = "${ACTION:-$1}" ] ; then
+  fix_vuln
+  ret=$?
+  print_libc_versions afterfix
+  print_vulnerability_status afterfix
+  if [ $ret -eq 0 ] ; then true ; else false; fi
 elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
@@ -1039,10 +1047,7 @@ elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then
   print_libc_versions afterfix
   print_vulnerability_status afterfix
   if [ $ret -eq 0 ] ; then true ; else false; fi
-else 
-  fix_vuln
-  ret=$?
-  print_libc_versions afterfix
-  print_vulnerability_status afterfix
-  if [ $ret -eq 0 ] ; then true ; else false; fi
+else
+  print_vulnerability_status beforefix
+  print_info
 fi

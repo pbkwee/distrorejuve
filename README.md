@@ -26,7 +26,9 @@ Arguments:
   
 Use with --source if you just wish to have the functions available to you for testing
 
-Run with --check if you just wish to check, but not change your server
+Run with --check if you just wish to check, but not change your server (default)
+
+Run with --fix_vuln if you want the script to install the patched software
 
 Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (supported) to wheezy (latest).  Note caveats above.
 

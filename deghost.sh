@@ -4,11 +4,15 @@ export APT_LISTCHANGES_FRONTEND=text
 
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
+# no leading/trailing spaces.  one space per word.
 LTS_UBUNTU="dapper hardy lucid precise trusty"
 SUPPORTED_UBUNTU="precise trusty wily" 
-UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic       maverick natty oneiric         quantal raring saucy vivid lucid utopic"             
+UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy vivid lucid utopic"
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid "
-NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic  maverick natty oneiric quantal raring saucy utopic vivd"
+NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic maverick natty oneiric quantal raring saucy utopic vivd"
+
+ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
+UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny"
 
 function print_usage() {
   echo "
@@ -40,7 +44,7 @@ Arguments:
   
 Use with --source if you just wish to have the functions available to you for testing
 
-Run with --check if you just wish to check, but not change your server
+Run with --check (or no argument) if you just wish to check, but not change your server
 
 Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (supported) to wheezy (latest).  Note caveats above.
 
@@ -58,7 +62,7 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to jessie.
 
-Run without an argument to try and fix your server
+Run with --fix-vuln to try and fix your server (doing minimal change e.g. just an apt-get install of the affected package).
 
 Written by Peter Bryant at http://launchtimevps.com
 
@@ -289,6 +293,19 @@ function fix_dns() {
   fi
 }
 
+function print_mixed_distros() {
+  [ ! -f /etc/apt/sources.list ] && return 0
+  num=0
+  distros=""
+  for distro in $ALL_UBUNTU $ALL_DEBIAN; do
+    grep -qai "^ *[a-z].*$distro" /etc/apt/sources.list || continue
+    num=$((num+1))
+    distros="$distro $distros"
+  done
+  [ $num -lt 2 ] && return 0
+  echo "dss:warn:/etc/apt/sources.list looks like it contains a mix of distros: $distros"
+  return 1
+}
 function convert_deb_6_stable_repo_to_squeeze() {
 if [ ! -f /etc/debian_version ] ; then return 0; fi
 
@@ -403,6 +420,8 @@ fi
 
   add_missing_debian_keys
 
+print_mixed_distros || return $?
+
 apt_get_upgrade
 ret=$?
 apt-get -y autoremove
@@ -481,6 +500,8 @@ if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
 return 0
 fi
 
+print_mixed_distros || return $?
+
 apt_get_upgrade
 ret=$?
 apt-get -y autoremove
@@ -535,10 +556,22 @@ return 1
 
 }
 
+function print_pkg_config_old_dists() {
+prep_ghost_output_dir
+now=$(date +%s)
+ls -lrt $(find /etc -type f | egrep '.dpkg-old|dpkg-dist') > /root/deghostinfo/postupgrade.dpkg.$now
+diff /root/deghostinfo/preupgrade.dpkg.$$ /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
+}
+
 function apt_get_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
 [ -e /etc/redhat-release ] && return 0
+print_mixed_distros || return $?
 apt-get update
+prep_ghost_output_dir
+if [ ! -f /root/deghostinfo/preupgrade.dpkg.$$ ] ; then
+  ls -lrt $(find /etc -type f | egrep '.dpkg-old|dpkg-dist') > /root/deghostinfo/preupgrade.dpkg.$$  
+fi
 dpkg --configure -a --force-confnew --force-confdef
 apt-get -y autoremove
 echo "dss:info: running an apt-get upgrade"
@@ -555,6 +588,7 @@ return $ret
 
 function apt_get_dist_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
+print_mixed_distros || return $?
 apt_get_upgrade || return 1
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -f install
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" install dpkg
@@ -573,6 +607,10 @@ fi
 dpkg --configure -a --force-confnew --force-confdef
 apt-get -y autoremove
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
+
+# report -dist or -old file changes
+print_pkg_config_old_dists
+
 return $?
 }
 
@@ -586,6 +624,8 @@ if dpkg -l | grep -qai '^ii.*dovecot'; then
   echo "apt-get remove dovecot-core / dovecot-common if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
   return 1
 fi
+
+print_mixed_distros || return $?
 
 apt_get_upgrade
 local candidates="$ALL_UBUNTU"
@@ -722,7 +762,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   apt-get update
   ret=$?
   if [ $ret -ne 0 ]; then
-    echo "dss:warn: there was an error doing an apt-get update"
+    echo "dss:warn: There was an error doing an apt-get update"
   fi
   for distro in wheezy jessie; do 
     if grep -qai "^ *deb.*$distro" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.*$distro" /etc/apt/sources.list; then
@@ -752,7 +792,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   	# apt-get install libc6=2.11.3-4+deb6u4 libc6-i686=2.11.3-4+deb6u4 libc-bin=2.11.3-4+deb6u4 
   	return 0
   fi
-  echo "dss:error: Failed doing apt-get -y force-yes install libc6"
+  echo "dss:error: Failed doing apt-get -y install libc6"
   prep_ghost_output_dir
   cd /root/deghostinfo
   # download isnt an option on some older apts
@@ -835,10 +875,18 @@ return 0
 function report_unsupported() {
   is_fixed && return 0
   
-  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep Ubuntu | egrep -qai "$(echo $UNSUPPORTED_UBUNTU | sed 's/ /|/')"; then 
-    echo "dss:info: Running an EOL Ubuntu.  No package updates available.  dist upgrade to the latest lts"
+  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep Ubuntu | egrep -qai "$(echo $UNSUPPORTED_UBUNTU | sed 's/  / /g' | sed 's/ *$//g' | sed 's/ /|/g')"; then 
+    echo "dss:warn: Running an end-of-life Ubuntu distro ($(print_distro_info)).  No new package updates available.  dist upgrade to the latest lts"
     return 1
-fi
+  fi
+  # DEBIAN 7.4
+  # Debian GNU/Linux 7.9 (n/a) Release: 7.9 Codename: n/a
+  # Distributor ID: Debian Description: Debian GNU/Linux 7.2 (wheezy) Release: 7.2 Codename: wheezy
+
+  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep -i 'Debian GNU' | egrep -qai "$(echo $UNSUPPORTED_DEBIAN | sed 's/  / /g' | sed 's/ *$//g' | sed 's/ /|/g')"; then 
+    echo "dss:warn: Running an end-of-life Debian distro ($(print_distro_info)).  No new package updates available.  dist upgrade to the latest lts"
+    return 1
+  fi
    
 if [ ! -f /etc/redhat-release ]; then return 0; fi
 if grep -qai 'Shrike' /etc/redhat-release; then 
@@ -869,7 +917,7 @@ fi
 
 # cat /etc/redhat-release 
 #Red Hat Enterprise Linux WS release 4 (Nahant)
-echo "dss:warn: There is currently no autopatch option for $(print_distro_info)"
+echo "dss:warn: There is currently no autopatch option for $(print_distro_info).  The distro is likely out of date and no longer supported."
 return 1
 }
 
@@ -916,6 +964,9 @@ function fix_via_yum_install() {
   echo "dss:info: Doing a centos5-7 fix for $(print_distro_info)"
   yum install -y glibc
   ret=$?
+  if [ $ret -ne 0 ]; then
+    echo "dss:warn:Error running yum install -y glibc"
+  fi
   echo "dss:fixmethod: yum install glibc" 
   return $ret
 }
@@ -931,6 +982,8 @@ if is_fixed ; then
   return 0
 fi
 
+print_mixed_distros || return $?
+
 # improve apt sources
 convert_deb_6_stable_repo_to_squeeze  || return $?
 convert_old_debian_repo || return $?
@@ -944,6 +997,7 @@ add_missing_squeeze_lts || return $?
 
 fix_missing_lsb_release
 
+
 fix_via_apt_install #|| return $?
 
 yum_enable_rhel4 || return $?
@@ -955,6 +1009,7 @@ return 0
 }
 
 function packages_upgrade() {
+print_mixed_distros || return $?
 
 # improve apt sources
 convert_deb_6_stable_repo_to_squeeze  || return $?
@@ -977,6 +1032,8 @@ improve_yum_setup || return $?
 
 add_missing_debian_keys || return $?
 
+print_mixed_distros || return $?
+
 apt_get_upgrade || return $?
 
 yum_upgrade || return $?
@@ -996,9 +1053,13 @@ function dist_upgrade() {
 ret=0
 if [ "--usage" = "${ACTION:-$1}" ] ; then
   print_usage
-elif [ "--check" = "${ACTION:-$1}" ] ; then
+elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
   print_vulnerability_status beforefix
   print_info
+  print_mixed_distros
+  report_unsupported
+  # set return code
+  true
 elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
@@ -1039,10 +1100,12 @@ elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then
   print_libc_versions afterfix
   print_vulnerability_status afterfix
   if [ $ret -eq 0 ] ; then true ; else false; fi
-else 
+elif [ "--fix-vuln" = "${ACTION:-$1}" ] ; then 
   fix_vuln
   ret=$?
   print_libc_versions afterfix
   print_vulnerability_status afterfix
   if [ $ret -eq 0 ] ; then true ; else false; fi
+else
+  print_usage
 fi

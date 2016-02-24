@@ -413,8 +413,9 @@ return 0
 fi
 
 if dpkg -l | grep -qai '^ii.*dovecot'; then
+  echo "Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
   echo "changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "apt-get remove dovecot-core / dovecot-common  if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
+  echo "apt-get remove dovecot-c* (dovecot-core or dovecot-common) if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
   return 1
 fi
 
@@ -556,11 +557,30 @@ return 1
 
 }
 
-function print_pkg_config_old_dists() {
-prep_ghost_output_dir
-now=$(date +%s)
-ls -lrt $(find /etc -type f | egrep '.dpkg-old|dpkg-dist') > /root/deghostinfo/postupgrade.dpkg.$now
-diff /root/deghostinfo/preupgrade.dpkg.$$ /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
+function report_config_state_changes() {
+  prep_ghost_output_dir
+  now=$(date +%s)
+  record_config_state /root/deghostinfo/postupgrade.dpkg.$now
+  diff /root/deghostinfo/preupgrade.dpkg.$$ /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
+}
+
+function record_config_state() {
+  prep_ghost_output_dir
+  file=$1
+  if [ -z "$file" ]; then 
+    file=/root/deghostinfo/preupgrade.dpkg.$$
+  fi
+  # don't overwrite the preupgrade file
+  echo $file | grep preupgrade && [ -f $file ] && return 0
+  
+  local files=$(find /etc -type f | egrep '.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave')
+  > /root/deghostinfo/preupgrade.dpkg.$$
+  # conf files
+  [ ! -z "$files" ] && ls -lrt $files > $file
+  # listening ports
+  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' >> $file
+  # vhosts 
+  [ -x /usr/sbin/apache2ctl ] && /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> $file
 }
 
 function apt_get_upgrade() {
@@ -568,10 +588,7 @@ function apt_get_upgrade() {
 [ -e /etc/redhat-release ] && return 0
 print_mixed_distros || return $?
 apt-get update
-prep_ghost_output_dir
-if [ ! -f /root/deghostinfo/preupgrade.dpkg.$$ ] ; then
-  ls -lrt $(find /etc -type f | egrep '.dpkg-old|dpkg-dist') > /root/deghostinfo/preupgrade.dpkg.$$  
-fi
+record_config_state
 dpkg --configure -a --force-confnew --force-confdef
 apt-get -y autoremove
 echo "dss:info: running an apt-get upgrade"
@@ -607,11 +624,14 @@ fi
 dpkg --configure -a --force-confnew --force-confdef
 apt-get -y autoremove
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
-
+ret=$?
+if [ $ret -ne 0 ] ; then
+  echo "dss:error: Got an error after an apt-get dist-upgrade" 
+fi
 # report -dist or -old file changes
-print_pkg_config_old_dists
+report_config_state_changes
 
-return $?
+return $ret
 }
 
 
@@ -620,8 +640,9 @@ function dist_upgrade_ubuntu_to_latest() {
 lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
 
 if dpkg -l | grep -qai '^ii.*dovecot'; then
+  echo "Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
   echo "changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "apt-get remove dovecot-core / dovecot-common if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
+  echo "apt-get remove dovecot-c* (dovecot-core or dovecot-common) if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
   return 1
 fi
 
@@ -1041,12 +1062,12 @@ yum_upgrade || return $?
 }
 
 function dist_upgrade() {
-  packages_upgrade
+  apt_get_dist_upgrade
   dist_upgrade_lenny_to_squeeze
   dist_upgrade_squeeze_to_wheezy
   dist_upgrade_wheezy_to_jessie
   dist_upgrade_ubuntu_to_latest
-  packages_upgrade
+  apt_get_dist_upgrade
 }
 
 

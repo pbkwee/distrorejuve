@@ -293,7 +293,7 @@ function fix_dns() {
   fi
 }
 
-function print_mixed_distros() {
+function check_for_mixed_distros() {
   [ ! -f /etc/apt/sources.list ] && return 0
   num=0
   distros=""
@@ -410,6 +410,18 @@ function print_uninstall_dovecot() {
   prep_ghost_output_dir
   postconf -n > /root/deghostinfo/postconf.log.$$
   echo "apt-get remove dovecot-c* (dovecot-core or dovecot-common)" >&2
+  # dovecot reinstall tips
+  
+  # apt-get install dovecot-pop3d dovecot-imapd dovecot-managesieved dovecot-sieve
+  # dovecot -n > /etc/dovecot/dovecot.conf.new
+  # mv /etc/dovecot/dovecot.conf /etc/dovecot/dovecot.conf.predistupgrade
+  # mv /etc/dovecot/dovecot.conf.new /etc/dovecot/dovecot.conf
+  
+  # sed -i s@'mailbox_command = /usr/lib/dovecot/deliver -c /etc/dovecot/conf.d/01-dovecot-postfix.conf -m "${EXTENSION}"'@'mailbox_command = /usr/lib/dovecot/deliver -c /etc/dovecot/dovecot.conf -m "${EXTENSION}"'@g main.cf
+  
+  # Could also try removing /etc/dovecot/conf.d/01-dovecot-postfix.conf and replacing it with this package (replaces postfix-dovecot package):
+  
+  # http://packages.ubuntu.com/trusty/all/mail-stack-delivery/filelist
 }
 
 function dist_upgrade_lenny_to_squeeze() {
@@ -428,7 +440,7 @@ fi
 
   add_missing_debian_keys
 
-print_mixed_distros || return $?
+check_for_mixed_distros || return $?
 
 apt_get_upgrade
 ret=$?
@@ -498,9 +510,6 @@ export old_ver="inux 7"
 export new_distro=jessie
 dist_upgrade_x_to_y
 ret=$?
-if [ $ret -eq 0 ]; then
-  tweak_broken_configs
-fi
 return $ret
 }
 
@@ -534,7 +543,7 @@ if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
 return 0
 fi
 
-print_mixed_distros || return $?
+check_for_mixed_distros || return $?
 
 apt_get_upgrade
 ret=$?
@@ -579,8 +588,6 @@ fi
 apt_get_dist_upgrade
 ret=$?
 
-tweak_broken_configs
-
 apt-get -y autoremove
 if [ $ret -eq 0 ]; then
 	if lsb_release -a 2>/dev/null| egrep -qai '${new_distro}'; then
@@ -593,7 +600,7 @@ return 1
 
 }
 
-function report_config_state_changes() {
+function print_config_state_changes() {
   prep_ghost_output_dir
   now=$(date +%s)
   record_config_state /root/deghostinfo/postupgrade.dpkg.$now
@@ -632,11 +639,12 @@ function record_config_state() {
 function apt_get_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
 [ -e /etc/redhat-release ] && return 0
-print_mixed_distros || return $?
+check_for_mixed_distros || return $?
 apt-get update
 record_config_state
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get -y autoremove
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
 echo "dss:info: running an apt-get upgrade"
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" upgrade
 ret=$?
@@ -651,7 +659,7 @@ return $ret
 
 function apt_get_dist_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
-print_mixed_distros || return $?
+check_for_mixed_distros || return $?
 apt_get_upgrade || return 1
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" -f install
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install dpkg
@@ -676,7 +684,8 @@ if [ $ret -ne 0 ] ; then
   echo "dss:error: Got an error after an apt-get dist-upgrade" 
 fi
 # report -dist or -old file changes
-report_config_state_changes
+tweak_broken_configs
+print_config_state_changes
 
 return $ret
 }
@@ -691,7 +700,7 @@ if dpkg -l | grep -qai '^ii.*dovecot'; then
   return 1
 fi
 
-print_mixed_distros || return $?
+check_for_mixed_distros || return $?
 
 apt_get_upgrade
 local candidates="$ALL_UBUNTU"
@@ -750,9 +759,6 @@ if [ $ret -eq 0 ]; then
     continue; 
   fi
   ret=1
-fi
-if [ $ret -eq 0 ]; then
-  tweak_broken_configs
 fi
 return $ret
 done
@@ -1061,7 +1067,7 @@ if is_fixed ; then
   return 0
 fi
 
-print_mixed_distros || return $?
+check_for_mixed_distros || return $?
 
 # improve apt sources
 convert_deb_6_stable_repo_to_squeeze  || return $?
@@ -1088,7 +1094,7 @@ return 0
 }
 
 function packages_upgrade() {
-print_mixed_distros || return $?
+check_for_mixed_distros || return $?
 
 # improve apt sources
 convert_deb_6_stable_repo_to_squeeze  || return $?
@@ -1111,7 +1117,7 @@ improve_yum_setup || return $?
 
 add_missing_debian_keys || return $?
 
-print_mixed_distros || return $?
+check_for_mixed_distros || return $?
 
 apt_get_upgrade || return $?
 
@@ -1136,7 +1142,7 @@ if [ "--usage" = "${ACTION:-$1}" ] ; then
 elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
   print_vulnerability_status beforefix
   print_info
-  print_mixed_distros
+  check_for_mixed_distros
   report_unsupported
   # set return code
   true

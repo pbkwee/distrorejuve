@@ -9,7 +9,7 @@ LTS_UBUNTU="dapper hardy lucid precise trusty"
 SUPPORTED_UBUNTU="precise trusty wily" 
 UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy vivid lucid utopic"
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid "
-NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic maverick natty oneiric quantal raring saucy utopic vivd"
+NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic maverick natty oneiric quantal raring saucy utopic vivid"
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny"
@@ -182,7 +182,7 @@ return 2
 function print_CVE_2015_7547_vulnerable() {
 if [ ! -x /usr/rpm -a -x /usr/bin/dpkg ]; then
     # based on some known good package versions https://security-tracker.debian.org/tracker/CVE-2015-7547
-   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.11\.3-4\+deb6u11|2\.13-38\+deb7u10|2\.19-18\+deb8u3|2\.21-8'; then
+   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.11\.3-4\+deb6u11|2\.13-38\+deb7u10|2\.19-18\+deb8u3|2\.21-8|2\.21-9'; then
      echo "N"
      return 1
    fi
@@ -403,6 +403,15 @@ fi
 return 0
 }
 
+function print_uninstall_dovecot() {
+  echo "dss:info:Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
+  echo "dss:info:Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
+  echo "dss:info:Please remove dovecot.  Then re-install/reconfigure it afterwards.  Saving the current dovecot config to /root/deghostinfo/postconf.log.$$"
+  prep_ghost_output_dir
+  postconf -n > /root/deghostinfo/postconf.log.$$
+  echo "apt-get remove dovecot-c* (dovecot-core or dovecot-common)" >&2
+}
+
 function dist_upgrade_lenny_to_squeeze() {
 [ ! -e /etc/apt/sources.list ] && return 0
 if ! grep -qai '^ *deb.*lenny' -- /etc/apt/sources.list; then
@@ -413,9 +422,7 @@ return 0
 fi
 
 if dpkg -l | grep -qai '^ii.*dovecot'; then
-  echo "Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
-  echo "changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "apt-get remove dovecot-c* (dovecot-core or dovecot-common) if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
+  print_uninstall_dovecot
   return 1
 fi
 
@@ -490,6 +497,32 @@ export old_distro=wheezy
 export old_ver="inux 7"
 export new_distro=jessie
 dist_upgrade_x_to_y
+ret=$?
+if [ $ret -eq 0 ]; then
+  tweak_broken_configs
+fi
+return $ret
+}
+
+function tweak_broken_configs() {
+  if [ -x /usr/sbin/apache2ctl ] && [ -f /etc/apache2/apache2.conf ]; then
+    if grep -qai '^Include /etc/apache2/conf.d/' /etc/apache2/apache2.conf && [ ! -d /etc/apache2/conf.d ]; then
+      replace 'Include /etc/apache2/conf.d/' '#Include /etc/apache2/conf.d/' -- /etc/apache2/apache2.conf
+      echo "dss:info: Commenting out Include /etc/apache2/conf.d/ for non-existent directory.  Might be better to use revert to package provided apache config?"
+    fi
+    if grep -qa '^Include /etc/apache2/httpd.conf' /etc/apache2/apache2.conf && [ ! -f /etc/apache2/httpd.conf ]; then 
+      replace "Include /etc/apache2/httpd.conf" "#Include /etc/apache2/httpd.conf" -- /etc/apache2/apache2.conf
+      echo "dss:info:Commenting out Include /etc/apache2/httpd.conf for non existent file"
+    fi
+    if ! /usr/sbin/apache2ctl -S 2>/dev/null >/dev/null && grep -qa '^LockFile ' /etc/apache2/apache2.conf; then
+        replace "LockFile" "#LockFile" -- /etc/apache2/apache2.conf
+        echo "dss:info:Commented out Lockfile in /etc/apache2/apache2.conf"
+    fi
+    if /usr/sbin/apache2ctl -S 2>&1 | grep -qai 'Ignoring deprecated use of DefaultType'; then
+      replace "DefaultType" "#DefaultType" -- /etc/apache2/apache2.conf 
+      echo "dss:info:Commented out DefaultType in /etc/apache2/apache2.conf"
+    fi
+  fi 
 }
 
 function dist_upgrade_x_to_y() {
@@ -545,6 +578,9 @@ fi
 
 apt_get_dist_upgrade
 ret=$?
+
+tweak_broken_configs
+
 apt-get -y autoremove
 if [ $ret -eq 0 ]; then
 	if lsb_release -a 2>/dev/null| egrep -qai '${new_distro}'; then
@@ -561,7 +597,10 @@ function report_config_state_changes() {
   prep_ghost_output_dir
   now=$(date +%s)
   record_config_state /root/deghostinfo/postupgrade.dpkg.$now
-  diff /root/deghostinfo/preupgrade.dpkg.$$ /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
+  # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
+  fromfile=$(ls -1rt $(find /root/deghostinfo/ -mtime -1 | grep preupgrade) | head -n 1)
+  [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
+  diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
 }
 
 function record_config_state() {
@@ -573,12 +612,19 @@ function record_config_state() {
   # don't overwrite the preupgrade file
   echo $file | grep preupgrade && [ -f $file ] && return 0
   
-  local files=$(find /etc -type f | egrep '.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave')
-  > /root/deghostinfo/preupgrade.dpkg.$$
+  local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
+  > $file
   # conf files
+  echo "Config files.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used." >> files
+  echo "" >> $file
   [ ! -z "$files" ] && ls -lrt $files > $file
+  echo "Listening ports:" >> $file
+  echo "" >> $file
   # listening ports
-  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' >> $file
+  # Listen ports: 0.0.0.0:995 dovecot
+  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sort -k 4 >> $file
+  echo "Apache vhosts:" >> $file
+  echo "" >> $file
   # vhosts 
   [ -x /usr/sbin/apache2ctl ] && /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> $file
 }
@@ -589,13 +635,13 @@ function apt_get_upgrade() {
 print_mixed_distros || return $?
 apt-get update
 record_config_state
-dpkg --configure -a --force-confnew --force-confdef
+dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get -y autoremove
 echo "dss:info: running an apt-get upgrade"
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" upgrade
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" upgrade
 ret=$?
 apt-get -y autoremove
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -f install
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
 if [ $ret -ne 0 ]; then
   echo "dss:error: apt-get upgrade failed."
   return 1
@@ -607,13 +653,14 @@ function apt_get_dist_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
 print_mixed_distros || return $?
 apt_get_upgrade || return 1
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -f install
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" install dpkg
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" -f install
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install dpkg
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" autoremove
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
 # cope with 'one of those random things'
-if [ $? -ne 0 ] && apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade 2>&1 | grep "Could not perform immediate configuration on "; then
-  apt-get -f install libc6-dev
-  apt-get dist-upgrade -y -f -o APT::Immediate-Configure=0 -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"
+if [ $? -ne 0 ] && apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade 2>&1 | grep "Could not perform immediate configuration on "; then
+  apt-get -f -y install libc6-dev
+  apt-get dist-upgrade -y -f -o APT::Immediate-Configure=0 -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss"
 fi
 [ -e /var/log/syslog ] && [ -e /etc/my/my.cnf ] && if grep "unknown variable 'lc-messages-dir" /var/log/syslog; then
   #lc-messages-dir        = /usr/share/mysql...
@@ -621,9 +668,9 @@ fi
   sed -i "s@^lc-messages-dir\(.*\)@#lc-messages-dir\1@" /etc/my/my.cnf
 fi
 
-dpkg --configure -a --force-confnew --force-confdef
+dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get -y autoremove
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" dist-upgrade
+apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
 ret=$?
 if [ $ret -ne 0 ] ; then
   echo "dss:error: Got an error after an apt-get dist-upgrade" 
@@ -640,9 +687,7 @@ function dist_upgrade_ubuntu_to_latest() {
 lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
 
 if dpkg -l | grep -qai '^ii.*dovecot'; then
-  echo "Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
-  echo "changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "apt-get remove dovecot-c* (dovecot-core or dovecot-common) if you wish to proceed and do not need dovecot, or are willing to reinstall/reconfigure it after the upgrade." >&2
+  print_uninstall_dovecot
   return 1
 fi
 
@@ -650,7 +695,12 @@ print_mixed_distros || return $?
 
 apt_get_upgrade
 local candidates="$ALL_UBUNTU"
-for start in $ALL_UBUNTU; do 
+for start in $ALL_UBUNTU; do
+  #No LSB modules are available.
+  #Distributor ID: Ubuntu
+  #Description:  Ubuntu 14.04.4 LTS
+  #Release:  14.04
+  #Codename: trusty 
   current=$(lsb_release -a 2>/dev/null| grep -i Codename | awk '{print $2}')
   # remove distros prior to us
   candidates="$(echo $candidates | sed "s/$start//")"
@@ -661,19 +711,25 @@ for start in $ALL_UBUNTU; do
   if [ -z "$candidates" ]; then return 0; fi
   # if we are currently an lts, then we can move from lts to next lts and skip over the non-lts ones
   if echo $LTS_UBUNTU | grep -qai $current; then
+    local removed=""
     for remove in $NON_LTS_UBUNTU; do
+       removed="$remove $removed"
        candidates="$(echo $candidates | sed "s/$remove//")"
     done
+    echo "dss:info:current distro ($current) is an Ubuntu LTS.  Skipping non-LTS versions: $removed; Leaving LTS versions of: $candidates"
   fi 
   # comment out current sources entries
   prep_ghost_output_dir
+  local next=$(echo $candidates | awk '{print $1}')
+  if [ -z "$next" ]; then
+    echo "dss:info:Current Ubuntu distro is $current.  No newer/better distro.  Finished." 
+    return 0 
+  fi
   if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
   # comment out package entries
   sed -i "s@^ *deb \(.*\)ubuntu.com\(.*\)@#deb \1ubuntu.com\2@" /etc/apt/sources.list
-  echo "dss:info: attempting a dist-upgrade from $current to $next."
   # add in new repo names
-  local next=$(echo $candidates | awk '{print $1}')
-  if [ -z "$next" ]; then return 0; fi
+  echo "dss:info: attempting a dist-upgrade from $current to $next."
   if echo $UNSUPPORTED_UBUNTU | grep -qai $next; then
     echo "deb http://old-releases.ubuntu.com/ubuntu/ $next main restricted universe multiverse" >> /etc/apt/sources.list
     echo "deb http://old-releases.ubuntu.com/ubuntu/ $next-updates main restricted universe multiverse" >> /etc/apt/sources.list
@@ -695,9 +751,11 @@ if [ $ret -eq 0 ]; then
   fi
   ret=1
 fi
+if [ $ret -eq 0 ]; then
+  tweak_broken_configs
+fi
 return $ret
 done
-
 }
 
 function convert_old_debian_repo() {
@@ -803,7 +861,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   fi
   if [ -d /var/lib/dpkg/updates ] && [ 0 -ne $(find /var/lib/dpkg/updates -type f | wc -l) ]; then
     echo "dss:info: looks like there were some pending updates.  checking if they need configuring before proceeding with the libc6 install"
-    dpkg --configure -a --force-confnew --force-confdef
+    dpkg --configure -a --force-confnew --force-confdef --force-confmiss
   fi
   apt-get -y install libc6
   ret=$?
@@ -1062,12 +1120,13 @@ yum_upgrade || return $?
 }
 
 function dist_upgrade() {
-  apt_get_dist_upgrade
-  dist_upgrade_lenny_to_squeeze
-  dist_upgrade_squeeze_to_wheezy
-  dist_upgrade_wheezy_to_jessie
-  dist_upgrade_ubuntu_to_latest
-  apt_get_dist_upgrade
+  packages_upgrade || return $?
+  apt_get_dist_upgrade || return $?
+  dist_upgrade_lenny_to_squeeze || return $?
+  dist_upgrade_squeeze_to_wheezy || return $?
+  dist_upgrade_wheezy_to_jessie || return $?
+  dist_upgrade_ubuntu_to_latest || return $?
+  apt_get_dist_upgrade || return $?
 }
 
 

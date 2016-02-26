@@ -297,7 +297,7 @@ function fix_dns() {
 function upgrade_precondition_checks() {
   local ret=0
   # e.g. 3.12.1
-  if uname -r | ! grep -qai '^[12]'; then
+  if uname -r | grep -qai '^[12]'; then
     echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp"
     ret=$(($ret+1))
   fi  
@@ -617,7 +617,7 @@ function print_config_state_changes() {
   # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
   fromfile=$(ls -1rt $(find /root/deghostinfo/ -mtime -1 | grep preupgrade) | head -n 1)
   [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
-  echo "dss:info: Config file to check.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
+  echo "dss:info: Config files to check.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
   diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
 }
 

@@ -278,6 +278,7 @@ fi
 ps auxf | grep -v '[g]host' | awk '{print "dss:psauxf:" $0}'
 echo "dss:info: Checking for disk space on host"
 df -m | awk '{print "dss:dfm:" $0}'
+[ -f /etc/apt/sources.list ] && cat /etc/apt/sources.list | egrep -v '^$|^#' | awk '{print "dss:aptsources:" $0}'
 return 0
 }
 
@@ -293,18 +294,27 @@ function fix_dns() {
   fi
 }
 
-function check_for_mixed_distros() {
-  [ ! -f /etc/apt/sources.list ] && return 0
-  num=0
-  distros=""
-  for distro in $ALL_UBUNTU $ALL_DEBIAN; do
-    grep -qai "^ *[a-z].*$distro" /etc/apt/sources.list || continue
-    num=$((num+1))
-    distros="$distro $distros"
-  done
-  [ $num -lt 2 ] && return 0
-  echo "dss:warn:/etc/apt/sources.list looks like it contains a mix of distros: $distros"
-  return 1
+function upgrade_precondition_checks() {
+  local ret=0
+  # e.g. 3.12.1
+  if uname -r | ! grep -qai '^[12]'; then
+    echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp"
+    ret=$(($ret+1))
+  fi  
+  # check that there is only a single package repo in use.  else mixing two distro versions is troublesome
+  if [ -f /etc/apt/sources.list ]; then
+    num=0
+    distros=""
+    for distro in $ALL_UBUNTU $ALL_DEBIAN; do
+      grep -qai "^ *[a-z].*$distro" /etc/apt/sources.list || continue
+      num=$((num+1))
+      distros="$distro $distros"
+    done
+    [ $num -lt 2 ] && return 0
+    echo "dss:warn:/etc/apt/sources.list looks like it contains a mix of distros: $distros"
+    ret=$(($ret+1))
+  fi
+  return $ret
 }
 function convert_deb_6_stable_repo_to_squeeze() {
 if [ ! -f /etc/debian_version ] ; then return 0; fi
@@ -440,7 +450,7 @@ fi
 
   add_missing_debian_keys
 
-check_for_mixed_distros || return $?
+upgrade_precondition_checks || return $?
 
 apt_get_upgrade
 ret=$?
@@ -543,7 +553,7 @@ if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
 return 0
 fi
 
-check_for_mixed_distros || return $?
+upgrade_precondition_checks || return $?
 
 apt_get_upgrade
 ret=$?
@@ -607,6 +617,7 @@ function print_config_state_changes() {
   # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
   fromfile=$(ls -1rt $(find /root/deghostinfo/ -mtime -1 | grep preupgrade) | head -n 1)
   [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
+  echo "dss:info: Config file to check.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
   diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
 }
 
@@ -622,7 +633,6 @@ function record_config_state() {
   local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
   > $file
   # conf files
-  echo "Config files.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used." >> files
   echo "" >> $file
   [ ! -z "$files" ] && ls -lrt $files > $file
   echo "Listening ports:" >> $file
@@ -639,7 +649,7 @@ function record_config_state() {
 function apt_get_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
 [ -e /etc/redhat-release ] && return 0
-check_for_mixed_distros || return $?
+upgrade_precondition_checks || return $?
 apt-get update
 record_config_state
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
@@ -659,7 +669,7 @@ return $ret
 
 function apt_get_dist_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
-check_for_mixed_distros || return $?
+upgrade_precondition_checks || return $?
 apt_get_upgrade || return 1
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" -f install
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install dpkg
@@ -700,7 +710,7 @@ if dpkg -l | grep -qai '^ii.*dovecot'; then
   return 1
 fi
 
-check_for_mixed_distros || return $?
+upgrade_precondition_checks || return $?
 
 apt_get_upgrade
 local candidates="$ALL_UBUNTU"
@@ -1067,7 +1077,7 @@ if is_fixed ; then
   return 0
 fi
 
-check_for_mixed_distros || return $?
+upgrade_precondition_checks || return $?
 
 # improve apt sources
 convert_deb_6_stable_repo_to_squeeze  || return $?
@@ -1094,7 +1104,7 @@ return 0
 }
 
 function packages_upgrade() {
-check_for_mixed_distros || return $?
+upgrade_precondition_checks || return $?
 
 # improve apt sources
 convert_deb_6_stable_repo_to_squeeze  || return $?
@@ -1117,7 +1127,7 @@ improve_yum_setup || return $?
 
 add_missing_debian_keys || return $?
 
-check_for_mixed_distros || return $?
+upgrade_precondition_checks || return $?
 
 apt_get_upgrade || return $?
 
@@ -1142,7 +1152,7 @@ if [ "--usage" = "${ACTION:-$1}" ] ; then
 elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
   print_vulnerability_status beforefix
   print_info
-  check_for_mixed_distros
+  upgrade_precondition_checks
   report_unsupported
   # set return code
   true

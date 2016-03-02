@@ -300,7 +300,7 @@ function upgrade_precondition_checks() {
   if uname -r | grep -qai '^[12]'; then
     echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp"
     ret=$(($ret+1))
-  fi  
+  fi
   # check that there is only a single package repo in use.  else mixing two distro versions is troublesome
   if [ -f /etc/apt/sources.list ]; then
     num=0
@@ -377,12 +377,14 @@ function add_missing_debian_keys() {
   [ ! -e /etc/apt/sources.list ] && return 0
   [ ! -x /usr/bin/apt-key ] && return 0
   print_distro_info | grep -qai debian || return 0
+  echo "dss:info:checking debian keys"
   # import the lts key
   if ! apt-key list | grep -qai "46925553"; then
     echo "dss:info: installing the deb 7 2020 key"
     if ! gpg --recv-key  8B48AD6246925553 ; then gpg --keyserver pgpkeys.mit.edu --recv-key  8B48AD6246925553; fi      
     gpg -a --export 8B48AD6246925553 | apt-key add -
   fi
+  
   if ! apt-key list | grep -qai "473041FA"; then
     # Debian Archive Automatic Signing Key (6.0/squeeze) <ftpmaster@debian.org>
     echo "dss:info: installing the deb 6 key"
@@ -524,6 +526,7 @@ return $ret
 }
 
 function tweak_broken_configs() {
+  grep -qai 'Include conf.d'  /etc/apache2/apache2.conf && [ ! -d /etc/apache2/conf.d ] && mkdir /etc/apache2/conf.d
   if [ -x /usr/sbin/apache2ctl ] && [ -f /etc/apache2/apache2.conf ]; then
     if grep -qai '^Include /etc/apache2/conf.d/' /etc/apache2/apache2.conf && [ ! -d /etc/apache2/conf.d ]; then
       replace 'Include /etc/apache2/conf.d/' '#Include /etc/apache2/conf.d/' -- /etc/apache2/apache2.conf
@@ -536,6 +539,9 @@ function tweak_broken_configs() {
     if ! /usr/sbin/apache2ctl -S 2>/dev/null >/dev/null && grep -qa '^LockFile ' /etc/apache2/apache2.conf; then
         replace "LockFile" "#LockFile" -- /etc/apache2/apache2.conf
         echo "dss:info:Commented out Lockfile in /etc/apache2/apache2.conf"
+    fi
+    if [ -f /etc/apache2/mods-available/ssl.conf ] && /usr/sbin/apache2ctl -S 2>&1 | grep -qai "Invalid command 'SSLMutex'"; then
+      replace "SSLMutex" "#SSLMutex" -- /etc/apache2/mods-available/ssl.conf
     fi
     if /usr/sbin/apache2ctl -S 2>&1 | grep -qai 'Ignoring deprecated use of DefaultType'; then
       replace "DefaultType" "#DefaultType" -- /etc/apache2/apache2.conf 
@@ -578,10 +584,15 @@ if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc
 # comment out the old entries
 sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
 sed -i "s@^ *deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
-sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
+# deb-src http://ftp.us.debian.org/debian/ wheezy main
+# deb-src http://security.debian.org/ wheezy/updates main
+sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name@#deb-src http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
+# deb-src http://security.debian.org/ wheezy/updates main
+# deb-src http://mirrors.coyx.com/debian/ wheezy-updates main
+sed -i "s@^ *deb-src http://\([a-zA-Z0-9./]*\) *$name@#deb-src http://\1 $name@" /etc/apt/sources.list
 sed -i "s@^ *deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
 sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
+sed -i "s@^ *deb http://security.debian.org[/] $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
 done
 
 # disable the archive repositories
@@ -619,6 +630,23 @@ function print_config_state_changes() {
   [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
   echo "dss:info: Config files to check.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
   diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
+  
+  echo "dss:info:How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files."
+  local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
+  for file in $files; do
+    echo $file | grep -qv dpkg-dist && continue
+    current=$(echo $file | sed 's/\.dpkg-dist$//')
+    [ -z "$current" ] || [ ! -f $current ] && continue
+    echo "dss:pkgdiff:$current To use the dist file: mv $current $current.dpkg-old; mv $file $current"
+    diff <(egrep -v '^#|^$' $current) <(egrep -v '^#|^$' $file ) | awk '{print "dss:pkgdiff:" $0}'
+  done
+  
+  # non .conf site files
+  # IncludeOptional sites-enabled/*.conf
+  [ -d /etc/apache2/sites-available ] && [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include.*sites-.*conf' /etc/apache2/apache2.conf && local nonconfsitefiles=$(find /etc/apache2/sites-available -type f | grep -c '\.conf$')
+  for file in $nonconfsitefiles; do
+    echo "dss:warn: $file should have a .conf extension: mv $file $file.conf;a2ensite $(basename $filename.conf)"   
+  done   
 }
 
 function record_config_state() {
@@ -769,6 +797,8 @@ if [ $ret -eq 0 ]; then
     continue; 
   fi
   ret=1
+else
+  echo "dss:warn: dist-upgrade from $current to $next appears to have failed." 
 fi
 return $ret
 done

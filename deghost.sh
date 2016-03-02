@@ -638,7 +638,7 @@ function print_config_state_changes() {
     current=$(echo $file | sed 's/\.dpkg-dist$//')
     [ -z "$current" ] || [ ! -f $current ] && continue
     echo "dss:pkgdiff:$current To use the dist file: mv $current $current.dpkg-old; mv $file $current"
-    diff <(egrep -v '^#|^$' $current) <(egrep -v '^#|^$' $file ) | awk '{print "dss:pkgdiff:" $0}'
+    diff <(egrep -v '^\s*#|^$' $current) <(egrep -v '^\s*#|^$' $file ) | awk '{print "dss:pkgdiff:" $0}'
   done
   
   # non .conf site files

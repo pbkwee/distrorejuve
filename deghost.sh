@@ -22,18 +22,9 @@ deghost is a cross-distro script to determine the vulnerability of a libc librar
 
 deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
 
-See also http://rimuhosting.com/maintenance.jsp?server_maint_oid=195331653
-
-Attempts to fix:
-
-    - Debian 7 => apt-get install
-    - Debian 6 => fix up apt repositories for squeeze-lts and then apt-get install
-    - Supported Ubuntus (12.04 LTS, 14.04 LTS, 14.10) => apt-get install
-    - Lenny (Deb 5), or any Ubuntu use the --break-eggs options to dist-upgrade to Wheezy or Trusty LTS.  This will likely 
-        not work automatically, may leave you in dependency hell, and will likely change configs in ways you wish it hadn't.
-        
 Attempts to improve the situation:
         
+    - Using squeeze?  Switch to squeeze-lts
     - Unsupported Ubuntus (others per UNSUPPORTED_UBUNTU variable) => convert to old-releases.ubuntu.com
     
 No action available for the following (and older) distros:
@@ -46,9 +37,7 @@ Use with --source if you just wish to have the functions available to you for te
 
 Run with --check (or no argument) if you just wish to check, but not change your server
 
-Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (supported) to wheezy (latest).  Note caveats above.
-
-Run with --break-eggs to dist upgrade any ubuntu to the latest LTS.  Note caveats above.
+Run with --break-eggs will run a --dist-upgrade if the server is vulnerable.
 
 Run with --usage to get this message
 
@@ -394,13 +383,18 @@ function add_missing_debian_keys() {
 
 }
 function add_missing_squeeze_lts() {
-if [ -e /etc/apt/sources.list ] && grep -qai '^ *deb.*squeeze' /etc/apt/sources.list && ! grep -qai "^ *deb.*squeeze-lts" /etc/apt/sources.list; then echo "
+if [ -e /etc/apt/sources.list ] && grep -qai '^ *deb.*squeeze' /etc/apt/sources.list && ! grep -qai "^ *deb.*squeeze-lts" /etc/apt/sources.list; then 
+prep_ghost_output_dir
+if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+echo "
 deb http://http.debian.net/debian/ squeeze-lts main contrib non-free
 deb-src http://http.debian.net/debian/ squeeze-lts main contrib non-free
 " >> /etc/apt/sources.list
 echo "info: added missing squeeze-lts repos"
 fi 
 [ -e /etc/apt/sources.list ] && if grep -qai '^ *deb.*squeeze-lts' /etc/apt/sources.list ; then
+  prep_ghost_output_dir
+  if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
   # comment out non-lts entries
   # the \S is for country code (.us. or .nz. etc.)
   sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian/ squeeze@#deb http://ftp.\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
@@ -638,14 +632,14 @@ function print_config_state_changes() {
     current=$(echo $file | sed 's/\.dpkg-dist$//')
     [ -z "$current" ] || [ ! -f $current ] && continue
     echo "dss:pkgdiff:$current To use the dist file: mv $current $current.dpkg-old; mv $file $current"
-    diff <(egrep -v '^\s*#|^$' $current) <(egrep -v '^\s*#|^$' $file ) | awk '{print "dss:pkgdiff:" $0}'
+    diff --ignore-all-space <(egrep -v '^\s*#|^$' $current) <(egrep -v '^\s*#|^$' $file ) | awk '{print "dss:pkgdiff:" $0}'
   done
   
   # non .conf site files
   # IncludeOptional sites-enabled/*.conf
-  [ -d /etc/apache2/sites-available ] && [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include.*sites-.*conf' /etc/apache2/apache2.conf && local nonconfsitefiles=$(find /etc/apache2/sites-available -type f | grep -c '\.conf$')
+  [ -d /etc/apache2/sites-available ] && [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include.*sites-.*conf' /etc/apache2/apache2.conf && local nonconfsitefiles=$(find /etc/apache2/sites-available -type f | egrep -v '\.conf$|dpkg-')
   for file in $nonconfsitefiles; do
-    echo "dss:warn: $file should have a .conf extension: mv $file $file.conf;a2ensite $(basename $filename.conf)"   
+    echo "dss:warn: Apache config file '$file' should have a .conf extension: mv $file $file.conf;a2ensite $(basename $filename).conf)"   
   done   
 }
 
@@ -892,7 +886,6 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   for distro in wheezy jessie; do 
     if grep -qai "^ *deb.*$distro" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.*$distro" /etc/apt/sources.list; then
        echo "dss:info: adding the $distro security repository to the sources.list"
-       prep_ghost_output_dir
        if [ ! -e /root/deghostinfo/sources.list.$$ ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list.$$"; cp /etc/apt/sources.list /root/deghostinfo/sources.list.$$; fi
        echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
        apt-get update

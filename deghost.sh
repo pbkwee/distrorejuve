@@ -74,6 +74,24 @@ function is_fixed() {
   return 1
 }
 
+function replace() {
+   which replace 2>/dev/null >/dev/null
+   if [ $? -eq 0 ]; then 
+     $(which replace) $@
+     return $?
+   fi
+   from=$1
+   to=$2
+   dash=$3
+   file=$4
+   if [ "$dash" != "--" ]; then
+     echo "expecting '--'" >&2
+     return 1
+   fi
+   [ ! -f "$file" ] && echo "No such file as $file" >&2 && return 1
+   sed -i "s@$from@$to@" "$file"
+}
+
 function is_vulnerable() {
   is_CVE_2015_0235_vulnerable && return 0
   is_CVE_2015_7547_vulnerable && return 0
@@ -382,31 +400,89 @@ function add_missing_debian_keys() {
   fi
 
 }
-function add_missing_squeeze_lts() {
-if [ -e /etc/apt/sources.list ] && grep -qai '^ *deb.*squeeze' /etc/apt/sources.list && ! grep -qai "^ *deb.*squeeze-lts" /etc/apt/sources.list; then 
-prep_ghost_output_dir
-if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
-echo "
-deb http://http.debian.net/debian/ squeeze-lts main contrib non-free
-deb-src http://http.debian.net/debian/ squeeze-lts main contrib non-free
-" >> /etc/apt/sources.list
-echo "info: added missing squeeze-lts repos"
-fi 
-[ -e /etc/apt/sources.list ] && if grep -qai '^ *deb.*squeeze-lts' /etc/apt/sources.list ; then
+
+# e.g. test with diff /etc/apt/sources.list <(disable_debian_repos squeeze)
+function disable_debian_repos() {
+  [ ! -f /etc/apt/sources.list ] && return 0
+  local name=$1
+  # disable both squeeze and squeeze lts if squeeze
+  [ "$name" == "squeeze" ] && disable_debian_repos squeeze-lts
+  # disable both wheezy and wheezy lts if wheezy
+  [ "$name" == "wheezy" ] && disable_debian_repos wheezy-lts 
+  {
+    cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
+      # comment out the old entries
+      line=$(echo $line | sed "s@^ *deb http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://ftp.\1.debian.org/debian $name\2@")
+      line=$(echo $line | sed "s@^ *deb http://security.debian.org/ $name\([ /]\)@#deb http://security.debian.org/ $name\1@")
+      line=$(echo $line | sed "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb-src http://ftp.\1.debian.org/debian $name\2@")
+      # deb http://http.us.debian.org/debian/ wheezy main non-free contrib
+      line=$(echo $line | sed "s@^ *deb http://http.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://http.\1.debian.org/debian $name\2@")
+      line=$(echo $line | sed "s@^ *deb http://non-us.debian.org/debian-non-US $name\([ /]\)@#deb http://non-us.debian.org/debian-non-US $name\1@")
+      line=$(echo $line | sed "s@^ *deb http://security.debian.org[/] $name\([ /]\)@#deb http://security.debian.org $name\1@")
+      # deb-src http://ftp.us.debian.org/debian/ wheezy main
+      # deb-src http://security.debian.org/ wheezy/updates main
+      line=$(echo $line | sed "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb-src http://ftp.\1.debian.org/debian $name\2@")
+      # deb-src http://security.debian.org/ wheezy/updates main
+      # deb-src http://mirrors.coyx.com/debian/ wheezy-updates main
+      line=$(echo $line | sed "s@^ *deb http://http.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://http.\1.debian.org/debian $name\2@")
+      line=$(echo $line | sed "s@^ *deb-src http://\([a-zA-Z0-9./]*\) *$name\([ /]\)@#deb-src http://\1 $name\2@")
+      # disable the archive repositories
+      line=$(echo $line | sed "s@^ *deb http://archive.\([a-zA-Z0-9./]*\) *$name\([ /]\)@#deb http://archive.\1 $name\2@")
+      echo $line
+    done
+  } > /etc/apt/sources.list.$$
+  if diff /etc/apt/sources.list /etc/apt/sources.list.$$ >/dev/null; then
+    rm /etc/apt/sources.list.$$ 
+    return 0
+  fi 
   prep_ghost_output_dir
   if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
-  # comment out non-lts entries
-  # the \S is for country code (.us. or .nz. etc.)
-  sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian/ squeeze@#deb http://ftp.\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
-  sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian squeeze@#deb http://ftp.\1.debian.org/debian squeeze@g"  /etc/apt/sources.list 
-  sed -i "s@^ *deb http://security.debian.org/ squeeze@#deb http://security.debian.org/ squeeze@" /etc/apt/sources.list
-  sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian squeeze@#deb-src http://ftp.\1.debian.org/debian squeeze@" /etc/apt/sources.list
-  sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian/ stable@#deb http://ftp.\1.debian.org/debian/ stable@" /etc/apt/sources.list
-  sed -i "s@^ *deb http://\(\S*\).debian.org/debian/ squeeze@#deb http://\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
-  sed -i "s@^ *deb-src http://\(\S*\).debian.org/debian/ squeeze@#deb http://\1.debian.org/debian/ squeeze@" /etc/apt/sources.list
-fi
+  echo "dss:info: enabling debian archive repos.  diff follows:"
+  diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
+  mv /etc/apt/sources.list.$$ /etc/apt/sources.list
+  echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  return 0
+}
 
-return 0
+# e.g. enable_debian_archive squeeze squeeze-lts
+function enable_debian_archive() {
+  [ ! -f /etc/apt/sources.list ] && return 0
+  names=$@
+  [ -z "$names" ] && names="potato sarge woody etch lenny squeeze squeeze-lts"
+  enablearchive=
+  enabledarchive=
+  {
+    cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
+      for name in $names; do
+        echo $line | grep -qai "^deb http://archive.debian.org/debian $name[ /]" && enabledarchive="$enabledarchive $name " && break
+        echo $line | egrep -qai '^$|^#' && echo $line && line="" && break
+        # disable srcs
+        echo $line | egrep -qai "^ *deb-src ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && echo $line | sed "s@^ *deb-src \([a-zA-Z]*\)://\([a-zA-Z0-9./]*\) *$name @#deb-src \1://\2 $name @" && line="" && break
+        echo $line | egrep -qai "^ *deb ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && enablearchive="$enablearchive $name" && echo "#$line" && line="" && break
+      done
+      [ ! -z "$line" ] && echo $line
+    done
+    # if one or the other is enable, add both
+    echo $enablearchive | grep -qai "squeeze" && enablearchive="$enablearchive squeeze squeeze-lts"
+    echo $enablearchive | grep -qai "wheezy" && enablearchive="$enablearchive wheezy wheezy-lts"
+    
+    for name in $(for i in $(for i in $enablearchive; do echo $i; done | sort | uniq); do echo -n "$i "; done); do
+      # already there
+      echo "$enabledarchive" | grep -qai "$name " && continue 
+      echo "deb http://archive.debian.org/debian $name main contrib non-free"
+    done
+  } > /etc/apt/sources.list.$$
+  if diff /etc/apt/sources.list /etc/apt/sources.list.$$ >/dev/null; then
+    rm /etc/apt/sources.list.$$ 
+    return 0
+  fi 
+  prep_ghost_output_dir
+  if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+  echo "dss:info: enabling debian archive repos.  diff follows:"
+  diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
+  mv /etc/apt/sources.list.$$ /etc/apt/sources.list
+  echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  return 0
 }
 
 function print_uninstall_dovecot() {
@@ -439,7 +515,7 @@ if ! lsb_release -a 2>/dev/null| egrep -qai 'lenny|Linux 5' ; then
 return 0
 fi
 
-if dpkg -l | grep -qai '^ii.*dovecot'; then
+if dpkg -l | grep -qai '^i.*dovecot'; then
   print_uninstall_dovecot
   return 1
 fi
@@ -456,35 +532,7 @@ if [ $ret -ne 0 ]; then
   return 1
 fi
   
-for name in lenny ; do 
-! grep -qai "^ *deb.*$name" /etc/apt/sources.list && continue
-
-# already using archives, all good
-if grep -qai "^ *deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
-  echo "dss:info: This is a $name distro, and already has archive.debian in the repository."
-  continue
-fi
-
-prep_ghost_output_dir
-if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
-
-# comment out the old entries
-sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
-sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
-sed -i "s@^ *deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
-done
-
-# disable the archive repositories
-sed -i "s@^ *deb http://archive.debian.org@#deb http://archive.debian.org@" /etc/apt/sources.list
-
-if ! grep -qai '^ *deb.*squeeze-lts' /etc/apt/sources.list; then
-  echo "deb http://http.us.debian.org/debian/ squeeze main non-free contrib" >> /etc/apt/sources.list
-  echo "deb http://http.us.debian.org/debian/ squeeze-lts main non-free contrib" >> /etc/apt/sources.list
-  echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
-fi
+enable_debian_archive
 
 apt_get_dist_upgrade
 ret=$?
@@ -530,6 +578,10 @@ function tweak_broken_configs() {
       replace "Include /etc/apache2/httpd.conf" "#Include /etc/apache2/httpd.conf" -- /etc/apache2/apache2.conf
       echo "dss:info:Commenting out Include /etc/apache2/httpd.conf for non existent file"
     fi
+    if grep -qa '^Include httpd.conf' /etc/apache2/apache2.conf && [ ! -f /etc/apache2/httpd.conf ]; then 
+      replace "Include httpd.conf" "#Include httpd.conf" -- /etc/apache2/apache2.conf
+      echo "dss:info:Commenting out Include httpd.conf for non existent file"
+    fi
     if ! /usr/sbin/apache2ctl -S 2>/dev/null >/dev/null && grep -qa '^LockFile ' /etc/apache2/apache2.conf; then
         replace "LockFile" "#LockFile" -- /etc/apache2/apache2.conf
         echo "dss:info:Commented out Lockfile in /etc/apache2/apache2.conf"
@@ -562,43 +614,17 @@ if [ $ret -ne 0 ]; then
   echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_${old_distro}_to_${new_distro}"
   return 1
 fi
-  
-for name in $old_distro ${old_distro}-lts ; do 
-! grep -qai "^ *deb.*$name" /etc/apt/sources.list && continue
 
-# already using archives, all good
-if grep -qai "^ *deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
-  echo "dss:info: This is a $name distro, and already has archive.debian in the repository."
-  continue
-fi
+disable_debian_repos $old_distro
 
-prep_ghost_output_dir
-if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
-
-# comment out the old entries
-sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
-# deb-src http://ftp.us.debian.org/debian/ wheezy main
-# deb-src http://security.debian.org/ wheezy/updates main
-sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name@#deb-src http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
-# deb-src http://security.debian.org/ wheezy/updates main
-# deb-src http://mirrors.coyx.com/debian/ wheezy-updates main
-sed -i "s@^ *deb-src http://\([a-zA-Z0-9./]*\) *$name@#deb-src http://\1 $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://security.debian.org[/] $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
-done
-
-# disable the archive repositories
-sed -i "s@^ *deb http://archive.debian.org@#deb http://archive.debian.org@" /etc/apt/sources.list
-# disable the squeeze repositories.  e.g. deb http://http.us.debian.org/debian/ squeeze-lts main non-free contrib
-sed -i "s@^ *deb \(.*\)${old_distro}\(.*\)@#deb \1${old_distro}\2@" /etc/apt/sources.list
-
-if ! grep -qai "^ *deb.*${new_distro}" /etc/apt/sources.list; then
+if ! grep -qai "^ *deb.*${new_distro}[ /]" /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
   echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
   echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
 fi
+
+# redo to convert the above to archive where appropriate.  And add lts if appropriate.
+enable_debian_archive
 
 apt_get_dist_upgrade
 ret=$?
@@ -672,7 +698,10 @@ function apt_get_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
 [ -e /etc/redhat-release ] && return 0
 upgrade_precondition_checks || return $?
+enable_debian_archive
 apt-get update
+# E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
+[ $? -ne 0 ] && apt-get -o Acquire::Check-Valid-Until=false update
 record_config_state
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get -y autoremove
@@ -727,7 +756,7 @@ function dist_upgrade_ubuntu_to_latest() {
 [ ! -e /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
 
-if dpkg -l | grep -qai '^ii.*dovecot'; then
+if dpkg -l | grep -qai '^i.*dovecot'; then
   print_uninstall_dovecot
   return 1
 fi
@@ -1111,7 +1140,7 @@ convert_old_debian_repo || return $?
 for distro in $UNSUPPORTED_UBUNTU; do 
   convert_old_ubuntu_repo $distro || return $?
 done
-add_missing_squeeze_lts || return $?
+enable_debian_archive || return $?
 
 fix_missing_lsb_release
 
@@ -1138,7 +1167,7 @@ convert_old_debian_repo || return $?
 for distro in $UNSUPPORTED_UBUNTU; do 
   convert_old_ubuntu_repo $distro || return $?
 done
-add_missing_squeeze_lts || return $?
+enable_debian_archive || return $?
 
 fix_missing_lsb_release
 

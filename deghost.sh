@@ -5,10 +5,10 @@ export APT_LISTCHANGES_FRONTEND=text
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
-LTS_UBUNTU="dapper hardy lucid precise trusty"
-SUPPORTED_UBUNTU="precise trusty wily" 
+LTS_UBUNTU="dapper hardy lucid precise trusty xenial"
+SUPPORTED_UBUNTU="precise trusty wily xenial" 
 UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy vivid lucid utopic"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid "
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial"
 NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic maverick natty oneiric quantal raring saucy utopic vivid"
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
@@ -99,8 +99,7 @@ function is_vulnerable() {
 }
 
 function prep_ghost_output_dir() {
-if [ ! -d /root/deghostinfo ] ; then echo "dss:info: Creating /root/deghostinfo and cd-ing there."; mkdir /root/deghostinfo; fi
-[ -d /root/deghostinfo ] && cd /root/deghostinfo
+if [ ! -d /root/deghostinfo ] ; then echo "dss:info: Creating /root/deghostinfo."; mkdir /root/deghostinfo; fi
 return 0
 }
 
@@ -335,7 +334,7 @@ if ! grep -qai "^6." /etc/debian_version; then return 0; fi
 if ! grep -qai "^ *deb.*stable" /etc/apt/sources.list ; then echo "dss:info: Not using 'stable' repo.  Not converting deb6 stable to squeeze"; return 0; fi
 
 prep_ghost_output_dir
-if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
 
 sed -i 's@^ *deb http://http.\(\S*\).debian.org/debian stable@deb http://http.\1.debian.org/debian squeeze@' /etc/apt/sources.list
 sed -i 's@^ *deb http://security.debian.org stable@deb http://security.debian.org squeeze@' /etc/apt/sources.list
@@ -353,7 +352,7 @@ if [ -z "$CODENAME" ]; then echo "dss:error: We require a codename here.  e.g. c
 grep -qai '^ *deb .*old-releases.ubuntu.com' /etc/apt/sources.list && ! grep -qai "^ *deb.*archive.ub*$CODENAME" /etc/apt/sources.list && if ! grep -qai "^ *deb.*security.ub.*$CODENAME" /etc/apt/sources.list; then echo "dss:info: Already running an 'old-releases' $CODENAME repository."; return 0; fi
 
 prep_ghost_output_dir
-if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
 
 echo "dss:info: Commenting out expired $CODENAME repository"
 sed -i "s@^ *deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@#deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@" /etc/apt/sources.list
@@ -436,9 +435,9 @@ function disable_debian_repos() {
     return 0
   fi 
   prep_ghost_output_dir
-  if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+  cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: enabling debian archive repos.  diff follows:"
-  diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
+  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
   echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
   return 0
@@ -477,7 +476,7 @@ function enable_debian_archive() {
     return 0
   fi 
   prep_ghost_output_dir
-  if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+  cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: enabling debian archive repos.  diff follows:"
   diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
@@ -486,6 +485,8 @@ function enable_debian_archive() {
 }
 
 function print_uninstall_dovecot() {
+  [ ! -f /etc/apt/sources.list ] && return 0
+  ! dpkg -l | grep -qai '^i.*dovecot' && return 0
   echo "dss:info:Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
   echo "dss:info:Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
   echo "dss:info:Please remove dovecot.  Then re-install/reconfigure it afterwards.  Saving the current dovecot config to /root/deghostinfo/postconf.log.$$"
@@ -641,6 +642,27 @@ return 1
 
 }
 
+function print_minimal_config() {
+  local a=$1
+  local b=$2
+  [ ! -f $a ] && return 1
+  egrep -v '^\s*#|^$' $a
+  return 0
+}
+function print_minimal_config_diff() {
+  local a=$1
+  local b=$2
+  [ ! -f $a ] && return 1
+  [ ! -f $b ] && return 1
+  ta=$(mktemp aXXXXXX)
+  tb=$(mktemp bXXXXXX)
+  print_minimal_config $a > $ta
+  print_minimal_config $b > $tb
+  diff --ignore-all-space $ta $tb
+  ret=$?
+  rm -f $ta $tb
+  return $ret
+}
 function print_config_state_changes() {
   prep_ghost_output_dir
   now=$(date +%s)
@@ -658,7 +680,7 @@ function print_config_state_changes() {
     current=$(echo $file | sed 's/\.dpkg-dist$//')
     [ -z "$current" ] || [ ! -f $current ] && continue
     echo "dss:pkgdiff:$current To use the dist file: mv $current $current.dpkg-old; mv $file $current"
-    diff --ignore-all-space <(egrep -v '^\s*#|^$' $current) <(egrep -v '^\s*#|^$' $file ) | awk '{print "dss:pkgdiff:" $0}'
+    print_minimal_config_diff $current $file  | awk '{print "dss:pkgdiff:" $0}'
   done
   
   # non .conf site files
@@ -795,7 +817,7 @@ for start in $ALL_UBUNTU; do
     echo "dss:info:Current Ubuntu distro is $current.  No newer/better distro.  Finished." 
     return 0 
   fi
-  if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+  cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
   # comment out package entries
   sed -i "s@^ *deb \(.*\)ubuntu.com\(.*\)@#deb \1ubuntu.com\2@" /etc/apt/sources.list
   # add in new repo names
@@ -851,7 +873,7 @@ if grep -qai "^ *deb http://archive.debian.org/debian/ $name" /etc/apt/sources.l
 fi
 
 prep_ghost_output_dir
-if [ ! -e /root/deghostinfo/sources.list ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list"; cp /etc/apt/sources.list /root/deghostinfo/sources.list; fi
+cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
 
 # comment out the old entries
 sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
@@ -915,7 +937,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   for distro in wheezy jessie; do 
     if grep -qai "^ *deb.*$distro" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.*$distro" /etc/apt/sources.list; then
        echo "dss:info: adding the $distro security repository to the sources.list"
-       if [ ! -e /root/deghostinfo/sources.list.$$ ]; then echo "dss:info: Running cp /etc/apt/sources.list /root/deghostinfo/sources.list.$$"; cp /etc/apt/sources.list /root/deghostinfo/sources.list.$$; fi
+       cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
        echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
        apt-get update
     fi
@@ -941,7 +963,6 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   fi
   echo "dss:error: Failed doing apt-get -y install libc6"
   prep_ghost_output_dir
-  cd /root/deghostinfo
   # download isnt an option on some older apts
   apt-get download libc6 2>/dev/null
   ret=$?

@@ -12,7 +12,7 @@ ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty ka
 NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic maverick natty oneiric quantal raring saucy utopic vivid"
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
-UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny"
+UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze"
 
 function print_usage() {
   echo "
@@ -284,6 +284,7 @@ fi
 ps auxf | grep -v '[g]host' | awk '{print "dss:psauxf:" $0}'
 echo "dss:info: Checking for disk space on host"
 df -m | awk '{print "dss:dfm:" $0}'
+dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}' 
 [ -f /etc/apt/sources.list ] && cat /etc/apt/sources.list | egrep -v '^$|^#' | awk '{print "dss:aptsources:" $0}'
 return 0
 }
@@ -304,8 +305,8 @@ function upgrade_precondition_checks() {
   local ret=0
   # e.g. 3.12.1
   if uname -r | grep -qai '^[12]'; then
-    echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp"
-    ret=$(($ret+1))
+    echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp.  To skip this check run: export IGNOREKERNEL=Y"
+    [ -z "$IGNOREKERNEL" ] && ret=$(($ret+1))
   fi
   # check that there is only a single package repo in use.  else mixing two distro versions is troublesome
   if [ -f /etc/apt/sources.list ]; then
@@ -316,8 +317,12 @@ function upgrade_precondition_checks() {
       num=$((num+1))
       distros="$distro $distros"
     done
-    [ $num -lt 2 ] && return 0
+    [ $num -lt 2 ] && return $ret
     echo "dss:warn:/etc/apt/sources.list looks like it contains a mix of distros: $distros"
+    ret=$(($ret+1))
+  fi
+  if [ -f /etc/debian_version ] && [ -f /etc/apt/sources.list ] && [ "0" == "$(cat /etc/apt/sources.list | egrep -v '^$|^#' | wc -l)" ]; then
+    echo "dss:warn:/etc/apt/sources.list is empty and does not have any valid lines it it."
     ret=$(($ret+1))
   fi
   return $ret
@@ -410,6 +415,8 @@ function disable_debian_repos() {
   [ "$name" == "wheezy" ] && disable_debian_repos wheezy-lts 
   {
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
+      # leave comment lines
+      echo $line | grep -qai '^ *#' && echo $line && continue
       # comment out the old entries
       line=$(echo $line | sed "s@^ *deb http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://ftp.\1.debian.org/debian $name\2@")
       line=$(echo $line | sed "s@^ *deb http://security.debian.org/ $name\([ /]\)@#deb http://security.debian.org/ $name\1@")
@@ -448,26 +455,33 @@ function enable_debian_archive() {
   [ ! -f /etc/apt/sources.list ] && return 0
   names=$@
   [ -z "$names" ] && names="potato sarge woody etch lenny squeeze squeeze-lts"
-  enablearchive=
-  enabledarchive=
   {
+    touch /tmp/enablearchive.$$
+    touch /tmp/enabledarchive.$$
+    # variables in here not seen outside scope.  need to store in a temp file.
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
       for name in $names; do
-        echo $line | grep -qai "^deb http://archive.debian.org/debian $name[ /]" && enabledarchive="$enabledarchive $name " && break
-        echo $line | egrep -qai '^$|^#' && echo $line && line="" && break
+        # comment line.  skip checking other names.  go onto next line
+        echo $line | egrep -qai '^$|^ *#' && echo $line && line="" && break
+
+        echo $line | grep -qai "^deb http://archive.debian.org/debian $name[ /]" && echo " $name " >> /tmp/enabledarchive.$$ && break
         # disable srcs
         echo $line | egrep -qai "^ *deb-src ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && echo $line | sed "s@^ *deb-src \([a-zA-Z]*\)://\([a-zA-Z0-9./]*\) *$name @#deb-src \1://\2 $name @" && line="" && break
-        echo $line | egrep -qai "^ *deb ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && enablearchive="$enablearchive $name" && echo "#$line" && line="" && break
+        echo $line | egrep -qai "^ *deb ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && echo " $name" >> /tmp/enablearchive.$$ && echo "#$line" && line="" && break
       done
       [ ! -z "$line" ] && echo $line
     done
     # if one or the other is enable, add both
+    enablearchive=$(cat /tmp/enablearchive.$$)
+    enabledarchive=$(cat /tmp/enabledarchive.$$)
+    rm -f /tmp/enablearchive.$$ /tmp/enabledarchive.$$
     echo $enablearchive | grep -qai "squeeze" && enablearchive="$enablearchive squeeze squeeze-lts"
     echo $enablearchive | grep -qai "wheezy" && enablearchive="$enablearchive wheezy wheezy-lts"
-    
-    for name in $(for i in $(for i in $enablearchive; do echo $i; done | sort | uniq); do echo -n "$i "; done); do
+    uniqueenablearchive=$(for i in $enablearchive; do echo $i; done | sort | uniq)
+    spaceenablearchive=$(for i in $uniqueenablearchive; do echo -n "$i "; done)
+    for name in $spaceenablearchive; do
       # already there
-      echo "$enabledarchive" | grep -qai "$name " && continue 
+      echo "$enabledarchive" | grep -qai "$name" && continue 
       echo "deb http://archive.debian.org/debian $name main contrib non-free"
     done
   } > /etc/apt/sources.list.$$
@@ -492,7 +506,7 @@ function print_uninstall_dovecot() {
   echo "dss:info:Please remove dovecot.  Then re-install/reconfigure it afterwards.  Saving the current dovecot config to /root/deghostinfo/postconf.log.$$"
   prep_ghost_output_dir
   postconf -n > /root/deghostinfo/postconf.log.$$
-  echo "apt-get remove dovecot-c* (dovecot-core or dovecot-common)" >&2
+  echo apt-get remove $(dpkg -l | grep dovecot | grep ii | awk '{print $2}')
   # dovecot reinstall tips
   
   # apt-get install dovecot-pop3d dovecot-imapd dovecot-managesieved dovecot-sieve
@@ -507,51 +521,21 @@ function print_uninstall_dovecot() {
   # http://packages.ubuntu.com/trusty/all/mail-stack-delivery/filelist
 }
 
-function dist_upgrade_lenny_to_squeeze() {
-[ ! -e /etc/apt/sources.list ] && return 0
-if ! grep -qai '^ *deb.*lenny' -- /etc/apt/sources.list; then
-  return 0
-fi
-if ! lsb_release -a 2>/dev/null| egrep -qai 'lenny|Linux 5' ; then
-return 0
-fi
-
-if dpkg -l | grep -qai '^i.*dovecot'; then
-  print_uninstall_dovecot
-  return 1
-fi
-
-  add_missing_debian_keys
-
-upgrade_precondition_checks || return $?
-
-apt_get_upgrade
-ret=$?
-apt-get -y autoremove
-if [ $ret -ne 0 ]; then
-  echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_lenny_to_squeeze"
-  return 1
-fi
-  
-enable_debian_archive
-
-apt_get_dist_upgrade
-ret=$?
-if [ $ret -eq 0 ]; then
-	if lsb_release -a 2>/dev/null| egrep -qai 'squeeze|Linux 6'; then
-	  # dist-upgrade returned ok, and lsb_release thinks we are squeeze
-	  echo "dss:info: dist-upgrade from lenny to squeeze appears to have worked." 
-	  return 0; 
-	fi
-fi
-return 1
-}
-
 function print_failed_dist_upgrade_tips() {
   echo "In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
   echo "In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
   echo "after attempting a fix manuall, rerun the deghost command"
 }
+
+function dist_upgrade_lenny_to_squeeze() {
+export old_distro=lenny
+export old_ver="inux 5"
+export new_distro=wheezy
+dist_upgrade_x_to_y
+ret=$?
+return $ret
+}
+
 function dist_upgrade_squeeze_to_wheezy() {
 export old_distro=squeeze
 export old_ver="inux 6"
@@ -606,11 +590,22 @@ if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
 return 0
 fi
 
+echo "dss:trace:dist_upgrade_x_to_y:olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
+
+if [ "$old_distro" == "lenny" ]; then
+  if dpkg -l | grep -qai '^i.*dovecot'; then
+    print_uninstall_dovecot
+    return 1
+  fi
+  add_missing_debian_keys
+  [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info:created /dev/pts"
+fi
+  
 upgrade_precondition_checks || return $?
 
 apt_get_upgrade
 ret=$?
-apt-get -y autoremove
+apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss autoremove
 if [ $ret -ne 0 ]; then
   echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_${old_distro}_to_${new_distro}"
   return 1
@@ -630,7 +625,7 @@ enable_debian_archive
 apt_get_dist_upgrade
 ret=$?
 
-apt-get -y autoremove
+apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss  autoremove
 if [ $ret -eq 0 ]; then
 	if lsb_release -a 2>/dev/null| egrep -qai '${new_distro}'; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
@@ -714,28 +709,42 @@ function record_config_state() {
   echo "" >> $file
   # vhosts 
   [ -x /usr/sbin/apache2ctl ] && /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> $file
+  echo "" >> $file
+  echo "Running processes:" >> $file
+  echo "" >> $file
+  ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' | egrep -v '^process: \[|COMMAND|init' | sort | uniq >> $file
 }
 
 function apt_get_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
 [ -e /etc/redhat-release ] && return 0
 upgrade_precondition_checks || return $?
+echo "dss:trace:apt_get_upgrade"
+
 enable_debian_archive
 apt-get update
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
 [ $? -ne 0 ] && apt-get -o Acquire::Check-Valid-Until=false update
 record_config_state
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
-apt-get -y autoremove
+apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss  autoremove
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
 echo "dss:info: running an apt-get upgrade"
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" upgrade
 ret=$?
-apt-get -y autoremove
+apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss autoremove
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
 if [ $ret -ne 0 ]; then
-  echo "dss:error: apt-get upgrade failed."
-  return 1
+  echo "dss:info: apt-get upgrade failed.  trying a dist-ugprade..."
+  apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+  ret=$?
+  if [ $ret -eq 0 ]; then
+    echo "dss:info: apt-get dist-upgrade succeeded when a upgrade failed."
+    return 0
+  else
+    echo "dss:info: apt-get upgrade/dist-upgrade failed."
+    return 1 
+  fi
 fi
 return $ret
 }
@@ -744,6 +753,7 @@ function apt_get_dist_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
 upgrade_precondition_checks || return $?
 apt_get_upgrade || return 1
+echo "dss:trace:apt_get_dist_upgrade"
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" -f install
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install dpkg
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" autoremove
@@ -988,6 +998,8 @@ function yum_upgrade() {
   yum_enable_rhel4 || return 0
   if ! which yum >/dev/null 2>&1; then echo "dss:info: yum not found."; return 1; fi
   local QOPT=" -q"
+  echo "dss:trace:yum_upgrade"
+  
   yum --version >/dev/null && ! yum -q --version 2>/dev/null >/dev/null && QOPT=
   yum -y install yum rpm > /dev/null 2>&1
 
@@ -1209,6 +1221,8 @@ yum_upgrade || return $?
 }
 
 function dist_upgrade() {
+  echo "dss:trace:dist_upgrade"
+
   packages_upgrade || return $?
   apt_get_dist_upgrade || return $?
   dist_upgrade_lenny_to_squeeze || return $?

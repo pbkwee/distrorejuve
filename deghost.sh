@@ -524,6 +524,7 @@ function print_uninstall_dovecot() {
 function print_failed_dist_upgrade_tips() {
   echo "In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
   echo "In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
+  echo "May be worth trying: aptitude -vv full-upgrade" 
   echo "after attempting a fix manuall, rerun the deghost command"
 }
 

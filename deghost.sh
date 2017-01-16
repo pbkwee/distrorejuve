@@ -417,6 +417,8 @@ function disable_debian_repos() {
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
       # leave comment lines
       echo $line | grep -qai '^ *#' && echo $line && continue
+      # leave non-debian lines.  e.g. keep deb http://packages.prosody.im/debian wheezy main
+      echo $line | grep deb && grep -qaiv --fixed-strings '.debian.' && echo $line && continue
       # comment out the old entries
       line=$(echo $line | sed "s@^ *deb http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://ftp.\1.debian.org/debian $name\2@")
       line=$(echo $line | sed "s@^ *deb http://security.debian.org/ $name\([ /]\)@#deb http://security.debian.org/ $name\1@")
@@ -725,7 +727,7 @@ echo "dss:trace:apt_get_upgrade"
 enable_debian_archive
 apt-get update
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
-[ $? -ne 0 ] && apt-get -o Acquire::Check-Valid-Until=false update
+[ $? -ne 0 ] && apt-get -o Acquire::ForceIPv4=true -o Acquire::Check-Valid-Until=false update
 record_config_state
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss  autoremove

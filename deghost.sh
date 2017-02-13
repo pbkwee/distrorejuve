@@ -13,7 +13,8 @@ NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic mave
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze"
-
+DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN"
+IS_DEBUG=
 function print_usage() {
   echo "
 #deghost
@@ -411,14 +412,13 @@ function disable_debian_repos() {
   local name=$1
   # disable both squeeze and squeeze lts if squeeze
   [ "$name" == "squeeze" ] && disable_debian_repos squeeze-lts
-  # disable both wheezy and wheezy lts if wheezy
-  [ "$name" == "wheezy" ] && disable_debian_repos wheezy-lts 
+  [ ! -z "$IS_DEBUG" ] && echo "dss:trace:sources:disable_debian_repos:pre:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
   {
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
       # leave comment lines
       echo $line | grep -qai '^ *#' && echo $line && continue
       # leave non-debian lines.  e.g. keep deb http://packages.prosody.im/debian wheezy main
-      echo $line | grep deb && grep -qaiv --fixed-strings '.debian.' && echo $line && continue
+      echo $line | grep -q deb && echo "$line" | grep -qaiv --fixed-strings '.debian.' && echo $line && continue
       # comment out the old entries
       line=$(echo $line | sed "s@^ *deb http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://ftp.\1.debian.org/debian $name\2@")
       line=$(echo $line | sed "s@^ *deb http://security.debian.org/ $name\([ /]\)@#deb http://security.debian.org/ $name\1@")
@@ -439,37 +439,38 @@ function disable_debian_repos() {
       echo $line
     done
   } > /etc/apt/sources.list.$$
+  [ ! -z "$IS_DEBUG" ] && cat /etc/apt/sources.list.$$ | awk '{print "dss:trace:sources:createdaptsources:" $0}'
   if diff /etc/apt/sources.list /etc/apt/sources.list.$$ >/dev/null; then
     rm /etc/apt/sources.list.$$ 
     return 0
-  fi 
+  fi
+  [ ! -z "$IS_DEBUG" ] && echo "dss:trace:sources:disable_debian_repos:post:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')" 
   prep_ghost_output_dir
   cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
-  echo "dss:info: enabling debian archive repos.  diff follows:"
+  echo "dss:info: disable_debian_repos $name diff follows:"
   print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
-  echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  echo "dss:info:disable_debian_repos:post:$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
   return 0
 }
 
 # e.g. enable_debian_archive squeeze squeeze-lts
 function enable_debian_archive() {
   [ ! -f /etc/apt/sources.list ] && return 0
-  names=$@
-  [ -z "$names" ] && names="potato sarge woody etch lenny squeeze squeeze-lts"
+  [ ! -z "$IS_DEBUG" ] && echo "dss:trace:sources:enable_debian_archive:pre:apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
   {
-    touch /tmp/enablearchive.$$
-    touch /tmp/enabledarchive.$$
+    > /tmp/enablearchive.$$
+    > /tmp/enabledarchive.$$
     # variables in here not seen outside scope.  need to store in a temp file.
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
-      for name in $names; do
+      for name in $DEBIAN_ARCHIVE; do
         # comment line.  skip checking other names.  go onto next line
         echo $line | egrep -qai '^$|^ *#' && echo $line && line="" && break
 
         echo $line | grep -qai "^deb http://archive.debian.org/debian $name[ /]" && echo " $name " >> /tmp/enabledarchive.$$ && break
         # disable srcs
         echo $line | egrep -qai "^ *deb-src ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && echo $line | sed "s@^ *deb-src \([a-zA-Z]*\)://\([a-zA-Z0-9./]*\) *$name @#deb-src \1://\2 $name @" && line="" && break
-        echo $line | egrep -qai "^ *deb ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && echo " $name" >> /tmp/enablearchive.$$ && echo "#$line" && line="" && break
+        echo $line | egrep -qai "^ *deb ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && echo " $name " >> /tmp/enablearchive.$$ && echo "#$line" && line="" && break
       done
       [ ! -z "$line" ] && echo $line
     done
@@ -477,10 +478,9 @@ function enable_debian_archive() {
     enablearchive=$(cat /tmp/enablearchive.$$)
     enabledarchive=$(cat /tmp/enabledarchive.$$)
     rm -f /tmp/enablearchive.$$ /tmp/enabledarchive.$$
-    echo $enablearchive | grep -qai "squeeze" && enablearchive="$enablearchive squeeze squeeze-lts"
-    echo $enablearchive | grep -qai "wheezy" && enablearchive="$enablearchive wheezy wheezy-lts"
+    echo $enablearchive | grep -qai " squeeze " && enablearchive="$enablearchive squeeze-lts"
     uniqueenablearchive=$(for i in $enablearchive; do echo $i; done | sort | uniq)
-    spaceenablearchive=$(for i in $uniqueenablearchive; do echo -n "$i "; done)
+    spaceenablearchive=$(for i in $uniqueenablearchive; do echo -n " $i "; done)
     for name in $spaceenablearchive; do
       # already there
       echo "$enabledarchive" | grep -qai "$name" && continue 
@@ -496,7 +496,7 @@ function enable_debian_archive() {
   echo "dss:info: enabling debian archive repos.  diff follows:"
   diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
-  echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  [ ! -z "$IS_DEBUG" ] && echo "dss:trace:sources:enable_debian_archive:post:apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
   return 0
 }
 
@@ -774,6 +774,7 @@ fi
 
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get -y autoremove
+apt-get -y autoclean
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
 ret=$?
 if [ $ret -ne 0 ] ; then
@@ -875,7 +876,7 @@ lsb_release -a 2>/dev/null | grep -qai Ubuntu && return 0
 #deb http://security.debian.org sarge/updates main contrib non-free
 #deb http://archive.debian.org/debian/ sarge main non-free contrib
 
-for name in lenny etch woody sarge; do 
+for name in $DEBIAN_ARCHIVE; do 
 # no lenny stuff, nothing to do
 ! grep -qai "^ *deb.*debian.*$name" /etc/apt/sources.list && continue
 

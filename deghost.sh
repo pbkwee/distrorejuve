@@ -263,6 +263,7 @@ echo "dss:dates: $(date -u +%s)"
 echo "dss:uptimes:$(cat /proc/uptime | awk '{print $1}')"
 echo "dss:uptime: $(uptime)"
 echo "dss:kernel: $(uname -a)"
+echo "dss:bittedness: $(getconf LONG_BIT)"
 print_libc_versions
 echo "dss:Redhat-release: $([ ! -f /etc/redhat-release ] && echo 'NA'; [ -f /etc/redhat-release ] && cat /etc/redhat-release)"
 echo "dss:Debian-version: $([ ! -f /etc/debian_version ] && echo 'NA'; [ -f /etc/debian_version ] && cat /etc/debian_version)"

@@ -2,6 +2,10 @@
 
 deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235 or CVE-2015-7547) and then patch that where possible.
 
+Example usage to dist upgrade to latest Debian or Ubuntu disto.  First make a backup of your server.  Then run:
+wget -O deghost.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/deghost/master/deghost.sh
+sudo bash deghost.sh --dist-upgrade | tee -a deghost.log
+
 deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
 
 See also http://rimuhosting.com/maintenance.jsp?server_maint_oid=195331653

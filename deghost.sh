@@ -13,7 +13,7 @@ NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic mave
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze"
-DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN"
+DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN squeeze-lts"
 DEBIAN_CURRENT="wheezy jessie"
 IS_DEBUG=
 function print_usage() {
@@ -82,10 +82,10 @@ function replace() {
      $(which replace) $@
      return $?
    fi
-   from=$1
-   to=$2
-   dash=$3
-   file=$4
+   local from=$1
+   local to=$2
+   local dash=$3
+   local file=$4
    if [ "$dash" != "--" ]; then
      echo "expecting '--'" >&2
      return 1
@@ -316,14 +316,24 @@ function upgrade_precondition_checks() {
     num=0
     distros=""
     for distro in $ALL_UBUNTU $ALL_DEBIAN; do
-      grep -qai "^ *[a-z].*$distro" /etc/apt/sources.list || continue
+      grep -qai "^ *[a-z].*$distro[ /]" /etc/apt/sources.list || continue
       num=$((num+1))
       distros="$distro $distros"
     done
-    [ $num -lt 2 ] && return $ret
-    echo "dss:warn:/etc/apt/sources.list looks like it contains a mix of distros: $distros"
-    ret=$(($ret+1))
+    if [ $num -gt 1 ]; then
+      echo "dss:warn:/etc/apt/sources.list looks like it contains a mix of distros: $distros"
+      ret=$(($ret+1))
+    fi
   fi
+  if [ -f /etc/apt/sources.list ]; then
+    local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net' /etc/apt/sources.list | head -n 1)
+    if [ ! -z "$otherrepos" ]; then
+      echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: $otherrepos"
+      ret=$(($ret+1))
+    fi
+    
+  fi
+  
   if [ -f /etc/debian_version ] && [ -f /etc/apt/sources.list ] && [ "0" == "$(cat /etc/apt/sources.list | egrep -v '^$|^#' | wc -l)" ]; then
     echo "dss:warn:/etc/apt/sources.list is empty and does not have any valid lines it it."
     ret=$(($ret+1))
@@ -344,7 +354,8 @@ if ! grep -qai "^ *deb.*stable" /etc/apt/sources.list ; then echo "dss:info: Not
 prep_ghost_output_dir
 cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
 
-convertfile stable squeeze debian.org "" /etc/apt/sources.list
+convertfile stable squeeze "debian.org" "" /etc/apt/sources.list
+convertfile stable squeeze "debian.net" "" /etc/apt/sources.list
 return 0
 }
 
@@ -448,11 +459,13 @@ function disable_debian_repos() {
   [ "$name" == "squeeze" ] && disable_debian_repos squeeze-lts
   [ ! -z "$IS_DEBUG" ] && echo "dss:trace:sources:disable_debian_repos:pre:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
   {
+    local line=
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
       # leave comment lines
       local line0=$line
       echo $line | grep -qai '^ *#' && echo $line && continue
-      line2=$(convertline $name $name debian.org "#" $line)
+      local line2=$(convertline $name $name debian.org "#" "$line")
+      [ -z "$line2" ] && line2=$(convertline $name $name debian.net "#" "$line")
       [ -z "$line2" ] && echo $line
       echo $line2
       # leave non-debian lines.  e.g. keep deb http://packages.prosody.im/debian wheezy main
@@ -500,7 +513,9 @@ function enable_debian_archive() {
     > /tmp/enablearchive.$$
     > /tmp/enabledarchive.$$
     # variables in here not seen outside scope.  need to store in a temp file.
+    local line=
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
+      local name=
       for name in $DEBIAN_ARCHIVE; do
         # comment line.  skip checking other names.  go onto next line
         local line0=$line
@@ -548,7 +563,7 @@ function print_uninstall_dovecot() {
   echo "dss:info:Please remove dovecot.  Then re-install/reconfigure it afterwards.  Saving the current dovecot config to /root/deghostinfo/postconf.log.$$"
   prep_ghost_output_dir
   postconf -n > /root/deghostinfo/postconf.log.$$
-  echo apt-get remove $(dpkg -l | grep dovecot | grep ii | awk '{print $2}')
+  echo apt-get -y remove $(dpkg -l | grep dovecot | grep ii | awk '{print $2}')
   # dovecot reinstall tips
   
   # apt-get install dovecot-pop3d dovecot-imapd dovecot-managesieved dovecot-sieve
@@ -561,6 +576,27 @@ function print_uninstall_dovecot() {
   # Could also try removing /etc/dovecot/conf.d/01-dovecot-postfix.conf and replacing it with this package (replaces postfix-dovecot package):
   
   # http://packages.ubuntu.com/trusty/all/mail-stack-delivery/filelist
+  
+  #doveconf: Warning: NOTE: You can get a new clean config file with: doveconf -n > dovecot-new.conf
+  #doveconf: Warning: Obsolete setting in /etc/dovecot/dovecot.conf:25: 'imaps' protocol is no longer necessary, remove it
+  #doveconf: Warning: Obsolete setting in /etc/dovecot/dovecot.conf:25: 'pop3s' protocol is no longer necessary, remove it
+  #doveconf: Warning: Obsolete setting in /etc/dovecot/dovecot.conf:717: protocol managesieve {} has been replaced by protocol sieve { }
+  #doveconf: Warning: Obsolete setting in /etc/dovecot/dovecot.conf:889: add auth_ prefix to all settings inside auth {} and remove the auth {} section completely
+  #doveconf: Warning: Obsolete setting in /etc/dovecot/dovecot.conf:927: passdb pam {} has been replaced by passdb { driver=pam }
+  #doveconf: Warning: Obsolete setting in /etc/dovecot/dovecot.conf:1040: userdb passwd {} has been replaced by userdb { driver=passwd }
+  #doveconf: Warning: Obsolete setting in /etc/dovecot/dovecot.conf:1102: auth_user has been replaced by service auth { user }
+  #doveconf: Fatal: Error in configuration file /etc/dovecot/dovecot.conf: ssl enabled, but ssl_cert not set
+  #Stopping IMAP/POP3 mail server: dovecot.
+  #Processing triggers for man-db ...
+  #Errors were encountered while processing:
+  # dovecot-sieve
+  # dovecot-pop3d
+  # dovecot-ldap
+  # dovecot-imapd
+  #E: Sub-process /usr/bin/dpkg returned an error code (1)
+  
+  
+  
 }
 
 function print_failed_dist_upgrade_tips() {
@@ -703,10 +739,10 @@ function print_minimal_config_diff() {
 }
 function print_config_state_changes() {
   prep_ghost_output_dir
-  now=$(date +%s)
+  local now=$(date +%s)
   record_config_state /root/deghostinfo/postupgrade.dpkg.$now
   # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
-  fromfile=$(ls -1rt $(find /root/deghostinfo/ -mtime -1 | grep preupgrade) | head -n 1)
+  local fromfile=$(ls -1rt $(find /root/deghostinfo/ -mtime -1 | grep preupgrade) | head -n 1)
   [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
   echo "dss:info: Config files to check.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
   diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
@@ -731,7 +767,7 @@ function print_config_state_changes() {
 
 function record_config_state() {
   prep_ghost_output_dir
-  file=$1
+  local file=$1
   if [ -z "$file" ]; then 
     file=/root/deghostinfo/preupgrade.dpkg.$$
   fi
@@ -1028,7 +1064,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   # download isnt an option on some older apts
   apt-get download libc6 2>/dev/null
   ret=$?
-  file=$(find . -name '*.deb' | grep libc6 | head -n 1)
+  local file=$(find . -name '*.deb' | grep libc6 | head -n 1)
   if [ $ret -ne 0 ] || [ -z "$file" ]; then
   	echo "dss:error: Failed downloading the libc6 package with apt-get download libc6"
   	return 1

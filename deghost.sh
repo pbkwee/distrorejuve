@@ -451,7 +451,7 @@ function disable_debian_repos() {
   echo "dss:info: disable_debian_repos $name diff follows:"
   print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
-  echo "dss:info:disable_debian_repos:post:$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  echo "dss:info:sources:disable_debian_repos:post:$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
   return 0
 }
 
@@ -466,6 +466,8 @@ function enable_debian_archive() {
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
       for name in $DEBIAN_ARCHIVE; do
         # comment line.  skip checking other names.  go onto next line
+        local line0=$line
+        local name0=$name
         echo $line | egrep -qai '^$|^ *#' && echo $line && line="" && break
 
         echo $line | grep -qai "^deb http://archive.debian.org/debian $name[ /]" && echo " $name " >> /tmp/enabledarchive.$$ && break
@@ -620,7 +622,7 @@ disable_debian_repos $old_distro
 if ! grep -qai "^ *deb.*${new_distro}[ /]" /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
   echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
-  echo "dss:info: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  echo "dss:info:sources:dist_upgrade_x_to_y:$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
 fi
 
 # redo to convert the above to archive where appropriate.  And add lts if appropriate.
@@ -779,7 +781,13 @@ apt-get -y autoclean
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
 ret=$?
 if [ $ret -ne 0 ] ; then
-  echo "dss:error: Got an error after an apt-get dist-upgrade" 
+  echo "dss:warn: Got an error after an apt-get dist-upgrade.  trying an apt-get -f install"
+  apt-get -f -y install
+  apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+  ret=$?
+  if [ $ret -ne 0 ] ; then
+    echo "dss:error: Got an error after an apt-get dist-upgrade"
+  fi 
 fi
 # report -dist or -old file changes
 tweak_broken_configs
@@ -899,7 +907,7 @@ sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us
 sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
 
 echo "deb http://archive.debian.org/debian/ $name main non-free contrib" >> /etc/apt/sources.list
-echo "dss:info: $name apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+echo "dss:info:sources:convert_old_debian_repo: $name apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
 done
 return 0
 }
@@ -909,7 +917,7 @@ if [ -f /etc/redhat-release ]; then
   local foo="dss:distroinfo: REDHAT $(cat /etc/redhat-release)" 
   echo $foo
 elif [ -x /usr/bin/lsb_release ] || [ -x /bin/lsb_release ] ; then    
-  local foo="dss:distroinfo: $(lsb_release -a 2>/dev/null)" 
+  local foo="dss:distroinfo: $(lsb_release -a 2>/dev/null | grep -i description)" 
   echo $foo
 elif [ -f /etc/debian_version ]; then
   local foo="dss:distroinfo: DEBIAN $(cat /etc/debian_version)" 

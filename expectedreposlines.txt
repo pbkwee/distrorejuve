@@ -1,0 +1,68 @@
+deb ftp://mirrors.usc.edu/pub/linux/distributions/debian/ foobar main contrib non-free
+deb http://archive.debian.org/debian-archive/debian-security/ foobar/updates main contrib non-free
+deb http://archive.debian.org/debian foobar main
+deb http://archive.debian.org/debian foobar main contrib
+deb http://archive.debian.org/debian foobar main
+deb http://archive.debian.org/debian/ foobar main contrib non-free
+deb http://archive.debian.org/debian foobar non-free
+deb http://archive.debian.org/debian-security foobar/updates main contrib non-free
+deb http://archive.debian.org/debian-security foobar/updates main contrib non-free
+deb http://archive.debian.org/debian-security foobar/updates main contrib non-free
+deb http://archive.debian.org/debian-volatile foobar/volatile main contrib non-free
+deb http://archive.debian.org/debian foobar contrib main non-free
+deb http://archive.debian.org/debian foobar main contrib non-free
+deb http://archive.ubuntu.com/ubuntu foobar main restricted
+deb http://archive.ubuntu.com/ubuntu foobar multiverse
+deb http://archive.ubuntu.com/ubuntu foobar universe
+deb http://debian.example.net.nz/debian foobar awm
+deb http://download.webmin.com/download/repository foobar contrib # disabled on upgrade to raring
+deb http://ftp.au.debian.org/debian foobar main contrib
+deb http://ftp.debian.org/debian/ foobar main non-free
+deb http://ftp.debian.org/debian/ foobar main contrib non-free
+deb http://ftp.es.debian.org/debian/ foobar main contrib non-free
+deb http://ftp.nz.debian.org/debian/ foobar main
+deb http://ftp.example.jp/Linux/debian/debian-archive/debian foobar main contrib non-free
+deb http://ftp.uk.debian.org/debian foobar main contrib non-free
+deb http://ftp.us.debian.org/debian foobar main contrib
+deb http://ftp.us.debian.org/debian foobar main contrib
+deb http://ftp.us.debian.org/debian foobar main contrib non-free
+deb http://http.us.debian.org/debian foobar main
+deb http://http.us.debian.org/debian foobar main contrib non-free
+deb http://non-us.debian.org/debian-non-US foobar/non-US main contrib non-free
+deb http://packages.dotdeb.org foobar all
+deb http://php53.dotdeb.org foobar all
+deb http://security.debian.org foobar/updates main contrib non-free
+deb http://security.debian.org/ foobar/updates main
+deb http://security.debian.org foobar/updates main contrib non-free
+deb http://security.debian.org/ foobar/updates main
+deb http://security.debian.org foobar/updates main contrib non-free
+deb http://volatile.debian.net/debian-volatile foobar/volatile main contrib non-free
+deb http://volatile.debian.org/debian-volatile foobar/volatile main
+deb http://webmin.mirror.example.co.uk/repository foobar contrib
+deb http://www.debian-multimedia.org foobar main
+deb http://www.debian-multimedia.org foobar main
+deb http://www.example.com/debian foobar main
+deb http://www.example.com/downloads/linux/debian foobar main
+deb http://archive.debian.org/debian foobar main contrib non-free
+deb http://archive.debian.org/debian-security/ foobar/updates main contrib non-free
+deb http://archive.debian.org/debian/ foobar main non-free contrib
+deb http://download.webmin.com/download/repository foobar contrib
+deb http://ftp.us.debian.org/debian/ foobar main contrib non-free
+deb http://packages.dotdeb.org foobar all
+deb http://archive.debian.org/debian-archive/debian/ foobar main contrib non-free
+deb http://archive.debian.org/debian foobar main contrib non-free
+deb http://ftp.nz.debian.org/debian foobar main contrib
+deb http://archive.debian.org/debian-archive/debian foobar main contrib non-free
+deb http://archive.debian.org/ foobar/updates main
+deb http://ftp.us.debian.org/debian/ foobar main non-free contrib
+deb http://http.us.debian.org/debian foobar main contrib non-free
+deb http://security.debian.org/ foobar/updates main non-free contrib
+deb http://archive.debian.org/debian/ foobar main non-free contrib
+deb http://archive.debian.org/debian-security foobar/updates main
+deb http://archive.debian.org/debian foobar main contrib non-free
+deb http://archive.debian.org/debian foobar main contrib
+deb http://archive.debian.org/debian/ foobar main non-free contrib
+deb http://ftp.us.debian.org/debian/ foobar main contrib non-free
+deb http://packages.example.com/example/ foobar/
+deb http://security.debian.org/ foobar/updates main contrib non-free
+deb http://archive.debian.org/debian/ foobar main non-free contrib

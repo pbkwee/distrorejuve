@@ -1,29 +1,36 @@
 #deghost
 
-deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235 or CVE-2015-7547) and then patch that where possible.
+deghost is a utility that helps with upgrading distros.  It works on a number of different distros (Ubuntu, Debian, Centos). It uses apt, yum and repository corrections as appropriate.  It can dist upgrade between multiple versions for Ubuntu and Debian.
 
-deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
+Example usage to dist upgrade to latest Debian or Ubuntu disto.  First make a backup of your server.  Then run:
 
-See also http://rimuhosting.com/maintenance.jsp?server_maint_oid=195331653
+wget -O deghost.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/deghost/master/deghost.sh
 
-Attempts to fix:
+sudo bash deghost.sh --dist-upgrade | tee -a deghost.log
 
-    - Debian 6 and 7 => apt-get install
-    - Supported Ubuntus (12.04 LTS, 14.04 LTS, 14.10) => apt-get install
-    - Lenny (Deb 5), or any Ubuntu use the --break-eggs options to dist-upgrade to Wheezy or Trusty LTS.  This will likely 
-        not work automatically, may leave you in dependency hell, and will likely change configs in ways you wish it hadn't.
-        
-Attempts to improve the situation:
-        
-    - Unsupported Ubuntus (others per UNSUPPORTED_UBUNTU variable) => convert to old-releases.ubuntu.com
-    - Apt repositories switch squeeze to squeeze-lts (which gets updates until 2016-02).
-    
-No action available for the following (and older) distros:
-    
-    - RHEL4, WBEL3, RH9, Debian 4 => nothing
-        
+Uses:
+- Enable archive repositories for older Debian distros
+- Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
+- Dist upgrade Ubuntu distros to the next LTS version.  Then from LTS version to LTS version.
+- On completion provides information on config changes (modified config files, changed ports)
+- Install missing Debian keys
+- Handles a few common Apache config issues after a distro upgrade.
+- Designed to run unattended without lots of prompting.
+
 Arguments:
   
+Run with --usage to get this message
+
+Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to jessie.
+
+Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc where we can).
+
+Run with --to-wheezy to get from squeeze to wheezy
+
+Run with --to-jessie to get from squeeze or lenny or wheezy to jessie (8)
+
+Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
+
 Use with --source if you just wish to have the functions available to you for testing
 
 Run with --check (or no argument) if you just wish to check, but not change your server
@@ -32,22 +39,10 @@ Run with --break-eggs to dist upgrade Debian lenny (unsupported) or squeeze (sup
 
 Run with --break-eggs to dist upgrade any ubuntu to the latest LTS.  Note caveats above.
 
-Run with --usage to get this message
-
-Run with --to-wheezy to get from squeeze to wheezy
-
-Run with --to-jessie to get from squeeze or lenny or wheezy to jessie (8)
-
-Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
-
-Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc where we can).
-
-Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to jessie.
-
 Run with --fix-vuln to try and fix your server (doing minimal change e.g. just an apt-get install of the affected package).
+    
+Not supported: RHEL4, WBEL3, RH9, Debian 4.
 
 Written by Peter Bryant at http://launchtimevps.com
 
 Latest version (or thereabouts) will be available at https://github.com/pbkwee/deghost
-
-

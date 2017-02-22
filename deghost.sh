@@ -14,6 +14,7 @@ NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic mave
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze"
 DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN"
+DEBIAN_CURRENT="wheezy jessie"
 IS_DEBUG=
 function print_usage() {
   echo "
@@ -343,9 +344,41 @@ if ! grep -qai "^ *deb.*stable" /etc/apt/sources.list ; then echo "dss:info: Not
 prep_ghost_output_dir
 cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
 
-sed -i 's@^ *deb http://http.\(\S*\).debian.org/debian stable@deb http://http.\1.debian.org/debian squeeze@' /etc/apt/sources.list
-sed -i 's@^ *deb http://security.debian.org stable@deb http://security.debian.org squeeze@' /etc/apt/sources.list
+convertfile stable squeeze debian.org "" /etc/apt/sources.list
 return 0
+}
+
+# e.g. convertline squeeze foobar '' '' 'deb-src http://archive.debian.org/debian-security squeeze /updates main contrib non-free'
+# => deb-src http://archive.debian.org/debian-security foobar /updates main contrib non-free
+function convertline() {
+local fromname=$1
+local toname=$2
+local domlike=$3
+local prefix=$4
+local line=$5
+# ^ *deb[-a-zA-Z]*  => match 'deb ' and 'deb-src '
+echo $line | egrep -qai "^ *deb[-a-zA-Z]* ([a-zA-Z]+)://([-~a-zA-Z0-9./]*)$domlike([-~a-zA-Z0-9./]*) +$fromname[ /]" && echo $line | sed "s@^ *deb\([-a-zA-Z]*\) \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\)\($domlike\)\([-~a-zA-Z0-9./]*\) *$fromname\([ /]\)@${prefix}deb\1 \2://\3\4\5 $toname\6@" && return 0
+return 0
+}
+
+function convertfile() {
+local fromname=$1
+local toname=$2
+local domlike=$3
+# typically '#' to comment out a line
+local prefix=$4
+local file=$5
+# repository like deb ftp://a-b.x.com/~home wheezy blah
+sed -i "s@^ *deb\([-a-zA-Z]*\) \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\)\($domlike\)\([-~a-zA-Z0-9./]*\) *$fromname\([ /]\)@${prefix}deb\1 \2://\3\4\5 $toname\6@" "$file"
+return 0
+}
+
+function islinematch() {
+local namematch=$1
+local domlike=$2
+local line=$4
+echo $line | egrep -qai "^ *deb[-a-zA-Z]* ([a-zA-Z]+)://([-~a-zA-Z0-9./]*)$domlike([-~a-zA-Z0-9./]*) +$namematch[ /]" && return 0
+return 1
 }
 
 function convert_old_ubuntu_repo() {
@@ -417,27 +450,31 @@ function disable_debian_repos() {
   {
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
       # leave comment lines
+      local line0=$line
       echo $line | grep -qai '^ *#' && echo $line && continue
+      line2=$(convertline $name $name debian.org "#" $line)
+      [ -z "$line2" ] && echo $line
+      echo $line2
       # leave non-debian lines.  e.g. keep deb http://packages.prosody.im/debian wheezy main
-      echo $line | grep -q deb && echo "$line" | grep -qaiv --fixed-strings '.debian.' && echo $line && continue
+      #echo $line | grep -q deb && echo "$line" | grep -qaiv --fixed-strings '.debian.' && echo $line && continue
       # comment out the old entries
-      line=$(echo $line | sed "s@^ *deb http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://ftp.\1.debian.org/debian $name\2@")
-      line=$(echo $line | sed "s@^ *deb http://security.debian.org/ $name\([ /]\)@#deb http://security.debian.org/ $name\1@")
-      line=$(echo $line | sed "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb-src http://ftp.\1.debian.org/debian $name\2@")
+      #line=$(echo $line | sed "s@^ *deb http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://ftp.\1.debian.org/debian $name\2@")
+      #line=$(echo $line | sed "s@^ *deb http://security.debian.org/ $name\([ /]\)@#deb http://security.debian.org/ $name\1@")
+      #line=$(echo $line | sed "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb-src http://ftp.\1.debian.org/debian $name\2@")
       # deb http://http.us.debian.org/debian/ wheezy main non-free contrib
-      line=$(echo $line | sed "s@^ *deb http://http.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://http.\1.debian.org/debian $name\2@")
-      line=$(echo $line | sed "s@^ *deb http://non-us.debian.org/debian-non-US $name\([ /]\)@#deb http://non-us.debian.org/debian-non-US $name\1@")
-      line=$(echo $line | sed "s@^ *deb http://security.debian.org[/] $name\([ /]\)@#deb http://security.debian.org $name\1@")
+      #line=$(echo $line | sed "s@^ *deb http://http.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://http.\1.debian.org/debian $name\2@")
+      #line=$(echo $line | sed "s@^ *deb http://non-us.debian.org/debian-non-US $name\([ /]\)@#deb http://non-us.debian.org/debian-non-US $name\1@")
+      #line=$(echo $line | sed "s@^ *deb http://security.debian.org[/] $name\([ /]\)@#deb http://security.debian.org $name\1@")
       # deb-src http://ftp.us.debian.org/debian/ wheezy main
       # deb-src http://security.debian.org/ wheezy/updates main
-      line=$(echo $line | sed "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb-src http://ftp.\1.debian.org/debian $name\2@")
+      #line=$(echo $line | sed "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb-src http://ftp.\1.debian.org/debian $name\2@")
       # deb-src http://security.debian.org/ wheezy/updates main
       # deb-src http://mirrors.coyx.com/debian/ wheezy-updates main
-      line=$(echo $line | sed "s@^ *deb http://http.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://http.\1.debian.org/debian $name\2@")
-      line=$(echo $line | sed "s@^ *deb-src http://\([a-zA-Z0-9./]*\) *$name\([ /]\)@#deb-src http://\1 $name\2@")
+      #line=$(echo $line | sed "s@^ *deb http://http.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://http.\1.debian.org/debian $name\2@")
+      #line=$(echo $line | sed "s@^ *deb-src http://\([a-zA-Z0-9./]*\) *$name\([ /]\)@#deb-src http://\1 $name\2@")
       # disable the archive repositories
-      line=$(echo $line | sed "s@^ *deb http://archive.\([a-zA-Z0-9./]*\) *$name\([ /]\)@#deb http://archive.\1 $name\2@")
-      echo $line
+      #line=$(echo $line | sed "s@^ *deb http://archive.\([a-zA-Z0-9./]*\) *$name\([ /]\)@#deb http://archive.\1 $name\2@")
+      #echo $line
     done
   } > /etc/apt/sources.list.$$
   [ ! -z "$IS_DEBUG" ] && cat /etc/apt/sources.list.$$ | awk '{print "dss:trace:sources:createdaptsources:" $0}'
@@ -472,8 +509,8 @@ function enable_debian_archive() {
 
         echo $line | grep -qai "^deb http://archive.debian.org/debian $name[ /]" && echo " $name " >> /tmp/enabledarchive.$$ && break
         # disable srcs
-        echo $line | egrep -qai "^ *deb-src ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && echo $line | sed "s@^ *deb-src \([a-zA-Z]*\)://\([a-zA-Z0-9./]*\) *$name @#deb-src \1://\2 $name @" && line="" && break
-        echo $line | egrep -qai "^ *deb ([a-z]+)://([a-zA-Z0-9./]*) *$name[ /]" && echo " $name " >> /tmp/enablearchive.$$ && echo "#$line" && line="" && break
+        echo $line | egrep -qai "^ *deb-src ([a-z]+)://([-~a-zA-Z0-9./]*) *$name[ /]" && echo $line | sed "s@^ *deb-src \([a-zA-Z]*\)://\([a-zA-Z0-9./]*\) *$name @#deb-src \1://\2 $name @" && line="" && break
+        echo $line | egrep -qai "^ *deb ([a-z]+)://([-~a-zA-Z0-9./]*) *$name[ /]" && echo " $name " >> /tmp/enablearchive.$$ && echo "#$line" && line="" && break
       done
       [ ! -z "$line" ] && echo $line
     done
@@ -885,12 +922,13 @@ lsb_release -a 2>/dev/null | grep -qai Ubuntu && return 0
 #deb http://security.debian.org sarge/updates main contrib non-free
 #deb http://archive.debian.org/debian/ sarge main non-free contrib
 
+local name=
 for name in $DEBIAN_ARCHIVE; do 
 # no lenny stuff, nothing to do
-! grep -qai "^ *deb.*debian.*$name" /etc/apt/sources.list && continue
+! grep -qai "^ *deb.*debian.* $name[ /]" /etc/apt/sources.list && continue
 
 # already using archives, all good
-if grep -qai "^ *deb http://archive.debian.org/debian/ $name" /etc/apt/sources.list; then
+if grep -qai "^ *deb http://archive.debian.org/debian/ $name[ /]" /etc/apt/sources.list; then
   echo "dss:info: This is a $name distro, and already has archive.debian in the repository."
   continue
 fi
@@ -899,12 +937,13 @@ prep_ghost_output_dir
 cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
 
 # comment out the old entries
-sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
-sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
-sed -i "s@^ *deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
-sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
+convertfile $name $name debian.org "#" /etc/apt/sources.list
+#sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
+#sed -i "s@^ *deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
+#sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
+#sed -i "s@^ *deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
+#sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
+#sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
 
 echo "deb http://archive.debian.org/debian/ $name main non-free contrib" >> /etc/apt/sources.list
 echo "dss:info:sources:convert_old_debian_repo: $name apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
@@ -957,8 +996,8 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   if [ $ret -ne 0 ]; then
     echo "dss:warn: There was an error doing an apt-get update"
   fi
-  for distro in wheezy jessie; do 
-    if grep -qai "^ *deb.*$distro" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.*$distro" /etc/apt/sources.list; then
+  for distro in $DEBIAN_CURRENT; do 
+    if grep -qai "^ *deb.*$distro[ /]" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.*$distro" /etc/apt/sources.list; then
        echo "dss:info: adding the $distro security repository to the sources.list"
        cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
        echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list

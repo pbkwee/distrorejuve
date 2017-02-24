@@ -287,7 +287,8 @@ fi
 ps auxf | grep -v '[g]host' | awk '{print "dss:psauxf:" $0}'
 echo "dss:info: Checking for disk space on host"
 df -m | awk '{print "dss:dfm:" $0}'
-dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}' 
+dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
+print_pkg_to_modified_diff
 [ -f /etc/apt/sources.list ] && cat /etc/apt/sources.list | egrep -v '^$|^#' | awk '{print "dss:aptsources:" $0}'
 return 0
 }
@@ -723,6 +724,43 @@ function print_minimal_config() {
   egrep -v '^\s*#|^$' $a
   return 0
 }
+function print_pkg_to_modified_diff() {
+mkdir /root/pkgdiff.$$
+# get a list of config files in packages that have been changed by the user
+local modifiedconfigfiles=$(dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}')
+local modifiedconfigfile
+cd /root/pkgdiff.$$
+for modifiedconfigfile in $modifiedconfigfiles; do
+  # figure out the package name
+  # dpkg -S /etc/apache2/mods-available/ssl.conf
+  # apache2: /etc/apache2/mods-available/ssl.conf
+  local pkg=$(dpkg -S "$modifiedconfigfile" | awk '{print $1}' | sed 's/://')
+  [ -z "$pkg" ] && continue
+  
+  #figure out the filename
+  #apt-get --print-uris download apache2
+  # 'http://http.us.debian.org/debian/pool/main/a/apache2/apache2_2.4.10-10+deb8u7_i386.deb' apache2_2.4.10-10+deb8u7_i386.deb 207220 SHA256:7974cdeed39312fda20165f4ee8bebc10f51062600a7cd95f4c5cba32f7ae12c
+  # note will not return a result if the file is already here (hence the 'hidden' stuff below).
+  local debfilename=$(apt-get --print-uris download "$pkg" 2>/dev/null| awk '{print $2}')
+  [ -z "$debfilename" ] && continue
+  
+  # download it if we don't already have it
+  if [ ! -f "hidden-$debfilename" ]; then 
+    apt-get download "$pkg" 2&>/dev/null
+    # extract to local dir
+    dpkg -x "$debfilename" .
+    mv "$debfilename" "hidden-$debfilename"
+  fi
+  
+  # show a diff
+  print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:info:modifiedfilediff:'$pkg':'$modifiedconfigfile':" $0}'
+done
+
+# cleanup
+cd - >/dev/null
+rm -rf /root/pkgdiff.$$ 
+}
+
 function print_minimal_config_diff() {
   local a=$1
   local b=$2
@@ -732,7 +770,7 @@ function print_minimal_config_diff() {
   tb=$(mktemp bXXXXXX)
   print_minimal_config $a > $ta
   print_minimal_config $b > $tb
-  diff --ignore-all-space $ta $tb
+  diff --ignore-all-space -u $ta $tb
   ret=$?
   rm -f $ta $tb
   return $ret

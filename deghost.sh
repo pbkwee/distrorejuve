@@ -754,6 +754,10 @@ for modifiedconfigfile in $modifiedconfigfiles; do
     mv "$debfilename" "hidden-$debfilename"
   fi
   
+  # pop a copy there so we can replace current file if desired
+  [ -f "./$modifiedconfigfile" ] && [ ! -f "$modifiedconfigfile.dpkg-dist" ] && cp "./$modifiedconfigfile" "$modifiedconfigfile.dpkg-dist"
+  [ -f "${modifiedconfigfile}.dpkg-dist"
+  echo "dss:info:modifiedfilereplace:To replace edited file with dist file: mv $modifiedconfigfile $modifiedconfigfile.dpkg-old; mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
   # show a diff
   print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:info:modifiedfilediff:'$pkg':'$modifiedconfigfile':" $0}'
 done

@@ -502,14 +502,14 @@ function disable_debian_repos() {
   echo "dss:info: disable_debian_repos $name diff follows:"
   print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
-  echo "dss:info:sources:disable_debian_repos:post:$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  echo "$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:info:sources:disable_debian_repos:post:" $0}'
   return 0
 }
 
 # e.g. enable_debian_archive squeeze squeeze-lts
 function enable_debian_archive() {
   [ ! -f /etc/apt/sources.list ] && return 0
-  [ ! -z "$IS_DEBUG" ] && echo "dss:trace:sources:enable_debian_archive:pre:apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  [ ! -z "$IS_DEBUG" ] && echo "apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:trace:sources:enable_debian_archive:pre:" $0 }'
   {
     > /tmp/enablearchive.$$
     > /tmp/enabledarchive.$$
@@ -552,7 +552,7 @@ function enable_debian_archive() {
   echo "dss:info: enabling debian archive repos.  diff follows:"
   diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
-  [ ! -z "$IS_DEBUG" ] && echo "dss:trace:sources:enable_debian_archive:post:apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  [ ! -z "$IS_DEBUG" ] && echo "apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:trace:sources:enable_debian_archive:post:" $0 }'
   return 0
 }
 
@@ -696,7 +696,7 @@ disable_debian_repos $old_distro
 if ! grep -qai "^ *deb.*${new_distro}[ /]" /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
   echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
-  echo "dss:info:sources:dist_upgrade_x_to_y:$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  echo "$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:info:sources:dist_upgrade_x_to_y:" $0}'
 fi
 
 # redo to convert the above to archive where appropriate.  And add lts if appropriate.
@@ -768,8 +768,8 @@ function print_minimal_config_diff() {
   local b=$2
   [ ! -f $a ] && return 1
   [ ! -f $b ] && return 1
-  ta=$(mktemp aXXXXXX)
-  tb=$(mktemp bXXXXXX)
+  ta=$(mktemp "$(basename "${a}").XXXXXX")
+  tb=$(mktemp "$(basename "${b}").XXXXXX")
   print_minimal_config $a > $ta
   print_minimal_config $b > $tb
   diff --ignore-all-space -u $ta $tb
@@ -794,7 +794,7 @@ function print_config_state_changes() {
     current=$(echo $file | sed 's/\.dpkg-dist$//')
     [ -z "$current" ] || [ ! -f $current ] && continue
     echo "dss:pkgdiff:$current To use the dist file: mv $current $current.dpkg-old; mv $file $current"
-    print_minimal_config_diff $current $file  | awk '{print "dss:pkgdiff:" $0}'
+    print_minimal_config_diff $file $current | awk '{print "dss:pkgdiff:" $0}'
   done
   
   # non .conf site files
@@ -1022,7 +1022,7 @@ convertfile $name $name debian.org "#" /etc/apt/sources.list
 #sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
 
 echo "deb http://archive.debian.org/debian/ $name main non-free contrib" >> /etc/apt/sources.list
-echo "dss:info:sources:convert_old_debian_repo: $name apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+echo "$name apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:info:sources:convert_old_debian_repo:" $0}'
 done
 return 0
 }

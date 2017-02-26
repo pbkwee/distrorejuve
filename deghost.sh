@@ -747,6 +747,8 @@ for modifiedconfigfile in $modifiedconfigfiles; do
   # download it if we don't already have it
   if [ ! -f "hidden-$debfilename" ]; then 
     apt-get download "$pkg" 2&>/dev/null
+    # can fail if apt is not up to date
+    [ $? -ne 0 ] && apt-get update && apt-get download "$pkg"
     # extract to local dir
     dpkg -x "$debfilename" .
     mv "$debfilename" "hidden-$debfilename"

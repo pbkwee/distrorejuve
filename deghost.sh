@@ -284,7 +284,8 @@ cat /etc/lsb-release  | sed 's/^/lsbreleasefile:/'
 fi
 #echo "dss:info: Checking for currently running exploits"
 ! host google.com  >/dev/null 2>&1 && echo "dss:warn: DNS not working"
-ps auxf | grep -v '[g]host' | awk '{print "dss:psauxf:" $0}'
+# skip kernel processes e.g. ...Feb26   0:02  \_ [kworker/0:1]
+ps auxf | egrep -v '[g]host|]$' | awk '{print "dss:psauxf:" $0}'
 echo "dss:info: Checking for disk space on host"
 df -m | awk '{print "dss:dfm:" $0}'
 dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
@@ -745,19 +746,18 @@ for modifiedconfigfile in $modifiedconfigfiles; do
   [ -z "$debfilename" ] && continue
   
   # download it if we don't already have it
-  if [ ! -f "hidden-$debfilename" ]; then 
+  if [ ! -f "hidden-${debfilename}" ]; then 
     apt-get download "$pkg" 2&>/dev/null
     # can fail if apt is not up to date
-    [ $? -ne 0 ] && apt-get update && apt-get download "$pkg"
+    [ $? -ne 0 ] && apt-get update 2&>/dev/null && apt-get download "$pkg" 2&>/dev/null
     # extract to local dir
     dpkg -x "$debfilename" .
     mv "$debfilename" "hidden-$debfilename"
   fi
   
   # pop a copy there so we can replace current file if desired
-  [ -f "./$modifiedconfigfile" ] && [ ! -f "$modifiedconfigfile.dpkg-dist" ] && cp "./$modifiedconfigfile" "$modifiedconfigfile.dpkg-dist"
-  [ -f "${modifiedconfigfile}.dpkg-dist"
-  echo "dss:info:modifiedfilereplace:To replace edited file with dist file: mv $modifiedconfigfile $modifiedconfigfile.dpkg-old; mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
+  [ -f "./${modifiedconfigfile}" ] && [ ! -f "${modifiedconfigfile}.dpkg-dist" ] && cp "./${modifiedconfigfile}" "${modifiedconfigfile}.dpkg-dist"
+  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:info:modifiedfilereplace:To replace edited file with dist file: mv $modifiedconfigfile $modifiedconfigfile.dpkg-old; mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
   # show a diff
   print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:info:modifiedfilediff:'$pkg':'$modifiedconfigfile':" $0}'
 done
@@ -794,12 +794,20 @@ function print_config_state_changes() {
   echo "dss:info:How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files."
   local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
   for file in $files; do
-    echo $file | grep -qv dpkg-dist && continue
+    # defer to the new and improved print_pkg_to_modified_diff function (debian/ubuntu only)
+    echo $file | grep -q 'dpkg-dist' && continue 
+    # if not rpmnew file, skip
+    echo $file | egrep -qv 'dpkg-dist|rpmnew' && continue
     current=$(echo $file | sed 's/\.dpkg-dist$//')
+    current=$(echo $file | sed 's/\.rpmnew$//')
+    
+    # modified file exists?
     [ -z "$current" ] || [ ! -f $current ] && continue
+    
     echo "dss:pkgdiff:$current To use the dist file: mv $current $current.dpkg-old; mv $file $current"
     print_minimal_config_diff $file $current | awk '{print "dss:pkgdiff:" $0}'
   done
+  print_pkg_to_modified_diff
   
   # non .conf site files
   # IncludeOptional sites-enabled/*.conf

@@ -556,7 +556,7 @@ function enable_debian_archive() {
   prep_ghost_output_dir
   cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: enabling debian archive repos.  diff follows:"
-  diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
+  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
   [ ! -z "$IS_DEBUG" ] && echo "apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:trace:sources:enable_debian_archive:post:" $0 }'
   return 0
@@ -665,6 +665,8 @@ function tweak_broken_configs() {
       echo "dss:info:Commented out DefaultType in /etc/apache2/apache2.conf"
     fi
   fi 
+  # error of sshd[1762]: Missing privilege separation directory: /var/run/sshd
+  # => mkdir /var/run/sshd
 }
 
 function dist_upgrade_x_to_y() {
@@ -794,7 +796,7 @@ function print_config_state_changes() {
   local fromfile=$(ls -1rt $(find /root/deghostinfo/ -mtime -1 | grep preupgrade) | head -n 1)
   [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
   echo "dss:info: Config files to check.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
-  diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
+  print_minimal_config_diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
   
   echo "dss:info:How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files."
   local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)

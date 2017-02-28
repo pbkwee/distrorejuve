@@ -77,7 +77,7 @@ function is_fixed() {
 }
 
 function replace() {
-   which replace 2>/dev/null >/dev/null
+   which replace &>/dev/null >/dev/null
    if [ $? -eq 0 ]; then 
      $(which replace) $@
      return $?
@@ -301,7 +301,7 @@ function fix_dns() {
   bash fixdns --check --removebad
   #if ! host google.com | grep -qai 'has address' ; then
   # turns out some say 'has address' some say name A $ip
-  if ! host google.com  >/dev/null 2>&1 ; then
+  if ! host google.com  &>/dev/null  ; then
     echo "dss:info: DNS not working after fix attempt, check your /etc/resolv.conf and set, say, nameserver 8.8.8.8"
   fi
 }
@@ -331,6 +331,11 @@ function upgrade_precondition_checks() {
     local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net' /etc/apt/sources.list | head -n 1)
     if [ ! -z "$otherrepos" ]; then
       echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: $otherrepos"
+      ret=$(($ret+1))
+    fi
+    local otherrepos=$(egrep -iv '^ *#|^ *$' /etc/apt/sources.list | grep backports | head -n 1)
+    if [ ! -z "$otherrepos" ]; then
+      echo "dss:warn:/etc/apt/sources.list looks like it contains a backports repository.  comment out before proceeding?: $otherrepos"
       ret=$(($ret+1))
     fi
     
@@ -648,7 +653,7 @@ function tweak_broken_configs() {
       replace "Include httpd.conf" "#Include httpd.conf" -- /etc/apache2/apache2.conf
       echo "dss:info:Commenting out Include httpd.conf for non existent file"
     fi
-    if ! /usr/sbin/apache2ctl -S 2>/dev/null >/dev/null && grep -qa '^LockFile ' /etc/apache2/apache2.conf; then
+    if ! /usr/sbin/apache2ctl -S &> /dev/null && grep -qa '^LockFile ' /etc/apache2/apache2.conf; then
         replace "LockFile" "#LockFile" -- /etc/apache2/apache2.conf
         echo "dss:info:Commented out Lockfile in /etc/apache2/apache2.conf"
     fi
@@ -747,9 +752,9 @@ for modifiedconfigfile in $modifiedconfigfiles; do
   
   # download it if we don't already have it
   if [ ! -f "hidden-${debfilename}" ]; then 
-    apt-get download "$pkg" 2&>/dev/null
+    apt-get download "$pkg" &>/dev/null
     # can fail if apt is not up to date
-    [ $? -ne 0 ] && apt-get update 2&>/dev/null && apt-get download "$pkg" 2&>/dev/null
+    [ $? -ne 0 ] && apt-get update &>/dev/null && apt-get download "$pkg" &>/dev/null
     # extract to local dir
     dpkg -x "$debfilename" .
     mv "$debfilename" "hidden-$debfilename"

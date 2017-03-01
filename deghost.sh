@@ -338,6 +338,16 @@ function upgrade_precondition_checks() {
       echo "dss:warn:/etc/apt/sources.list looks like it contains a backports repository.  comment out before proceeding?: $otherrepos"
       ret=$(($ret+1))
     fi
+    if [ -d /etc/apt/sources.list.d/ ]; then
+      local othersources=$(find /etc/apt/sources.list.d/ -type f)
+      for othersource in $othersources; do
+        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
+        if [ ! -z "$otherrepos" ]; then
+          echo "dss:warn:$otherrepos looks like it contains a extra repository.  disable file before proceeding?: $otherrepos"
+          ret=$(($ret+1))
+        fi
+      done
+    fi
     
   fi
   

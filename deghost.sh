@@ -6,8 +6,8 @@ export APT_LISTCHANGES_FRONTEND=text
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
 LTS_UBUNTU="dapper hardy lucid precise trusty xenial"
-SUPPORTED_UBUNTU="precise trusty wily xenial" 
-UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy vivid lucid utopic"
+SUPPORTED_UBUNTU="precise trusty xenial yakkety" 
+UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy vivid wily lucid utopic"
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial"
 NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic maverick natty oneiric quantal raring saucy utopic vivid"
 
@@ -261,7 +261,7 @@ echo "dss:hostname: $(hostname)"
 echo "dss:date: $(date -u)"
 echo "dss:shell: $SHELL"
 echo "dss:dates: $(date -u +%s)"
-echo "dss:uptimes:$(cat /proc/uptime | awk '{print $1}')"
+echo "dss:uptimes:$([ -f /proc/uptime ] && cat /proc/uptime | awk '{print $1}')"
 echo "dss:uptime: $(uptime)"
 echo "dss:kernel: $(uname -a)"
 echo "dss:bittedness: $(getconf LONG_BIT)"
@@ -313,6 +313,12 @@ function upgrade_precondition_checks() {
     echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp.  To skip this check run: export IGNOREKERNEL=Y"
     [ -z "$IGNOREKERNEL" ] && ret=$(($ret+1))
   fi
+  if dpkg -l | grep '^ii' | egrep -qai 'libx11|x11-common'; then
+    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get remove libx11*; apt-get autoremove.  To skip this check run: export IGNOREX11=Y"
+    dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
+    [ -z "$IGNOREX11" ] && ret=$(($ret+1))
+  fi
+   
   # check that there is only a single package repo in use.  else mixing two distro versions is troublesome
   if [ -f /etc/apt/sources.list ]; then
     num=0
@@ -331,6 +337,8 @@ function upgrade_precondition_checks() {
     local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net' /etc/apt/sources.list | head -n 1)
     if [ ! -z "$otherrepos" ]; then
       echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: $otherrepos"
+      # to find what repositories are in play
+      # apt-cache showpkg $(dpkg -l | grep '^ii' | awk '{print $2}') | grep '/var/lib' | grep -v 'File:'
       ret=$(($ret+1))
     fi
     local otherrepos=$(egrep -iv '^ *#|^ *$' /etc/apt/sources.list | grep backports | head -n 1)
@@ -343,10 +351,12 @@ function upgrade_precondition_checks() {
       for othersource in $othersources; do
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
         if [ ! -z "$otherrepos" ]; then
-          echo "dss:warn:$otherrepos looks like it contains a extra repository.  disable file before proceeding?: $otherrepos"
+          echo "dss:warn:$othersource looks like it contains a extra repository.  disable file before proceeding?: $otherrepos"
+          #echo "dss:warn:packages from extra repositories my include: $(aptitude search '?narrow(?installed, !?origin(Debian))!?obsolete')"
           ret=$(($ret+1))
         fi
       done
+      
     fi
     
   fi
@@ -575,6 +585,7 @@ function enable_debian_archive() {
 function print_uninstall_dovecot() {
   [ ! -f /etc/apt/sources.list ] && return 0
   ! dpkg -l | grep -qai '^i.*dovecot' && return 0
+  # trusty 2.9, precise 2.0, lucid (=10.4) 1.29 per https://launchpad.net/ubuntu/+source/dovecot
   echo "dss:info:Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
   echo "dss:info:Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
   echo "dss:info:Please remove dovecot.  Then re-install/reconfigure it afterwards.  Saving the current dovecot config to /root/deghostinfo/postconf.log.$$"
@@ -745,7 +756,7 @@ function print_minimal_config() {
 function print_pkg_to_modified_diff() {
 mkdir /root/pkgdiff.$$
 # get a list of config files in packages that have been changed by the user
-local modifiedconfigfiles=$(dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}')
+local modifiedconfigfiles=$(dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort)
 local modifiedconfigfile
 cd /root/pkgdiff.$$
 for modifiedconfigfile in $modifiedconfigfiles; do
@@ -852,7 +863,7 @@ function record_config_state() {
   echo "" >> $file
   # listening ports
   # Listen ports: 0.0.0.0:995 dovecot
-  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sort -k 4 >> $file
+  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 4 | uniq >> $file
   echo "Apache vhosts:" >> $file
   echo "" >> $file
   # vhosts 
@@ -907,7 +918,8 @@ apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-conf
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" autoremove
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
 # cope with 'one of those random things'
-if [ $? -ne 0 ] && apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade 2>&1 | grep "Could not perform immediate configuration on "; then
+# E: Could not perform immediate configuration on 'python-minimal'.Please see man 5 apt.conf under APT::Immediate-Configure for details. (2)
+if [ $? -ne 0 ] && apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
   apt-get -f -y install libc6-dev
   apt-get dist-upgrade -y -f -o APT::Immediate-Configure=0 -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss"
 fi

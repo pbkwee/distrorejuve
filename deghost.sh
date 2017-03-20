@@ -8,7 +8,7 @@ export APT_LISTCHANGES_FRONTEND=text
 LTS_UBUNTU="dapper hardy lucid precise trusty xenial"
 SUPPORTED_UBUNTU="precise trusty xenial yakkety" 
 UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy vivid wily lucid utopic"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial"
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety"
 NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic maverick natty oneiric quantal raring saucy utopic vivid"
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"

@@ -712,6 +712,7 @@ fi
   
 upgrade_precondition_checks || return $?
 
+echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_upgrade:old:$old_distro:new:$new_distro"
 apt_get_upgrade
 ret=$?
 apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss autoremove
@@ -731,6 +732,7 @@ fi
 # redo to convert the above to archive where appropriate.  And add lts if appropriate.
 enable_debian_archive
 
+echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 apt_get_dist_upgrade
 ret=$?
 
@@ -911,6 +913,7 @@ return $ret
 function apt_get_dist_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
 upgrade_precondition_checks || return $?
+echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
 apt_get_upgrade || return 1
 echo "dss:trace:apt_get_dist_upgrade"
 apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" -f install
@@ -961,7 +964,7 @@ if dpkg -l | grep -qai '^i.*dovecot'; then
 fi
 
 upgrade_precondition_checks || return $?
-
+echo "dss:trace:dist_upgrade_ubuntu_to_latest:pre_apt_get_upgrade:"
 apt_get_upgrade
 local candidates="$ALL_UBUNTU"
 for start in $ALL_UBUNTU; do
@@ -1010,6 +1013,7 @@ for start in $ALL_UBUNTU; do
   fi 
   # Old apache version contains 'Include /etc/apache2/httpd.conf'. Can be 'touch'ed to recreate
   [ -d /etc/apache2 ] && [ ! -f /etc/apache2/httpd.conf ] && touch /etc/apache2/httpd.conf
+  echo "dss:trace:dist_upgrade_ubuntu_to_latest:pre_apt_get_upgrade:next:$next"
 apt_get_dist_upgrade
 ret=$?
 if [ $ret -eq 0 ]; then
@@ -1383,6 +1387,7 @@ add_missing_debian_keys || return $?
 
 upgrade_precondition_checks || return $?
 
+echo "dss:trace:packages_upgrade:pre_apt_get_upgrade:"
 apt_get_upgrade || return $?
 
 yum_upgrade || return $?

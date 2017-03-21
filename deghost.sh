@@ -313,8 +313,8 @@ function upgrade_precondition_checks() {
     echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp.  To skip this check run: export IGNOREKERNEL=Y"
     [ -z "$IGNOREKERNEL" ] && ret=$(($ret+1))
   fi
-  if dpkg -l | grep '^ii' | egrep -qai 'libx11|x11-common'; then
-    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get remove libx11*; apt-get autoremove.  To skip this check run: export IGNOREX11=Y"
+  if dpkg -l | grep '^ii' | egrep -qai 'gnome|desktop|x11-common'; then
+    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get remove x11-common; apt-get autoremove.  To skip this check run: export IGNOREX11=Y"
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
     [ -z "$IGNOREX11" ] && ret=$(($ret+1))
   fi

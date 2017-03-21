@@ -6,8 +6,8 @@ export APT_LISTCHANGES_FRONTEND=text
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
 LTS_UBUNTU="dapper hardy lucid precise trusty xenial"
-SUPPORTED_UBUNTU="precise trusty xenial yakkety" 
-UNSUPPORTED_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy vivid wily lucid utopic"
+#ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
+OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic"
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety"
 NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic maverick natty oneiric quantal raring saucy utopic vivid"
 
@@ -27,7 +27,7 @@ deghost works on a number of different distros. It uses apt, yum and repository 
 Attempts to improve the situation:
         
     - Using squeeze?  Switch to squeeze-lts
-    - Unsupported Ubuntus (others per UNSUPPORTED_UBUNTU variable) => convert to old-releases.ubuntu.com
+    - Unsupported Ubuntus (others per OLD_RELEASES_UBUNTU variable) => convert to old-releases.ubuntu.com
     
 No action available for the following (and older) distros:
     
@@ -1002,7 +1002,7 @@ for start in $ALL_UBUNTU; do
   sed -i "s@^ *deb \(.*\)ubuntu.com\(.*\)@#deb \1ubuntu.com\2@" /etc/apt/sources.list
   # add in new repo names
   echo "dss:info: attempting a dist-upgrade from $current to $next."
-  if echo $UNSUPPORTED_UBUNTU | grep -qai $next; then
+  if echo $OLD_RELEASES_UBUNTU | grep -qai $next; then
     echo "deb http://old-releases.ubuntu.com/ubuntu/ $next main restricted universe multiverse" >> /etc/apt/sources.list
     echo "deb http://old-releases.ubuntu.com/ubuntu/ $next-updates main restricted universe multiverse" >> /etc/apt/sources.list
     echo "deb http://old-releases.ubuntu.com/ubuntu/ $next-security main restricted universe multiverse" >> /etc/apt/sources.list    
@@ -1105,7 +1105,7 @@ fi
 add_missing_debian_keys
 add_missing_ubuntu_keys
 
-if print_distro_info | grep Ubuntu | egrep -qai "$(echo $UNSUPPORTED_UBUNTU | sed 's/ /|/')"; then 
+if print_distro_info | grep Ubuntu | egrep -qai "$(echo $OLD_RELEASES_UBUNTU | sed 's/ /|/')"; then 
   echo "dss:info: Running an EOL Ubuntu.  Not doing an apt-get install -y libc6.  $(print_distro_info)"
   return 0
 fi
@@ -1228,7 +1228,7 @@ return 0
 function report_unsupported() {
   is_fixed && return 0
   
-  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep Ubuntu | egrep -qai "$(echo $UNSUPPORTED_UBUNTU | sed 's/  / /g' | sed 's/ *$//g' | sed 's/ /|/g')"; then 
+  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep Ubuntu | egrep -qai "$(echo $OLD_RELEASES_UBUNTU | sed 's/  / /g' | sed 's/ *$//g' | sed 's/ /|/g')"; then 
     echo "dss:warn: Running an end-of-life Ubuntu distro ($(print_distro_info)).  No new package updates available.  dist upgrade to the latest lts"
     return 1
   fi
@@ -1343,7 +1343,7 @@ convert_old_debian_repo || return $?
 
 # https://wiki.ubuntu.com/Releases
 # lucid server still current?
-for distro in $UNSUPPORTED_UBUNTU; do 
+for distro in $OLD_RELEASES_UBUNTU; do 
   convert_old_ubuntu_repo $distro || return $?
 done
 enable_debian_archive || return $?
@@ -1370,7 +1370,7 @@ convert_old_debian_repo || return $?
 
 # https://wiki.ubuntu.com/Releases
 # lucid server still current?
-for distro in $UNSUPPORTED_UBUNTU; do 
+for distro in $OLD_RELEASES_UBUNTU; do 
   convert_old_ubuntu_repo $distro || return $?
 done
 enable_debian_archive || return $?

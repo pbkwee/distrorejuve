@@ -9,7 +9,7 @@ LTS_UBUNTU="dapper hardy lucid precise trusty xenial"
 #ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
 OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic"
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety"
-NON_LTS_UBUNTU="warty hoary breezy edgy feisty gutsy intrepid jaunty karmic maverick natty oneiric quantal raring saucy utopic vivid"
+NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze"
@@ -340,6 +340,7 @@ function upgrade_precondition_checks() {
       echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: $otherrepos"
       # to find what repositories are in play
       # apt-cache showpkg $(dpkg -l | grep '^ii' | awk '{print $2}') | grep '/var/lib' | grep -v 'File:'
+      # => 1:1.2.8.dfsg-2ubuntu5 (/var/lib/apt/lists/archive.ubuntu.com_ubuntu_dists_yakkety_main_binary-amd64_Packages) (/var/lib/dpkg/status)
       ret=$(($ret+1))
     fi
     local otherrepos=$(egrep -iv '^ *#|^ *$' /etc/apt/sources.list | grep backports | head -n 1)

@@ -79,7 +79,7 @@ function is_fixed() {
 function replace() {
    which replace &>/dev/null >/dev/null
    if [ $? -eq 0 ]; then 
-     $(which replace) $@
+     $(which replace) "$@"
      return $?
    fi
    local from=$1
@@ -1406,6 +1406,16 @@ function dist_upgrade() {
   dist_upgrade_wheezy_to_jessie || return $?
   dist_upgrade_ubuntu_to_latest || return $?
   apt_get_dist_upgrade || return $?
+}
+
+function print_php5_advice() {
+cat<<EOJ
+# recent ubuntus have php7.  If your code does not work with that, install 
+# php5.x from a ppa repository
+apt-get install software-properties-common
+add-apt-repository ppa:ondrej/php
+apt-get install php5.6 
+EOJ
 }
 
 

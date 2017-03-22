@@ -79,6 +79,10 @@ function is_fixed() {
 function replace() {
    which replace &>/dev/null >/dev/null
    if [ $? -eq 0 ]; then 
+     # the double quotes are needed else you get:
+      # /usr/local/mysql/bin/replace 1 2 3 e f g -- b
+      # instead of:
+      # /usr/local/mysql/bin/replace '1 2 3' 'e f g' -- b
      $(which replace) "$@"
      return $?
    fi

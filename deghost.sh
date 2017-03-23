@@ -824,8 +824,8 @@ function print_config_state_changes() {
   # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
   local fromfile=$(ls -1rt $(find /root/deghostinfo/ -mtime -1 | grep preupgrade) | head -n 1)
   [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
-  echo "dss:info: Config files to check.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
-  print_minimal_config_diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:pkg-old-dist:" $0}'
+  echo "dss:info: Config changes to check.  e.g. different processes after upgrade.  e.g. different ports.  e.g. different apache status output.  e.g. changes to dpkg-old/dpkg-dist files.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
+  print_minimal_config_diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:config-state-changes:" $0}'
   
   echo "dss:info:How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files."
   local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)

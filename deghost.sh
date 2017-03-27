@@ -721,6 +721,7 @@ upgrade_precondition_checks || return $?
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_upgrade:old:$old_distro:new:$new_distro"
 apt_get_upgrade
 ret=$?
+apt-get clean
 apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss autoremove
 if [ $ret -ne 0 ]; then
   echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_${old_distro}_to_${new_distro}"
@@ -913,6 +914,7 @@ if [ $ret -ne 0 ]; then
     return 1 
   fi
 fi
+apt-get clean
 return $ret
 }
 

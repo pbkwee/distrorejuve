@@ -14,7 +14,8 @@ NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || e
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze"
 DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN squeeze-lts"
-DEBIAN_CURRENT="wheezy jessie"
+# wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
+DEBIAN_CURRENT="wheezy jessie stretch"
 IS_DEBUG=
 function print_usage() {
   echo "
@@ -45,13 +46,13 @@ Run with --usage to get this message
 
 Run with --to-wheezy to get from squeeze to wheezy
 
-Run with --to-jessie to get from squeeze or lenny or wheezy to jessie (8)
+Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie to stretch 9
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
 Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc where we can).
 
-Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to jessie.
+Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to latest debian.
 
 Run with --fix-vuln to try and fix your server (doing minimal change e.g. just an apt-get install of the affected package).
 
@@ -292,7 +293,7 @@ fi
 ps auxf | egrep -v '[g]host|]$' | awk '{print "dss:psauxf:" $0}'
 echo "dss:info: Checking for disk space on host"
 df -m | awk '{print "dss:dfm:" $0}'
-dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
+which dpkg-query >/dev/null && dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
 print_pkg_to_modified_diff
 [ -f /etc/apt/sources.list ] && cat /etc/apt/sources.list | egrep -v '^$|^#' | awk '{print "dss:aptsources:" $0}'
 return 0
@@ -660,6 +661,15 @@ function dist_upgrade_wheezy_to_jessie() {
 export old_distro=wheezy
 export old_ver="inux 7"
 export new_distro=jessie
+dist_upgrade_x_to_y
+ret=$?
+return $ret
+}
+
+function dist_upgrade_jessie_to_stretch() {
+export old_distro=jessie
+export old_ver="inux 8"
+export new_distro=stretch
 dist_upgrade_x_to_y
 ret=$?
 return $ret
@@ -1410,6 +1420,7 @@ function dist_upgrade() {
   dist_upgrade_lenny_to_squeeze || return $?
   dist_upgrade_squeeze_to_wheezy || return $?
   dist_upgrade_wheezy_to_jessie || return $?
+  dist_upgrade_jessie_to_stretch || return $?
   dist_upgrade_ubuntu_to_latest || return $?
   apt_get_dist_upgrade || return $?
 }
@@ -1441,11 +1452,12 @@ elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   dist_upgrade_squeeze_to_wheezy
   ret=$?
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
-elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
+elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
   dist_upgrade_squeeze_to_wheezy
   dist_upgrade_wheezy_to_jessie
+  dist_upgrade_jessie_to_stretch
   ret=$?
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then

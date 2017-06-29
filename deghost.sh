@@ -330,7 +330,7 @@ function upgrade_precondition_checks() {
     num=0
     distros=""
     for distro in $ALL_UBUNTU $ALL_DEBIAN; do
-      grep -qai "^ *[a-z].*$distro[ /]" /etc/apt/sources.list || continue
+      grep -qai "^ *[a-z].* $distro[ /-]" /etc/apt/sources.list || continue
       num=$((num+1))
       distros="$distro $distros"
     done
@@ -402,7 +402,8 @@ local domlike=$3
 local prefix=$4
 local line=$5
 # ^ *deb[-a-zA-Z]*  => match 'deb ' and 'deb-src '
-echo $line | egrep -qai "^ *deb[-a-zA-Z]* ([a-zA-Z]+)://([-~a-zA-Z0-9./]*)$domlike([-~a-zA-Z0-9./]*) +$fromname[ /]" && echo $line | sed "s@^ *deb\([-a-zA-Z]*\) \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\)\($domlike\)\([-~a-zA-Z0-9./]*\) *$fromname\([ /]\)@${prefix}deb\1 \2://\3\4\5 $toname\6@" && return 0
+#  +$fromname[ /-] => needs space first (else stretch/etch get mixed up), space / and - needed for squeeze, squeeze-updates and squeeze/updates
+echo $line | egrep -qai "^ *deb[-a-zA-Z]* ([a-zA-Z]+)://([-~a-zA-Z0-9./]*)$domlike([-~a-zA-Z0-9./]*) +$fromname[ /-]" && echo $line | sed "s@^ *deb\([-a-zA-Z]*\) \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\)\($domlike\)\([-~a-zA-Z0-9./]*\) *$fromname\([ /-]\)@${prefix}deb\1 \2://\3\4\5 $toname\6@" && return 0
 return 0
 }
 
@@ -414,7 +415,7 @@ local domlike=$3
 local prefix=$4
 local file=$5
 # repository like deb ftp://a-b.x.com/~home wheezy blah
-sed -i "s@^ *deb\([-a-zA-Z]*\) \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\)\($domlike\)\([-~a-zA-Z0-9./]*\) *$fromname\([ /]\)@${prefix}deb\1 \2://\3\4\5 $toname\6@" "$file"
+sed -i "s@^ *deb\([-a-zA-Z]*\) \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\)\($domlike\)\([-~a-zA-Z0-9./]*\) *$fromname\([ /-]\)@${prefix}deb\1 \2://\3\4\5 $toname\6@" "$file"
 return 0
 }
 
@@ -422,7 +423,7 @@ function islinematch() {
 local namematch=$1
 local domlike=$2
 local line=$4
-echo $line | egrep -qai "^ *deb[-a-zA-Z]* ([a-zA-Z]+)://([-~a-zA-Z0-9./]*)$domlike([-~a-zA-Z0-9./]*) +$namematch[ /]" && return 0
+echo $line | egrep -qai "^ *deb[-a-zA-Z]* ([a-zA-Z]+)://([-~a-zA-Z0-9./]*)$domlike([-~a-zA-Z0-9./]*) +$namematch[ /-]" && return 0
 return 1
 }
 
@@ -556,10 +557,10 @@ function enable_debian_archive() {
         local name0=$name
         echo $line | egrep -qai '^$|^ *#' && echo $line && line="" && break
 
-        echo $line | grep -qai "^deb http://archive.debian.org/debian $name[ /]" && echo " $name " >> /tmp/enabledarchive.$$ && break
+        echo $line | grep -qai "^deb http://archive.debian.org/debian $name[ /-]" && echo " $name " >> /tmp/enabledarchive.$$ && break
         # disable srcs
-        echo $line | egrep -qai "^ *deb-src ([a-z]+)://([-~a-zA-Z0-9./]*) *$name[ /]" && echo $line | sed "s@^ *deb-src \([a-zA-Z]*\)://\([a-zA-Z0-9./]*\) *$name @#deb-src \1://\2 $name @" && line="" && break
-        echo $line | egrep -qai "^ *deb ([a-z]+)://([-~a-zA-Z0-9./]*) *$name[ /]" && echo " $name " >> /tmp/enablearchive.$$ && echo "#$line" && line="" && break
+        echo $line | egrep -qai "^ *deb-src ([a-z]+)://([-~a-zA-Z0-9./]*) * $name[ /-]" && echo $line | sed "s@^ *deb-src \([a-zA-Z]*\)://\([a-zA-Z0-9./]*\) *$name@#deb-src \1://\2 $name@" && line="" && break
+        echo $line | egrep -qai "^ *deb ([a-z]+)://([-~a-zA-Z0-9./]*) * $name[ /-]" && echo " $name " >> /tmp/enablearchive.$$ && echo "#$line" && line="" && break
       done
       [ ! -z "$line" ] && echo $line
     done
@@ -740,7 +741,7 @@ fi
 
 disable_debian_repos $old_distro
 
-if ! grep -qai "^ *deb.*${new_distro}[ /]" /etc/apt/sources.list; then
+if ! grep -qai "^ *deb.* ${new_distro}[ /-]" /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
   echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
   echo "$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:info:sources:dist_upgrade_x_to_y:" $0}'
@@ -1064,10 +1065,10 @@ lsb_release -a 2>/dev/null | grep -qai Ubuntu && return 0
 local name=
 for name in $DEBIAN_ARCHIVE; do 
 # no lenny stuff, nothing to do
-! grep -qai "^ *deb.*debian.* $name[ /]" /etc/apt/sources.list && continue
+! grep -qai "^ *deb.*debian.* $name[ /-]" /etc/apt/sources.list && continue
 
 # already using archives, all good
-if grep -qai "^ *deb http://archive.debian.org/debian/ $name[ /]" /etc/apt/sources.list; then
+if grep -qai "^ *deb http://archive.debian.org/debian/ $name[ /-]" /etc/apt/sources.list; then
   echo "dss:info: This is a $name distro, and already has archive.debian in the repository."
   continue
 fi
@@ -1136,7 +1137,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
     echo "dss:warn: There was an error doing an apt-get update"
   fi
   for distro in $DEBIAN_CURRENT; do 
-    if grep -qai "^ *deb.*$distro[ /]" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.*$distro" /etc/apt/sources.list; then
+    if grep -qai "^ *deb.* $distro[ /-]" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.* $distro[ /-]" /etc/apt/sources.list; then
        echo "dss:info: adding the $distro security repository to the sources.list"
        cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
        echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list

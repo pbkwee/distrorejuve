@@ -320,7 +320,7 @@ function upgrade_precondition_checks() {
   fi
   # ii  dmidecode                       2.9-1.2build1                           Dump Desktop Management Interface data
   if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
-    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get remove x11-common; apt-get autoremove.  To skip this check run: export IGNOREX11=Y"
+    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y"
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
     [ -z "$IGNOREX11" ] && ret=$(($ret+1))
   fi
@@ -340,9 +340,9 @@ function upgrade_precondition_checks() {
     fi
   fi
   if [ -f /etc/apt/sources.list ]; then
-    local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net' /etc/apt/sources.list | head -n 1)
-    if [ ! -z "$otherrepos" ]; then
-      echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: $otherrepos"
+    local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net' /etc/apt/sources.list | egrep -v '^[[:space:]]*$' | head -n 1 )
+    if [ ! -z "$otherrepos" ] && [ ; then
+      echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: '$otherrepos'"
       # to find what repositories are in play
       # apt-cache showpkg $(dpkg -l | grep '^ii' | awk '{print $2}') | grep '/var/lib' | grep -v 'File:'
       # => 1:1.2.8.dfsg-2ubuntu5 (/var/lib/apt/lists/archive.ubuntu.com_ubuntu_dists_yakkety_main_binary-amd64_Packages) (/var/lib/dpkg/status)

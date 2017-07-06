@@ -705,6 +705,17 @@ function tweak_broken_configs() {
   fi 
   # error of sshd[1762]: Missing privilege separation directory: /var/run/sshd
   # => mkdir /var/run/sshd
+  # ifconfig output changes.  Some old (rimuhosting) 000loaddelay scripts will break unless latest loaddelay code is used.
+  for i in $(find /etc/cron.* -type f -name  000loaddelay);  do grep -qai "inet addr:" $i || continue
+echo '#!/bin/bash
+# This is to delay cron jobs by up to 10 minutes to relieve host server load.
+# needs to parse inet 174.136.11.74  B174.136.11.79  M255.255.255.248 and
+# inet addr:174.136.11.74  Bcast:174.136.11.79  Mask:255.255.255.248
+# inet 74.50.55.152  netmask 255.255.255.0  broadcast 74.50.55.255
+declare -i random=$(expr $(ifconfig eth0 | grep -v inet6  | grep  "inet" | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
+sleep ${random:-10}
+exit 0' > $i
+  done
 }
 
 function dist_upgrade_x_to_y() {

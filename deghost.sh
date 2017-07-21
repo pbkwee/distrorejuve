@@ -705,6 +705,28 @@ function tweak_broken_configs() {
   fi 
   # error of sshd[1762]: Missing privilege separation directory: /var/run/sshd
   # => mkdir /var/run/sshd
+  while true; do
+    # not debian-ish
+    if ! which dpkg >/dev/null 2>&1; then break; fi
+  
+    # if they had mysql they'll have something like:
+    # rc  mysql-server-5.1                 5.1.73-1   ...
+    if ! dpkg -l | grep -qai '^rc.*mysql-'; then break; fi
+    
+    # if mysql or maria db something is installed, quit here. 
+    if dpkg -l | grep -v mysql-common | egrep -qai '^ii.*mysql-|^ii.*mariadb'; then break; fi
+    
+    # no mysql conf dir, quit
+    if [ ! -d /etc/mysql ]; then break; fi
+    
+    echo "dss:info: MySQL appears to have been installed, but no longer present.  This can happen between debian 8 and debian 9.  As mysql is replaced by mariadb.  Attempting to install mysql-server which would pull in mariadb."
+    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:pre:" $0}'
+    
+    apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install mysql-server
+    if [ $? -ne 0 ]; then break; fi
+    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:post:" $0}'
+    break
+  done 
 }
 
 function dist_upgrade_x_to_y() {

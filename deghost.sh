@@ -726,7 +726,21 @@ function tweak_broken_configs() {
     if [ $? -ne 0 ]; then break; fi
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:post:" $0}'
     break
-  done 
+  done
+  for i in $(find /etc/cron.* -type f -name 000loaddelay); do
+    #old style ifconfig
+    ifconfig | grep 'inet addr' && continue
+    # not our script
+    grep -qai 'random=.*ifconfig.*sed' $i || continue
+    echo '#!/bin/bash
+# This is to delay cron jobs by up to 10 minutes to relieve host server load.
+# needs to parse inet 174.136.11.74  B174.136.11.79  M255.255.255.248 and
+# inet addr:174.136.11.74  Bcast:174.136.11.79  Mask:255.255.255.248
+declare -i random=$(expr $(ifconfig eth0 | grep -v inet6  | grep  "inet" | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
+sleep ${random}
+exit 0' > $i
+    echo "dss:info:updating load delay script: $i"
+  done
 }
 
 function dist_upgrade_x_to_y() {

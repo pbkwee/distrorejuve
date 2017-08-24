@@ -736,10 +736,25 @@ function tweak_broken_configs() {
 # This is to delay cron jobs by up to 10 minutes to relieve host server load.
 # needs to parse inet 174.136.11.74  B174.136.11.79  M255.255.255.248 and
 # inet addr:174.136.11.74  Bcast:174.136.11.79  Mask:255.255.255.248
-declare -i random=$(expr $(ifconfig eth0 | grep -v inet6  | grep  "inet" | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
+declare -i random=$(expr $(ifconfig eth0 | grep -v inet6  | grep  "inet" | head -n 1 | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
 sleep ${random}
 exit 0' > $i
     echo "dss:info:updating load delay script: $i"
+  done
+  # fix missing udev
+  while true; do
+    # not debian-ish
+    if ! which dpkg >/dev/null 2>&1; then break; fi
+  
+    # dpkg -l | grep '/dev'
+    # ii  makedev                          2.3.1-93                       all          creates device files in /dev
+    # rc  udev                             232-25+deb9u1                  i386         /dev/ and hotplug management daemon
+    if dpkg -l | grep -qai '^ii.*udev-'; then break; fi
+    
+    apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install udev
+    ret=$?
+    echo "dss:info: udev install result $ret $(dpkg -l | grep udev)"
+    break 
   done
 }
 

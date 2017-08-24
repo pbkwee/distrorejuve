@@ -46,6 +46,8 @@ Run with --usage to get this message
 
 Run with --to-wheezy to get from squeeze to wheezy
 
+Run with --to-jessie to get from squeeze or lenny or wheezy to jessie
+
 Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie to stretch 9
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
@@ -1502,6 +1504,13 @@ elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
   dist_upgrade_squeeze_to_wheezy
+  ret=$?
+  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
+  print_info
+  dist_upgrade_lenny_to_squeeze
+  dist_upgrade_squeeze_to_wheezy
+  dist_upgrade_wheezy_to_jessie
   ret=$?
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then

@@ -343,7 +343,7 @@ function upgrade_precondition_checks() {
   fi
   if [ -f /etc/apt/sources.list ]; then
     local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net' /etc/apt/sources.list | egrep -v '^[[:space:]]*$' | head -n 1 )
-    if [ ! -z "$otherrepos" ] && [ ; then
+    if [ ! -z "$otherrepos" ]; then
       echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: '$otherrepos'"
       # to find what repositories are in play
       # apt-cache showpkg $(dpkg -l | grep '^ii' | awk '{print $2}') | grep '/var/lib' | grep -v 'File:'

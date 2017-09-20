@@ -711,12 +711,18 @@ function tweak_broken_configs() {
     # not debian-ish
     if ! which dpkg >/dev/null 2>&1; then break; fi
   
+    # mysql server of some version is installed.  done
+    if dpkg -l | egrep -qai '^ii.*mysql-server|^ii.*mariadb-server'; then break; fi
+    
+    # skip if they never had a mysql server installed.  don't skip if they had an rc=removed,configured
     # if they had mysql they'll have something like:
     # rc  mysql-server-5.1                 5.1.73-1   ...
-    if ! dpkg -l | grep -qai '^rc.*mysql-'; then break; fi
+    if ! dpkg -l | grep -qai '^rc.*mysql-server'; then break; fi
     
     # if mysql or maria db something is installed, quit here. 
-    if dpkg -l | grep -v mysql-common | egrep -qai '^ii.*mysql-|^ii.*mariadb'; then break; fi
+    # replaced by check above for ii.*mysql-server
+    # and otherwise you'd need to be wary of packages like libdbd-mysql;  mysql-commo; libmariadbclient
+    # if dpkg -l | egrep -v 'mysql-common|libmariad' | egrep -qai '^ii.*mysql-|^ii.*mariadb'; then break; fi
     
     # no mysql conf dir, quit
     if [ ! -d /etc/mysql ]; then break; fi
@@ -731,7 +737,7 @@ function tweak_broken_configs() {
   done
   for i in $(find /etc/cron.* -type f -name 000loaddelay); do
     #old style ifconfig
-    ifconfig | grep 'inet addr' && continue
+    ifconfig | grep -qai 'inet addr' && continue
     # not our script
     grep -qai 'random=.*ifconfig.*sed' $i || continue
     echo '#!/bin/bash

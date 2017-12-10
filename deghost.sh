@@ -46,6 +46,8 @@ Run with --usage to get this message
 
 Run with --to-wheezy to get from squeeze to wheezy
 
+Run with --to-jessie to get from squeeze or lenny or wheezy to jessie
+
 Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie to stretch 9
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
@@ -341,7 +343,7 @@ function upgrade_precondition_checks() {
   fi
   if [ -f /etc/apt/sources.list ]; then
     local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net' /etc/apt/sources.list | egrep -v '^[[:space:]]*$' | head -n 1 )
-    if [ ! -z "$otherrepos" ] && [ ; then
+    if [ ! -z "$otherrepos" ]; then
       echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: '$otherrepos'"
       # to find what repositories are in play
       # apt-cache showpkg $(dpkg -l | grep '^ii' | awk '{print $2}') | grep '/var/lib' | grep -v 'File:'
@@ -706,16 +708,62 @@ function tweak_broken_configs() {
   fi 
   # error of sshd[1762]: Missing privilege separation directory: /var/run/sshd
   # => mkdir /var/run/sshd
-  # ifconfig output changes.  Some old (rimuhosting) 000loaddelay scripts will break unless latest loaddelay code is used.
-  for i in $(find /etc/cron.* -type f -name  000loaddelay);  do grep -qai "inet addr:" $i || continue
-echo '#!/bin/bash
+  while true; do
+    # not debian-ish
+    if ! which dpkg >/dev/null 2>&1; then break; fi
+  
+    # mysql server of some version is installed.  done
+    if dpkg -l | egrep -qai '^ii.*mysql-server|^ii.*mariadb-server'; then break; fi
+    
+    # skip if they never had a mysql server installed.  don't skip if they had an rc=removed,configured
+    # if they had mysql they'll have something like:
+    # rc  mysql-server-5.1                 5.1.73-1   ...
+    if ! dpkg -l | grep -qai '^rc.*mysql-server'; then break; fi
+    
+    # if mysql or maria db something is installed, quit here. 
+    # replaced by check above for ii.*mysql-server
+    # and otherwise you'd need to be wary of packages like libdbd-mysql;  mysql-commo; libmariadbclient
+    # if dpkg -l | egrep -v 'mysql-common|libmariad' | egrep -qai '^ii.*mysql-|^ii.*mariadb'; then break; fi
+    
+    # no mysql conf dir, quit
+    if [ ! -d /etc/mysql ]; then break; fi
+    
+    echo "dss:info: MySQL appears to have been installed, but no longer present.  This can happen between debian 8 and debian 9.  As mysql is replaced by mariadb.  Attempting to install mysql-server which would pull in mariadb."
+    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:pre:" $0}'
+    
+    apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install mysql-server
+    if [ $? -ne 0 ]; then break; fi
+    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:post:" $0}'
+    break
+  done
+  for i in $(find /etc/cron.* -type f -name 000loaddelay); do
+    #old style ifconfig
+    ifconfig | grep -qai 'inet addr' && continue
+    # not our script
+    grep -qai 'random=.*ifconfig.*sed' $i || continue
+    echo '#!/bin/bash
 # This is to delay cron jobs by up to 10 minutes to relieve host server load.
 # needs to parse inet 174.136.11.74  B174.136.11.79  M255.255.255.248 and
 # inet addr:174.136.11.74  Bcast:174.136.11.79  Mask:255.255.255.248
-# inet 74.50.55.152  netmask 255.255.255.0  broadcast 74.50.55.255
-declare -i random=$(expr $(ifconfig eth0 | grep -v inet6  | grep  "inet" | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
-sleep ${random:-10}
+declare -i random=$(expr $(ifconfig eth0 | grep -v inet6  | grep  "inet" | head -n 1 | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
+sleep ${random}
 exit 0' > $i
+    echo "dss:info:updating load delay script: $i"
+  done
+  # fix missing udev
+  while true; do
+    # not debian-ish
+    if ! which dpkg >/dev/null 2>&1; then break; fi
+  
+    # dpkg -l | grep '/dev'
+    # ii  makedev                          2.3.1-93                       all          creates device files in /dev
+    # rc  udev                             232-25+deb9u1                  i386         /dev/ and hotplug management daemon
+    if dpkg -l | grep -qai '^ii.*udev-'; then break; fi
+    
+    apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install udev
+    ret=$?
+    echo "dss:info: udev install result $ret $(dpkg -l | grep udev)"
+    break 
   done
 }
 
@@ -1463,6 +1511,13 @@ elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
   dist_upgrade_squeeze_to_wheezy
+  ret=$?
+  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
+  print_info
+  dist_upgrade_lenny_to_squeeze
+  dist_upgrade_squeeze_to_wheezy
+  dist_upgrade_wheezy_to_jessie
   ret=$?
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then

@@ -56,6 +56,8 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to latest debian.
 
+Run with --dist-update to update packages on the current distro version (no distro version change).
+
 Run with --fix-vuln to try and fix your server (doing minimal change e.g. just an apt-get install of the affected package).
 
 Written by Peter Bryant at http://launchtimevps.com
@@ -1473,8 +1475,8 @@ yum_upgrade || return $?
 
 }
 
-function dist_upgrade() {
-  echo "dss:trace:dist_upgrade"
+function dist_upgrade_to_latest() {
+  echo "dss:trace:dist_upgrade_to_latest"
 
   packages_upgrade || return $?
   apt_get_dist_upgrade || return $?
@@ -1545,12 +1547,17 @@ elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
   packages_upgrade
 elif [ "--dist-upgrade" = "${ACTION:-$1}" ] ; then
   print_info
-  dist_upgrade
+  dist_upgrade_to_latest
+elif [ "--dist-update" = "${ACTION:-$1}" ] ; then
+  print_info
+  yum_upgrade
+  packages_update
+  apt_get_dist_upgrade
 elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then 
   fix_vuln
   ret=$?
   if ! is_fixed; then
-    dist_upgrade
+    dist_upgrade_to_latest
   fi
   print_libc_versions afterfix
   print_vulnerability_status afterfix

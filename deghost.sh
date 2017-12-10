@@ -356,10 +356,11 @@ function upgrade_precondition_checks() {
     if [ -d /etc/apt/sources.list.d/ ]; then
       local othersources=$(find /etc/apt/sources.list.d/ -type f)
       for othersource in $othersources; do
+        # e.g. othersource = /etc/apt/sources.list.d/wheezy-backports.list
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
         if [ ! -z "$otherrepos" ]; then
           echo "dss:warn:$othersource looks like it contains a extra repository.  disable file before proceeding?: $otherrepos"
-          #echo "dss:warn:packages from extra repositories my include: $(aptitude search '?narrow(?installed, !?origin(Debian))!?obsolete')"
+          #echo "dss:warn:packages from extra repositories may include: $(aptitude search '?narrow(?installed, !?origin(Debian))!?obsolete')"
           ret=$(($ret+1))
         fi
       done

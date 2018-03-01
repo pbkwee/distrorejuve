@@ -52,6 +52,8 @@ Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie to 
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
+Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu version
+
 Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc where we can).
 
 Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to latest debian.
@@ -1044,11 +1046,14 @@ if dpkg -l | grep -qai '^i.*dovecot'; then
   return 1
 fi
 
+local NUM_TO_DIST_UPGRADE="${1:-1000}"
+
 upgrade_precondition_checks || return $?
 echo "dss:trace:dist_upgrade_ubuntu_to_latest:pre_apt_get_upgrade:"
 apt_get_upgrade
 local candidates="$ALL_UBUNTU"
 for start in $ALL_UBUNTU; do
+  [ $NUM_TO_DIST_UPGRADE -lt 1 ] && echo "Stopping after $1 distro version updates as requested" && return 0
   #No LSB modules are available.
   #Distributor ID: Ubuntu
   #Description:  Ubuntu 14.04.4 LTS
@@ -1097,6 +1102,7 @@ for start in $ALL_UBUNTU; do
   echo "dss:trace:dist_upgrade_ubuntu_to_latest:pre_apt_get_upgrade:next:$next"
 apt_get_dist_upgrade
 ret=$?
+NUM_TO_DIST_UPGRADE=$((NUM_TO_DIST_UPGRADE-1))
 if [ $ret -eq 0 ]; then
   if lsb_release -a 2>/dev/null| grep -qai $next; then
     # dist-upgrade returned ok, and lsb_release thinks we are wheezy
@@ -1533,6 +1539,11 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_ubuntu_to_latest
+  ret=$?
+  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+elif [ "--to-next-ubuntu" = "${ACTION:-$1}" ] ; then
+  print_info
+  dist_upgrade_ubuntu_to_latest 1
   ret=$?
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then

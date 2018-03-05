@@ -735,7 +735,7 @@ function tweak_broken_configs() {
     echo "dss:info: MySQL appears to have been installed, but no longer present.  This can happen between debian 8 and debian 9.  As mysql is replaced by mariadb.  Attempting to install mysql-server which would pull in mariadb."
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:pre:" $0}'
     
-    apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install mysql-server
+    apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install mysql-server
     if [ $? -ne 0 ]; then break; fi
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:post:" $0}'
     break
@@ -764,7 +764,7 @@ exit 0' > $i
     # rc  udev                             232-25+deb9u1                  i386         /dev/ and hotplug management daemon
     if dpkg -l | grep -qai '^ii.*udev-'; then break; fi
     
-    apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install udev
+    apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install udev
     ret=$?
     echo "dss:info: udev install result $ret $(dpkg -l | grep udev)"
     break 
@@ -971,15 +971,15 @@ apt-get update
 record_config_state
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss  autoremove
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
+apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
 echo "dss:info: running an apt-get upgrade"
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" upgrade
+apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" upgrade
 ret=$?
 apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss autoremove
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
+apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
 if [ $ret -ne 0 ]; then
   echo "dss:info: apt-get upgrade failed.  trying a dist-ugprade..."
-  apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+  apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
   ret=$?
   if [ $ret -eq 0 ]; then
     echo "dss:info: apt-get dist-upgrade succeeded when a upgrade failed."
@@ -999,15 +999,15 @@ upgrade_precondition_checks || return $?
 echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
 apt_get_upgrade || return 1
 echo "dss:trace:apt_get_dist_upgrade"
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" -f install
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install dpkg
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" autoremove
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" -f install
+apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install dpkg
+apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" autoremove
+apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
 # cope with 'one of those random things'
 # E: Could not perform immediate configuration on 'python-minimal'.Please see man 5 apt.conf under APT::Immediate-Configure for details. (2)
-if [ $? -ne 0 ] && apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
+if [ $? -ne 0 ] && apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
   apt-get -f -y install libc6-dev
-  apt-get dist-upgrade -y -f -o APT::Immediate-Configure=0 -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss"
+  apt-get dist-upgrade -y -f -o APT::Immediate-Configure=0  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss"
 fi
 [ -e /var/log/syslog ] && [ -e /etc/my/my.cnf ] && if grep "unknown variable 'lc-messages-dir" /var/log/syslog; then
   #lc-messages-dir        = /usr/share/mysql...
@@ -1018,12 +1018,12 @@ fi
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get -y autoremove
 apt-get -y autoclean
-apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
 ret=$?
 if [ $ret -ne 0 ] ; then
   echo "dss:warn: Got an error after an apt-get dist-upgrade.  trying an apt-get -f install"
   apt-get -f -y install
-  apt-get -y -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+  apt-get -y  -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
   ret=$?
   if [ $ret -ne 0 ] ; then
     echo "dss:error: Got an error after an apt-get dist-upgrade"

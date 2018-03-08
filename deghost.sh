@@ -702,41 +702,72 @@ function crossgrade_debian() {
   apt-get clean
   apt-get upgrade
   apt-get clean
-  apt-get --download-only install dpkg:amd64 tar:amd64 apt:amd64 
+  apt-get --download-only -y install dpkg:amd64 tar:amd64 apt:amd64
+  # error if we append perl-base:amd64 to the line above...
+  # and if we don't have perl-base then apt-get -f install has this error: E: Unmet dependencies
   apt-get --download-only install perl-base:amd64
+  
+  # something about this removes apache2.  figure out why...
+  dpkg --install /var/cache/apt/archives/*_amd64.deb
+  if [ $? -ne 0 ]; then 
+    # first dpkg --install fails.  second one should work ok.  e.g.:
+    # Errors were encountered while processing:
+     # /var/cache/apt/archives/dpkg_1.18.24_amd64.deb
+     # /var/cache/apt/archives/tar_1.29b-1.1_amd64.deb
+    dpkg --install /var/cache/apt/archives/*_amd64.deb
+    [ $? -ne 0 ] && echo "dpkg install amd64.deb files failed" 2>&1 && return 1
+  fi
+  [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
+  mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
+  apt-get -y autoremove
+  apt-get -y -f install
+  apt-get -y autoremove
+  
+  # doesn't seem to achieve much...
+  dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
+  apt-get -f install
+  apt-get -y autoremove
+  
   local packages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && packages="$packages $i:amd64"; done
-  apt-get --download-only install $packages
-  apt-get --download-only install init:amd64 
-  #apt-get --download-only install systemd-sysv:amd64
-  apt-get --download-only install libc-bin:amd64
+  apt-get --download-only -y install $packages
+  apt-get --download-only -y install init:amd64 
+  #apt-get --download-only -y install systemd-sysv:amd64
+  apt-get --download-only -y install libc-bin:amd64
   dpkg --install /var/cache/apt/archives/*_amd64.deb
   if [ $? -ne 0 ]; then 
     dpkg --install /var/cache/apt/archives/*_amd64.deb
     [ $? -ne 0 ] && echo "dpkg install amd64.deb files failed" 2>&1 && return 1
   fi
   apt-get update
-  dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
-  apt-get -f install
-  apt-get -y autoremove
-  # for all i386 apps, install the amd64 and remove the i386
+  # getting a dependency issue on apt-get remove a few things: libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6)
+  # workaround is:
+  apt-get -y install libpam-modules-bin:amd64
+  
+  # for all i386 apps, install the amd64 and remove the i386.  some will fail, that's ok.
+  # do 
   for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get -y  install $i:amd64 && apt-get -y remove $i:i386; done
-  #for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib'); do apt-get -y install $i:amd64; done
-  #apt-get install $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib')
+  
   apt-get -y autoremove
   
-  echo "Remaining i386 packages that need to be addr
+  echo "Remaining i386 packages that need to be addressed"
   dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}'
   echo "e.g. apt-get install $package:amd64"
   echo "e.g. apt-get purge $package"
+  
+  # sample cleanup/finish up/suggestions:
+  
+  #  libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6) =>
+  # apt-get install libpam-modules-bin:amd64
+
+  # apt-get install apache2  
+  #apt-get install $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib')
+
   # apt-get purge zlib1g:i386
   # remove i386 packages
   # for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' ); do apt-get -y remove $i; done
   
   #apt-get install sysvinit-core:amd64
 
-  #  libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6) =>
-  # apt-get install libpam-modules-bin:amd64
-  
   # check 64 bit versions here?
   # dpkg -l | grep libc-bin
 }
@@ -983,7 +1014,7 @@ function print_config_state_changes() {
   # IncludeOptional sites-enabled/*.conf
   [ -d /etc/apache2/sites-available ] && [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include.*sites-.*conf' /etc/apache2/apache2.conf && local nonconfsitefiles=$(find /etc/apache2/sites-available -type f | egrep -v '\.conf$|dpkg-')
   for file in $nonconfsitefiles; do
-    echo "dss:warn: Apache config file '$file' should have a .conf extension: mv $file $file.conf;a2ensite $(basename $file).conf)"   
+    echo "dss:warn: Apache config file '$file' should have a .conf extension: mv $file $file.conf;a2ensite $(basename $file).conf"   
   done   
 }
 
@@ -1014,6 +1045,8 @@ function record_config_state() {
   echo "Running processes:" >> $file
   echo "" >> $file
   ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' | egrep -v '^process: \[|COMMAND|init' | sort | uniq >> $file
+  
+  [  -x /usr/bin/dpkg ] && echo "Installed packages:" >> $file && dpkg -l | grep '^ii' | awk '{print $2}' | sed 's/:.*//' | sort | grep -v '^lib' | awk '{ print "installed: " $0 }' >> $file
 }
 
 function apt_get_upgrade() {

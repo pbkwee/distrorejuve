@@ -326,7 +326,8 @@ function upgrade_precondition_checks() {
   fi
   # ii  dmidecode                       2.9-1.2build1                           Dump Desktop Management Interface data
   if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
-    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y"
+    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | tr '\r\n' ' ')"
+    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y"
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
     [ -z "$IGNOREX11" ] && ret=$(($ret+1))
   fi
@@ -683,6 +684,63 @@ ret=$?
 return $ret
 }
 
+function crossgrade_debian() {
+  # see https://wiki.debian.org/CrossGrading
+  ! uname -a | grep -qai x86_64 && echo "Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
+  bittedness=$(getconf LONG_BIT)
+  if echo $bittedness | grep -qai 64; then
+    echo "Already 64 bits.  Nothing to do."
+    [ $(dpkg -l | grep '^ii ' | grep ':i386' | wc -l ) -gt 0 ] && echo "i386 packages on this server (may need tidying up): $(dpkg -l | grep '^ii ' | grep ':i386')"
+    return 0
+  fi 
+  echo "Current architecture: $(dpkg --print-architecture)"
+  echo "Foreign architectures: $(dpkg --print-foreign-architectures)"
+  dpkg --add-architecture amd64
+  [ $? -ne 0 ] && echo "Failed adding amd64 architecture." 2>&1 && return 1
+  apt-get update
+  apt-get autoremove
+  apt-get clean
+  apt-get upgrade
+  apt-get clean
+  apt-get --download-only install dpkg:amd64 tar:amd64 apt:amd64 
+  apt-get --download-only install perl-base:amd64
+  local packages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && packages="$packages $i:amd64"; done
+  apt-get --download-only install $packages
+  apt-get --download-only install init:amd64 
+  #apt-get --download-only install systemd-sysv:amd64
+  apt-get --download-only install libc-bin:amd64
+  dpkg --install /var/cache/apt/archives/*_amd64.deb
+  if [ $? -ne 0 ]; then 
+    dpkg --install /var/cache/apt/archives/*_amd64.deb
+    [ $? -ne 0 ] && echo "dpkg install amd64.deb files failed" 2>&1 && return 1
+  fi
+  apt-get update
+  dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
+  apt-get -f install
+  apt-get -y autoremove
+  # for all i386 apps, install the amd64 and remove the i386
+  for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get -y  install $i:amd64 && apt-get -y remove $i:i386; done
+  #for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib'); do apt-get -y install $i:amd64; done
+  #apt-get install $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib')
+  apt-get -y autoremove
+  
+  echo "Remaining i386 packages that need to be addr
+  dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}'
+  echo "e.g. apt-get install $package:amd64"
+  echo "e.g. apt-get purge $package"
+  # apt-get purge zlib1g:i386
+  # remove i386 packages
+  # for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' ); do apt-get -y remove $i; done
+  
+  #apt-get install sysvinit-core:amd64
+
+  #  libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6) =>
+  # apt-get install libpam-modules-bin:amd64
+  
+  # check 64 bit versions here?
+  # dpkg -l | grep libc-bin
+}
+  
 function tweak_broken_configs() {
   grep -qai 'Include conf.d'  /etc/apache2/apache2.conf && [ ! -d /etc/apache2/conf.d ] && mkdir /etc/apache2/conf.d
   if [ -x /usr/sbin/apache2ctl ] && [ -f /etc/apache2/apache2.conf ]; then

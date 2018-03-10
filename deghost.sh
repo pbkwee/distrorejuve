@@ -12,55 +12,71 @@ ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty ka
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
-UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze"
+# in egrep code be aware of etch/stretch matching
+UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
 DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN squeeze-lts"
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
-DEBIAN_CURRENT="wheezy jessie stretch"
+DEBIAN_CURRENT="jessie stretch"
 IS_DEBUG=
 function print_usage() {
   echo "
-#deghost
+# deghost
 
-deghost is a cross-distro script to determine the vulnerability of a libc library to the ghost exploits (CVE-2015-0235 or CVE-2015-7547) and then patch that where possible.
+deghost is a utility that helps with upgrading distros. It works on a number of different distros (Ubuntu, 
+Debian, Centos). It uses apt, yum and repository corrections as appropriate. It can dist upgrade between 
+multiple versions for Ubuntu and Debian.
 
-deghost works on a number of different distros. It uses apt, yum and repository corrections as appropriate.
+To get the latest version of this script:
 
-Attempts to improve the situation:
-        
-    - Using squeeze?  Switch to squeeze-lts
-    - Unsupported Ubuntus (others per OLD_RELEASES_UBUNTU variable) => convert to old-releases.ubuntu.com
-    
-No action available for the following (and older) distros:
-    
-    - RHEL4, WBEL3, RH9, Debian 4 => nothing
-        
+wget -O deghost.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/deghost/master/deghost.sh
+
+Example usage to dist upgrade to latest Debian or Ubuntu disto. First make a backup of your server. Then run:
+
+sudo bash deghost.sh --dist-upgrade | tee -a deghost.log
+
+Uses:
+- Enable archive repositories for older Debian distros
+- Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
+- Dist upgrade Ubuntu distros to the next LTS version.  Then from LTS version to LTS version.
+- On completion provides information on config changes (modified config files, changed ports)
+- Install missing Debian keys
+- Handles a few common Apache config issues after a distro upgrade.
+- Designed to run unattended without lots of prompting.
+- Burgeoning support to cross grade 32 bit distros to 64 bit
+
 Arguments:
   
-Use with --source if you just wish to have the functions available to you for testing
-
-Run with --check (or no argument) if you just wish to check, but not change your server
-
-Run with --break-eggs will run a --dist-upgrade if the server is vulnerable.
-
 Run with --usage to get this message
+
+Run with --check (or no argument) makes no changes.  Reports information like disk space free, kernel, distro version, config files modified from package defaults.
+
+Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to latest debian.
+
+Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc where we can).  no distro version change.
+
+Run with --dist-update to update packages on the current distro version (no distro version change).
+
+Run with --show-cruft to see packages that do not belong to the current distro.  e.g. leftover packages from older distros.  And to see 32 bit packages installed on 64 bit distros.
+
+Run with --remove-cruft to remove old packages and 32 bit applications on 64 bit distros.
+
+Run with --to-64bit to convert a 32 bit distro to 64 bit.  NEW as at 2018-03/not so bullet-proof.  Only tested so far with Debian not Ubuntu.
 
 Run with --to-wheezy to get from squeeze to wheezy
 
-Run with --to-jessie to get from squeeze or lenny or wheezy to jessie
+Run with --to-jessie to get from an older distro to jessie
 
 Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie to stretch 9
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
-Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu version
-
-Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc where we can).
-
-Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to latest debian.
-
-Run with --dist-update to update packages on the current distro version (no distro version change).
+Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu version.  If the current ubuntu is an LTS version then this skips to the next LTS version.
 
 Run with --fix-vuln to try and fix your server (doing minimal change e.g. just an apt-get install of the affected package).
+
+Run with --break-eggs will run a --dist-upgrade if the server is vulnerable.
+
+Use with --source if you just wish to have the deghost functions available to you for testing
 
 Written by Peter Bryant at http://launchtimevps.com
 
@@ -81,6 +97,11 @@ function is_fixed() {
     fi
   fi
   return 1
+}
+
+# e.g. wordlisttoegrep "a b c" => "a|b|c"
+function wordlisttoegreparg() {
+  echo $1 | sed 's/  / /g' | sed 's/ *$//g' | sed 's/ /|/g'
 }
 
 function replace() {
@@ -685,21 +706,27 @@ return $ret
 }
 
 function crossgrade_debian() {
-  # see https://wiki.debian.org/CrossGrading
-  ! uname -a | grep -qai x86_64 && echo "Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
+  [  ! -f /etc/debian_version ] && return 0
+  
   bittedness=$(getconf LONG_BIT)
   if echo $bittedness | grep -qai 64; then
     echo "Already 64 bits.  Nothing to do."
     [ $(dpkg -l | grep '^ii ' | grep ':i386' | wc -l ) -gt 0 ] && echo "i386 packages on this server (may need tidying up): $(dpkg -l | grep '^ii ' | grep ':i386')"
     return 0
-  fi 
+  fi
+  
+  # see https://wiki.debian.org/CrossGrading
+  ! uname -a | grep -qai x86_64 && echo "Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
+
+  [  ! -x /usr/bin/apt-show-versions ] && apt-get -y install apt-show-versions
+  [  -z "$IGNORECRUFT" ] && has_cruft_packges oldpkg && show_cruft_packages oldpkg && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
+  
   echo "Current architecture: $(dpkg --print-architecture)"
   echo "Foreign architectures: $(dpkg --print-foreign-architectures)"
   dpkg --add-architecture amd64
   [ $? -ne 0 ] && echo "Failed adding amd64 architecture." 2>&1 && return 1
   apt-get update
   apt-get autoremove
-  apt-get clean
   apt-get upgrade
   apt-get clean
   apt-get --download-only -y install dpkg:amd64 tar:amd64 apt:amd64
@@ -721,43 +748,78 @@ function crossgrade_debian() {
   mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
   apt-get -y autoremove
   apt-get -y -f install
+  if [  $? -ne 0 ]; then
+    dpkg -l perl-base:i386 >/dev/null 2>&1 && ! dpkg -l perl-base:amd64 >/dev/null 2>&1 &&  apt-get -y download perl-base:amd64 && dpkg --install perl-base*amd64.deb && apt-get -y -f install
+  fi    
   apt-get -y autoremove
   
   # doesn't seem to achieve much...
   dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
   apt-get -f install
+  if [  $? -ne 0 ]; then
+    echo "Cross grade failed after initial amd64 package installs.  See crossgrade_debian for a few suggestions to resolve manually."
+    return 1 
+  fi
   apt-get -y autoremove
   
-  local packages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && packages="$packages $i:amd64"; done
-  apt-get --download-only -y install $packages
+  local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && essentialpackages="$essentialpackages $i:amd64"; done
+  apt-get --download-only -y install $essentialpackages
   apt-get --download-only -y install init:amd64 
   #apt-get --download-only -y install systemd-sysv:amd64
   apt-get --download-only -y install libc-bin:amd64
-  dpkg --install /var/cache/apt/archives/*_amd64.deb
-  if [ $? -ne 0 ]; then 
-    dpkg --install /var/cache/apt/archives/*_amd64.deb
-    [ $? -ne 0 ] && echo "dpkg install amd64.deb files failed" 2>&1 && return 1
+  local dpkginstalllog=$(mktemp "dpkginstall.XXXXXX.log")
+  dpkg --install /var/cache/apt/archives/*_amd64.deb 2>&1 | tee $dpkginstalllog
+  ret=$?
+  if [ $ret -ne 0 ]; then
+    local failedinstalls=$(cat $dpkginstalllog | grep --after-context 50 'Errors were encountered while processing:' | sed 's/.*Errors were encountered while processing://')
+    if [  ! -z "$failedinstalls" ]; then
+      dpkg --install $failedinstalls
+      ret=$?
+    fi
   fi
-  apt-get update
+  if [ $ret -ne 0 ]; then 
+    dpkg --install /var/cache/apt/archives/*_amd64.deb
+    ret=$?
+  fi
+  rm -f "$dpkginstalllog"
+  [ $ret -ne 0 ] && echo "dpkg install essenstial amd64.deb files failed" 2>&1 && return 1
   # getting a dependency issue on apt-get remove a few things: libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6)
   # workaround is:
   apt-get -y install libpam-modules-bin:amd64
   
+  # these seem to be uninstalled by something above.
+  apt-get -y install vim apache2
+  
   # for all i386 apps, install the amd64 and remove the i386.  some will fail, that's ok.
-  # do 
+  # do
+  apt-get -y autoremove
+   
   for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get -y  install $i:amd64 && apt-get -y remove $i:i386; done
   
   apt-get -y autoremove
   
-  echo "Remaining i386 packages that need to be addressed"
-  dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}'
-  echo "e.g. apt-get install $package:amd64"
-  echo "e.g. apt-get purge $package"
+  has_cruft_packages 32bit && show_cruft_packages
+  [  -f "$dpkginstalllog" ] && rm -f $dpkginstalllog
   
   # sample cleanup/finish up/suggestions:
   
   #  libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6) =>
   # apt-get install libpam-modules-bin:amd64
+  
+  # apt-get -s -o Debug::pkgProblemResolver=yes -f install
+
+  # if "apt-get --download-only install perl-base:amd64" => E: Unmet dependencies. Try 'apt --fix-broken install'
+  # try:
+  # apt-get download perl-base:amd64
+  # dpkg --install perl-base*amd64.deb
+  
+  #WARNING: The following essential packages will be removed.
+  #This should NOT be done unless you know exactly what you are doing!
+  # diffutils:i386
+  #=>
+  # apt-get download diffutils
+  # dpkg --install diffutils*amd64.deb
+  
 
   # apt-get install apache2  
   #apt-get install $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib')
@@ -767,9 +829,91 @@ function crossgrade_debian() {
   # for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' ); do apt-get -y remove $i; done
   
   #apt-get install sysvinit-core:amd64
+  
+  # pkgs installed for older/different distros
+  # allpkgs="$(apt-cache pkgnames)"; for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do echo " $allpkgs " | grep -qai " $i " && continue; echo $i; done
 
   # check 64 bit versions here?
   # dpkg -l | grep libc-bin
+}
+
+# e.g. has_cruft_packages && show_cruft_packages && reduce_cruft_packages
+function has_cruft_packages() { 
+   cruft_packages0 has $1
+   # returns 0 if cruft packages
+   return $?
+}
+function show_cruft_packages() { 
+   cruft_packages0 show $1
+   return $?
+}
+
+function remove_cruft_packages() {
+   cruft_packages0 remove  $1
+   return $?
+}
+
+# e.g. cruft_packages0 show 32bit
+function cruft_packages0() {
+  [  ! /etc/debian_version ] && return 0
+  [  ! -x /usr/bin/apt-show-versions ] && apt-get -y install apt-show-versions
+  local dpkginstalllog=$(mktemp "cruftpackages.XXXXXX.log")
+  [ "$1" = "show" ] && local show="true"
+  [ "$1" = "has" ] && local has="true" && local hasold="yes" && local has32bit="true"
+  [ "$1" = "remove" ] || [  -z "$1" ]&& local remove="true"
+  local oldpkg=true
+  local bit32=true
+  [ "$2" = "oldpkg" ] && oldpkg=true && bit32=
+  [ "$2" = "32bit" ] && bit32=true && oldpkg=
+ 
+  local has_cruft=0
+  local commandret=0
+  
+  # apt-show-versions
+  # ruby:i386 not installed
+  # openssl-blacklist:all 0.5-3 installed: No available version in archive
+  # ruby-did-you-mean:all/stretch 1.0.0-2 uptodate
+  
+  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep -v '^lib' | wc -l) ]; then
+    has_cruft=$((has_cruft+1))
+    [  ! -z "$show" ] && echo "Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
+    if [  ! -z "$remove" ]; then 
+      apt-get -y remove $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')
+      [  $? -ne 0 ] && commandret=$((commandret+1))
+      apt-get -y autoremove
+    fi
+  fi
+  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep '^lib' | wc -l) ]; then
+    has_cruft=$((has_cruft+1))
+    [  ! -z "$show" ] && echo "Libraries from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')"
+    if [  ! -z "$remove" ]; then 
+      apt-get -y remove $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')
+      [  $? -ne 0 ] && commandret=$((commandret+1))
+      apt-get -y autoremove
+    fi
+  fi
+  [  ! -z "$bit32" ] && if [ $(getconf LONG_BIT) -eq 64 ]; then
+    dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' > $dpkginstalllog
+    if [  $(cat $dpkginstalllog | head | wc -l ) -gt 0 ]; then
+      has_cruft=$((has_cruft+1))
+      [  ! -z "$show" ] && echo "There are some i386 application packages still installed.  They can be removed by running $0 --remove-cruft.  They are: $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ') $(grep '^lib' $dpkginstalllog | tr '\n' ' ')."
+      if [  ! -z "$remove" ]; then
+        # install 64 versions of the packages if we can.
+        apt-get -y install $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ' | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+        # [  $? -ne 0 ] && commandret=$((commandret+1))
+        apt-get -y remove $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ')
+        [  $? -ne 0 ] && commandret=$((commandret+1))
+        apt-get -y remove $(grep '^lib' $dpkginstalllog | tr '\n' ' ')
+        [  $? -ne 0 ] && commandret=$((commandret+1)) 
+        apt-get -y autoremove
+      fi
+    fi
+  fi
+  rm -f $dpkginstalllog
+  # returns 0 if cruft packages
+  [  ! -z "$remove" ] && return $commandret
+  if [  ! -z "$has" ]; then [ $cruft -gt 0 ] && return 0 || return 1; fi
+  [  ! -z "$show" ] && return 0
 }
   
 function tweak_broken_configs() {
@@ -1406,7 +1550,7 @@ return 0
 function report_unsupported() {
   is_fixed && return 0
   
-  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep Ubuntu | egrep -qai "$(echo $OLD_RELEASES_UBUNTU | sed 's/  / /g' | sed 's/ *$//g' | sed 's/ /|/g')"; then 
+  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep Ubuntu | egrep -qai "$(wordlisttoegreparg $OLD_RELEASES_UBUNTU)"; then 
     echo "dss:warn: Running an end-of-life Ubuntu distro ($(print_distro_info)).  No new package updates available.  dist upgrade to the latest lts"
     return 1
   fi
@@ -1414,8 +1558,11 @@ function report_unsupported() {
   # Debian GNU/Linux 7.9 (n/a) Release: 7.9 Codename: n/a
   # Distributor ID: Debian Description: Debian GNU/Linux 7.2 (wheezy) Release: 7.2 Codename: wheezy
 
-  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep -i 'Debian GNU' | egrep -qai "$(echo $UNSUPPORTED_DEBIAN | sed 's/  / /g' | sed 's/ *$//g' | sed 's/ /|/g')"; then 
-    echo "dss:warn: Running an end-of-life Debian distro ($(print_distro_info)).  No new package updates available.  dist upgrade to the latest lts"
+  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep -i 'Debian GNU' | egrep -qai "$(wordlisttoegreparg $UNSUPPORTED_DEBIAN)"; then
+    # due to etch being unsupported and stretch beinc current
+    if ! print_distro_info | grep -i 'Debian GNU' | egrep -qai "$(wordlisttoegreparg $DEBIAN_CURRENT)"; then 
+      echo "dss:warn: Running an end-of-life Debian distro ($(print_distro_info)).  No new package updates available.  dist upgrade to the latest lts"
+    fi
     return 1
   fi
    
@@ -1670,6 +1817,26 @@ elif [ "--fix-vuln" = "${ACTION:-$1}" ] ; then
   print_libc_versions afterfix
   print_vulnerability_status afterfix
   if [ $ret -eq 0 ] ; then true ; else false; fi
+elif [ "--show-cruft" = "${ACTION:-$1}" ] ; then
+  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && return 0
+  show_cruft_packages
+  echo "To remove those packages, re-run with $0 --remove-cruft"
+  return 0   
+elif [ "--remove-cruft" = "${ACTION:-$1}" ] ; then
+  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install.  Nothing to do.  All good." && return 0
+  remove_cruft_packages
+  return 0   
+elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
+  if [  64 -eq $(getconf LONG_BIT) ]; then
+    has_cruft_packges 32bit && echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-run $0 --show_cruft to see them." && return 0
+    echo "Distro is already 64 bit.  Cannot locate any 32 bit packages.  All good."
+    return 0 
+  fi
+  has_cruft_packges oldpkg && [  -z "$IGNORECRUFT" ] && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
+  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && return 0
+  crossgrade_debian
+  ret=$?
+  return $ret   
 else
   print_usage
 fi

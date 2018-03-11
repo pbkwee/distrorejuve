@@ -18,6 +18,7 @@ DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN squeeze-lts"
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
 DEBIAN_CURRENT="jessie stretch"
 IS_DEBUG=
+APT_GET_INSTALL_OPTIONS=' -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" '
 function print_usage() {
   echo "
 # deghost
@@ -705,6 +706,31 @@ ret=$?
 return $ret
 }
 
+function dpkg_install() {
+  [  -z "$@" ] && return 0
+  local tmplog=$(mktemp "tmplog.dpkginstall.XXXXXX.log")
+  dpkg --force-confnew --force-confdef --force-confmiss --install $@ 2>&1 | tee "$tmplog"
+  ret=$?
+  if [ $ret -ne 0 ]; then
+    # first dpkg --install fails.  second one should work ok.  e.g.:
+    # Errors were encountered while processing:
+     # /var/cache/apt/archives/dpkg_1.18.24_amd64.deb
+     # /var/cache/apt/archives/tar_1.29b-1.1_amd64.deb
+    local failedinstalls=$(cat "$tmplog" | grep --after-context 50 'Errors were encountered while processing:' | sed 's/.*Errors were encountered while processing://')
+    if [  ! -z "$failedinstalls" ]; then
+      dpkg --force-confnew --force-confdef --force-confmiss --install $failedinstalls
+      ret=$?
+    fi
+  fi
+  if [ $ret -ne 0 ]; then 
+    dpkg --force-confnew --force-confdef --force-confmiss --install $@
+    ret=$?
+  fi
+  
+  [  -f "$tmplog" ] && rm -f "$tmplog"
+  return $ret
+}
+
 function crossgrade_debian() {
   [  ! -f /etc/debian_version ] && return 0
   
@@ -718,40 +744,39 @@ function crossgrade_debian() {
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
 
-  [  ! -x /usr/bin/apt-show-versions ] && apt-get -y install apt-show-versions
+  [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
   [  -z "$IGNORECRUFT" ] && has_cruft_packges oldpkg && show_cruft_packages oldpkg && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
   
   echo "Current architecture: $(dpkg --print-architecture)"
   echo "Foreign architectures: $(dpkg --print-foreign-architectures)"
   dpkg --add-architecture amd64
   [ $? -ne 0 ] && echo "Failed adding amd64 architecture." 2>&1 && return 1
-  apt-get update
-  apt-get autoremove
-  apt-get upgrade
+  echo "dss:info: cross grading.  apt update/autoremove/upgrade/clean"
+  apt_get_update
+  apt-get $APT_GET_INSTALL_OPTIONS autoremove
+  apt-get $APT_GET_INSTALL_OPTIONS upgrade
   apt-get clean
-  apt-get --download-only -y install dpkg:amd64 tar:amd64 apt:amd64
+  echo "dss:info: cross grading.  grabbing key amd64 deb packages."
+  apt-get --download-only $APT_GET_INSTALL_OPTIONS install dpkg:amd64 tar:amd64 apt:amd64
   # error if we append perl-base:amd64 to the line above...
   # and if we don't have perl-base then apt-get -f install has this error: E: Unmet dependencies
-  apt-get --download-only install perl-base:amd64
+  echo "dss:info: cross grading.  grabbing extra amd64 deb packages."
+  apt-get --download-only $APT_GET_INSTALL_OPTIONS install perl-base:amd64
   
+  echo "dss:info: cross grading.  installing key amd64 deb packages."
   # something about this removes apache2.  figure out why...
-  dpkg --install /var/cache/apt/archives/*_amd64.deb
+  dpkg_install /var/cache/apt/archives/*_amd64.deb
   if [ $? -ne 0 ]; then 
-    # first dpkg --install fails.  second one should work ok.  e.g.:
-    # Errors were encountered while processing:
-     # /var/cache/apt/archives/dpkg_1.18.24_amd64.deb
-     # /var/cache/apt/archives/tar_1.29b-1.1_amd64.deb
-    dpkg --install /var/cache/apt/archives/*_amd64.deb
     [ $? -ne 0 ] && echo "dpkg install amd64.deb files failed" 2>&1 && return 1
   fi
   [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
   mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
-  apt-get -y autoremove
-  apt-get -y -f install
+  apt-get $APT_GET_INSTALL_OPTIONS autoremove
+  apt-get $APT_GET_INSTALL_OPTIONS -f install
   if [  $? -ne 0 ]; then
-    dpkg -l perl-base:i386 >/dev/null 2>&1 && ! dpkg -l perl-base:amd64 >/dev/null 2>&1 &&  apt-get -y download perl-base:amd64 && dpkg --install perl-base*amd64.deb && apt-get -y -f install
+    dpkg -l perl-base:i386 >/dev/null 2>&1 && ! dpkg -l perl-base:amd64 >/dev/null 2>&1 &&  apt-get $APT_GET_INSTALL_OPTIONS download perl-base:amd64 && dpkg --force-confnew --force-confdef --force-confmiss --install perl-base*amd64.deb && apt-get $APT_GET_INSTALL_OPTIONS -f install
   fi    
-  apt-get -y autoremove
+  apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
   # doesn't seem to achieve much...
   dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
@@ -760,46 +785,32 @@ function crossgrade_debian() {
     echo "Cross grade failed after initial amd64 package installs.  See crossgrade_debian for a few suggestions to resolve manually."
     return 1 
   fi
-  apt-get -y autoremove
+  apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
   local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && essentialpackages="$essentialpackages $i:amd64"; done
-  apt-get --download-only -y install $essentialpackages
-  apt-get --download-only -y install init:amd64 
+  apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages
+  apt-get --download-only $APT_GET_INSTALL_OPTIONS install init:amd64 
   #apt-get --download-only -y install systemd-sysv:amd64
-  apt-get --download-only -y install libc-bin:amd64
-  local dpkginstalllog=$(mktemp "dpkginstall.XXXXXX.log")
-  dpkg --install /var/cache/apt/archives/*_amd64.deb 2>&1 | tee $dpkginstalllog
+  apt-get --download-only $APT_GET_INSTALL_OPTIONS install libc-bin:amd64
+  dpkg_install /var/cache/apt/archives/*_amd64.deb
   ret=$?
-  if [ $ret -ne 0 ]; then
-    local failedinstalls=$(cat $dpkginstalllog | grep --after-context 50 'Errors were encountered while processing:' | sed 's/.*Errors were encountered while processing://')
-    if [  ! -z "$failedinstalls" ]; then
-      dpkg --install $failedinstalls
-      ret=$?
-    fi
-  fi
-  if [ $ret -ne 0 ]; then 
-    dpkg --install /var/cache/apt/archives/*_amd64.deb
-    ret=$?
-  fi
-  rm -f "$dpkginstalllog"
   [ $ret -ne 0 ] && echo "dpkg install essenstial amd64.deb files failed" 2>&1 && return 1
   # getting a dependency issue on apt-get remove a few things: libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6)
   # workaround is:
-  apt-get -y install libpam-modules-bin:amd64
+  apt-get $APT_GET_INSTALL_OPTIONS install libpam-modules-bin:amd64
   
   # these seem to be uninstalled by something above.
-  apt-get -y install vim apache2
+  apt-get $APT_GET_INSTALL_OPTIONS install vim apache2
   
   # for all i386 apps, install the amd64 and remove the i386.  some will fail, that's ok.
   # do
-  apt-get -y autoremove
+  apt-get $APT_GET_INSTALL_OPTIONS autoremove
    
-  for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get -y  install $i:amd64 && apt-get -y remove $i:i386; done
+  for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get $APT_GET_INSTALL_OPTIONS  install $i:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $i:i386; done
   
-  apt-get -y autoremove
+  apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
   has_cruft_packages 32bit && show_cruft_packages
-  [  -f "$dpkginstalllog" ] && rm -f $dpkginstalllog
   
   # sample cleanup/finish up/suggestions:
   
@@ -856,7 +867,7 @@ function remove_cruft_packages() {
 # e.g. cruft_packages0 show 32bit
 function cruft_packages0() {
   [  ! /etc/debian_version ] && return 0
-  [  ! -x /usr/bin/apt-show-versions ] && apt-get -y install apt-show-versions
+  [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
   local dpkginstalllog=$(mktemp "cruftpackages.XXXXXX.log")
   [ "$1" = "show" ] && local show="true"
   [ "$1" = "has" ] && local has="true" && local hasold="yes" && local has32bit="true"
@@ -878,18 +889,18 @@ function cruft_packages0() {
     has_cruft=$((has_cruft+1))
     [  ! -z "$show" ] && echo "Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      apt-get -y remove $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')
+      apt-get $APT_GET_INSTALL_OPTIONS remove $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')
       [  $? -ne 0 ] && commandret=$((commandret+1))
-      apt-get -y autoremove
+      apt-get $APT_GET_INSTALL_OPTIONS autoremove
     fi
   fi
   if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep '^lib' | wc -l) ]; then
     has_cruft=$((has_cruft+1))
     [  ! -z "$show" ] && echo "Libraries from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      apt-get -y remove $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')
+      apt-get $APT_GET_INSTALL_OPTIONS remove $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')
       [  $? -ne 0 ] && commandret=$((commandret+1))
-      apt-get -y autoremove
+      apt-get $APT_GET_INSTALL_OPTIONS autoremove
     fi
   fi
   [  ! -z "$bit32" ] && if [ $(getconf LONG_BIT) -eq 64 ]; then
@@ -899,13 +910,13 @@ function cruft_packages0() {
       [  ! -z "$show" ] && echo "There are some i386 application packages still installed.  They can be removed by running $0 --remove-cruft.  They are: $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ') $(grep '^lib' $dpkginstalllog | tr '\n' ' ')."
       if [  ! -z "$remove" ]; then
         # install 64 versions of the packages if we can.
-        apt-get -y install $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ' | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ' | sed 's/:i386/:amd64/g' | tr '\n' ' ')
         # [  $? -ne 0 ] && commandret=$((commandret+1))
-        apt-get -y remove $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ')
         [  $? -ne 0 ] && commandret=$((commandret+1))
-        apt-get -y remove $(grep '^lib' $dpkginstalllog | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep '^lib' $dpkginstalllog | tr '\n' ' ')
         [  $? -ne 0 ] && commandret=$((commandret+1)) 
-        apt-get -y autoremove
+        apt-get $APT_GET_INSTALL_OPTIONS autoremove
       fi
     fi
   fi
@@ -968,7 +979,7 @@ function tweak_broken_configs() {
     echo "dss:info: MySQL appears to have been installed, but no longer present.  This can happen between debian 8 and debian 9.  As mysql is replaced by mariadb.  Attempting to install mysql-server which would pull in mariadb."
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:pre:" $0}'
     
-    apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install mysql-server
+    apt-get  $APT_GET_INSTALL_OPTIONS  install mysql-server
     if [ $? -ne 0 ]; then break; fi
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:post:" $0}'
     break
@@ -997,7 +1008,7 @@ exit 0' > $i
     # rc  udev                             232-25+deb9u1                  i386         /dev/ and hotplug management daemon
     if dpkg -l | grep -qai '^ii.*udev-'; then break; fi
     
-    apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install udev
+    apt-get  $APT_GET_INSTALL_OPTIONS  install udev
     ret=$?
     echo "dss:info: udev install result $ret $(dpkg -l | grep udev)"
     break 
@@ -1030,7 +1041,7 @@ echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_upgrade:old:$old_distro:new:$new
 apt_get_upgrade
 ret=$?
 apt-get clean
-apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss autoremove
+apt-get $APT_GET_INSTALL_OPTIONS autoremove
 if [ $ret -ne 0 ]; then
   echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_${old_distro}_to_${new_distro}"
   return 1
@@ -1051,7 +1062,7 @@ echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_dis
 apt_get_dist_upgrade
 ret=$?
 
-apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss  autoremove
+apt-get $APT_GET_INSTALL_OPTIONS  autoremove
 if [ $ret -eq 0 ]; then
 	if lsb_release -a 2>/dev/null| egrep -qai '${new_distro}'; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
@@ -1094,7 +1105,7 @@ for modifiedconfigfile in $modifiedconfigfiles; do
   if [ ! -f "hidden-${debfilename}" ]; then 
     apt-get download "$pkg" &>/dev/null
     # can fail if apt is not up to date
-    [ $? -ne 0 ] && apt-get update &>/dev/null && apt-get download "$pkg" &>/dev/null
+    [ $? -ne 0 ] && apt_get_update &>/dev/null && apt-get download "$pkg" &>/dev/null
     # extract to local dir
     dpkg -x "$debfilename" .
     mv "$debfilename" "hidden-$debfilename"
@@ -1193,6 +1204,14 @@ function record_config_state() {
   [  -x /usr/bin/dpkg ] && echo "Installed packages:" >> $file && dpkg -l | grep '^ii' | awk '{print $2}' | sed 's/:.*//' | sort | grep -v '^lib' | awk '{ print "installed: " $0 }' >> $file
 }
 
+function apt_get_update() {
+apt-get update
+ret=$?
+# E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
+if [ $ret -ne 0 ]; then apt-get -o Acquire::ForceIPv4=true  -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false  update; ret=$?; fi
+return $ret
+}
+
 function apt_get_upgrade() {
 [ ! -e /etc/apt/sources.list ] && return 0
 [ -e /etc/redhat-release ] && return 0
@@ -1200,21 +1219,19 @@ upgrade_precondition_checks || return $?
 echo "dss:trace:apt_get_upgrade"
 
 enable_debian_archive
-apt-get update
-# E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
-[ $? -ne 0 ] && apt-get -o Acquire::ForceIPv4=true  -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false update
+apt_get_update
 record_config_state
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
-apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss  autoremove
-apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
+apt-get $APT_GET_INSTALL_OPTIONS autoremove
+apt-get $APT_GET_INSTALL_OPTIONS -f install
 echo "dss:info: running an apt-get upgrade"
-apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" upgrade
+apt-get $APT_GET_INSTALL_OPTIONS upgrade
 ret=$?
-apt-get -y -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss autoremove
-apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confmiss" -f install
+apt-get $APT_GET_INSTALL_OPTIONS autoremove
+apt-get $APT_GET_INSTALL_OPTIONS -f install
 if [ $ret -ne 0 ]; then
   echo "dss:info: apt-get upgrade failed.  trying a dist-ugprade..."
-  apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+  apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
   ret=$?
   if [ $ret -eq 0 ]; then
     echo "dss:info: apt-get dist-upgrade succeeded when a upgrade failed."
@@ -1234,15 +1251,15 @@ upgrade_precondition_checks || return $?
 echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
 apt_get_upgrade || return 1
 echo "dss:trace:apt_get_dist_upgrade"
-apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" -f install
-apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" install dpkg
-apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" autoremove
-apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+apt-get  $APT_GET_INSTALL_OPTIONS  -f install
+apt-get  $APT_GET_INSTALL_OPTIONS  install dpkg
+apt-get  $APT_GET_INSTALL_OPTIONS  autoremove
+apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
 # cope with 'one of those random things'
 # E: Could not perform immediate configuration on 'python-minimal'.Please see man 5 apt.conf under APT::Immediate-Configure for details. (2)
-if [ $? -ne 0 ] && apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
-  apt-get -f -y install libc6-dev
-  apt-get dist-upgrade -y -f -o APT::Immediate-Configure=0   -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss"
+if [ $? -ne 0 ] && apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
+  apt-get -f $APT_GET_INSTALL_OPTIONS install libc6-dev
+  apt-get dist-upgrade -f -o APT::Immediate-Configure=0 $APT_GET_INSTALL_OPTIONS
 fi
 [ -e /var/log/syslog ] && [ -e /etc/my/my.cnf ] && if grep "unknown variable 'lc-messages-dir" /var/log/syslog; then
   #lc-messages-dir        = /usr/share/mysql...
@@ -1251,14 +1268,14 @@ fi
 fi
 
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
-apt-get -y autoremove
+apt-get $APT_GET_INSTALL_OPTIONS autoremove
 apt-get -y autoclean
-apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
 ret=$?
 if [ $ret -ne 0 ] ; then
   echo "dss:warn: Got an error after an apt-get dist-upgrade.  trying an apt-get -f install"
-  apt-get -f -y install
-  apt-get -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::="--force-confnew" -o Dpkg::Options::="--force-confdef"  -o Dpkg::Options::="--force-confmiss" dist-upgrade
+  apt-get -f $APT_GET_INSTALL_OPTIONS install
+  apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
   ret=$?
   if [ $ret -ne 0 ] ; then
     echo "dss:error: Got an error after an apt-get dist-upgrade"
@@ -1271,7 +1288,7 @@ print_config_state_changes
 return $ret
 }
 
-
+# arg1 is the number of distros to upgrade.  default is all/1000.  else you can do 1 to just go up one distro.  lts to lts counts as 1.
 function dist_upgrade_ubuntu_to_latest() {
 [ ! -e /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
@@ -1413,8 +1430,8 @@ function fix_missing_lsb_release() {
 which lsb_release >/dev/null 2>&1 && return 0
 ! [ -f /etc/debian_version ] && return 0
 echo "dss:info: Missing lsb release command.  trying to install it."
-apt-get update
-apt-get -y install lsb-release
+apt_get_update
+apt-get $APT_GET_INSTALL_OPTIONS install lsb-release
 return $?
 }
 
@@ -1434,7 +1451,7 @@ fi
 
 if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then 
   echo "dss:info: Attempting to apt-get install libc6"
-  apt-get update
+  apt_get_update
   ret=$?
   if [ $ret -ne 0 ]; then
     echo "dss:warn: There was an error doing an apt-get update"
@@ -1444,7 +1461,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
        echo "dss:info: adding the $distro security repository to the sources.list"
        cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
        echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
-       apt-get update
+       apt_get_update
     fi
   done
   POLICY=$(apt-cache policy libc6)
@@ -1458,7 +1475,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
     echo "dss:info: looks like there were some pending updates.  checking if they need configuring before proceeding with the libc6 install"
     dpkg --configure -a --force-confnew --force-confdef --force-confmiss
   fi
-  apt-get -y install libc6
+  apt-get $APT_GET_INSTALL_OPTIONS install libc6
   ret=$?
   if [ $ret -eq 0 ]; then
   	echo "dss:fixmethod: apt-get install"

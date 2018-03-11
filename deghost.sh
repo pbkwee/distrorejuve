@@ -816,7 +816,7 @@ function crossgrade_debian() {
   echo "dss:info: cross grading and bulk replacing i386 apps with 64 bit versions"
   local i386toremove="$(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | tr '\n' ' ')"
   local amd64toinstall="$(echo $i386toremove | sed 's/:i386/:amd64/')"
-  apt-get $APT_GET_INSTALL_OPTIONS  install $amd64toinstall && apt-get $APT_GET_INSTALL_OPTIONS remove $i386toremove; done
+  apt-get $APT_GET_INSTALL_OPTIONS  install $amd64toinstall && apt-get $APT_GET_INSTALL_OPTIONS remove $i386toremove
   
   echo "dss:info: cross grading and individually installing 64 bit versions of all i386 packages."
   for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get $APT_GET_INSTALL_OPTIONS  install $i:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $i:i386; done

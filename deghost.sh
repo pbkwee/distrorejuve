@@ -745,7 +745,7 @@ function crossgrade_debian() {
   ! uname -a | grep -qai x86_64 && echo "Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
 
   [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
-  [  -z "$IGNORECRUFT" ] && has_cruft_packges oldpkg && show_cruft_packages oldpkg && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
+  [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
   
   echo "Current architecture: $(dpkg --print-architecture)"
   echo "Foreign architectures: $(dpkg --print-foreign-architectures)"
@@ -772,33 +772,40 @@ function crossgrade_debian() {
   [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
   mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
+  echo "dss:info: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
   apt-get $APT_GET_INSTALL_OPTIONS -f install
   if [  $? -ne 0 ]; then
+    echo "dss:info: cross grading.  force installing amd64 packages failed, trying to download and install perl-base."
     dpkg -l perl-base:i386 >/dev/null 2>&1 && ! dpkg -l perl-base:amd64 >/dev/null 2>&1 &&  apt-get $APT_GET_INSTALL_OPTIONS download perl-base:amd64 && dpkg --force-confnew --force-confdef --force-confmiss --install perl-base*amd64.deb && apt-get $APT_GET_INSTALL_OPTIONS -f install
   fi    
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
   # doesn't seem to achieve much...
   dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
+  echo "dss:info: cross grading.  force installing of amd64 packages after dpkg --set-selections."
   apt-get -f install
   if [  $? -ne 0 ]; then
-    echo "Cross grade failed after initial amd64 package installs.  See crossgrade_debian for a few suggestions to resolve manually."
+    echo "dss:error: cross grading failed after initial amd64 package installs.  See crossgrade_debian for a few suggestions to resolve manually."
     return 1 
   fi
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
+  echo "dss:info: cross grading figuring out essential packages."
   local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && essentialpackages="$essentialpackages $i:amd64"; done
+  echo "dss:info: cross grading downloading essential packages."
   apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages
   apt-get --download-only $APT_GET_INSTALL_OPTIONS install init:amd64 
   #apt-get --download-only -y install systemd-sysv:amd64
   apt-get --download-only $APT_GET_INSTALL_OPTIONS install libc-bin:amd64
+  echo "dss:info: cross grading dpkg installing essential packages."
   dpkg_install /var/cache/apt/archives/*_amd64.deb
   ret=$?
-  [ $ret -ne 0 ] && echo "dpkg install essenstial amd64.deb files failed" 2>&1 && return 1
+  [ $ret -ne 0 ] && echo "dss:error: dpkg install essenstial amd64.deb files failed" 2>&1 && return 1
   # getting a dependency issue on apt-get remove a few things: libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6)
   # workaround is:
   apt-get $APT_GET_INSTALL_OPTIONS install libpam-modules-bin:amd64
   
+  echo "dss:info: cross grading and installing vim/apache2."
   # these seem to be uninstalled by something above.
   apt-get $APT_GET_INSTALL_OPTIONS install vim apache2
   
@@ -806,6 +813,7 @@ function crossgrade_debian() {
   # do
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
    
+  echo "dss:info: cross grading and installing 64 bit versions of all i386 packages."
   for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get $APT_GET_INSTALL_OPTIONS  install $i:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $i:i386; done
   
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
@@ -868,7 +876,7 @@ function remove_cruft_packages() {
 function cruft_packages0() {
   [  ! /etc/debian_version ] && return 0
   [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
-  local dpkginstalllog=$(mktemp "cruftpackages.XXXXXX.log")
+  local cruftlog=$(mktemp "cruftpackages.XXXXXX.log")
   [ "$1" = "show" ] && local show="true"
   [ "$1" = "has" ] && local has="true" && local hasold="yes" && local has32bit="true"
   [ "$1" = "remove" ] || [  -z "$1" ]&& local remove="true"
@@ -885,9 +893,11 @@ function cruft_packages0() {
   # openssl-blacklist:all 0.5-3 installed: No available version in archive
   # ruby-did-you-mean:all/stretch 1.0.0-2 uptodate
   
+  echo "dss:info: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
+  
   if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep -v '^lib' | wc -l) ]; then
     has_cruft=$((has_cruft+1))
-    [  ! -z "$show" ] && echo "Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
+    [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
       apt-get $APT_GET_INSTALL_OPTIONS remove $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')
       [  $? -ne 0 ] && commandret=$((commandret+1))
@@ -896,7 +906,7 @@ function cruft_packages0() {
   fi
   if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep '^lib' | wc -l) ]; then
     has_cruft=$((has_cruft+1))
-    [  ! -z "$show" ] && echo "Libraries from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')"
+    [  ! -z "$show" ] && echo "dss:warn: Libraries from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
       apt-get $APT_GET_INSTALL_OPTIONS remove $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')
       [  $? -ne 0 ] && commandret=$((commandret+1))
@@ -904,23 +914,23 @@ function cruft_packages0() {
     fi
   fi
   [  ! -z "$bit32" ] && if [ $(getconf LONG_BIT) -eq 64 ]; then
-    dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' > $dpkginstalllog
-    if [  $(cat $dpkginstalllog | head | wc -l ) -gt 0 ]; then
+    dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' > $cruftlog
+    if [  $(cat $cruftlog | head | wc -l ) -gt 0 ]; then
       has_cruft=$((has_cruft+1))
-      [  ! -z "$show" ] && echo "There are some i386 application packages still installed.  They can be removed by running $0 --remove-cruft.  They are: $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ') $(grep '^lib' $dpkginstalllog | tr '\n' ' ')."
+      [  ! -z "$show" ] && echo "dss:warn: There are some i386 application packages still installed.  They can be removed by running $0 --remove-cruft.  They are: $(grep -v '^lib' $cruftlog | tr '\n' ' ') $(grep '^lib' $cruftlog | tr '\n' ' ')."
       if [  ! -z "$remove" ]; then
         # install 64 versions of the packages if we can.
-        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ' | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v '^lib' $cruftlog | tr '\n' ' ' | sed 's/:i386/:amd64/g' | tr '\n' ' ')
         # [  $? -ne 0 ] && commandret=$((commandret+1))
-        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep -v '^lib' $dpkginstalllog | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep -v '^lib' $cruftlog | tr '\n' ' ')
         [  $? -ne 0 ] && commandret=$((commandret+1))
-        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep '^lib' $dpkginstalllog | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep '^lib' $cruftlog | tr '\n' ' ')
         [  $? -ne 0 ] && commandret=$((commandret+1)) 
         apt-get $APT_GET_INSTALL_OPTIONS autoremove
       fi
     fi
   fi
-  rm -f $dpkginstalllog
+  rm -f $cruftlog
   # returns 0 if cruft packages
   [  ! -z "$remove" ] && return $commandret
   if [  ! -z "$has" ]; then [ $cruft -gt 0 ] && return 0 || return 1; fi
@@ -1838,22 +1848,22 @@ elif [ "--show-cruft" = "${ACTION:-$1}" ] ; then
   ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && return 0
   show_cruft_packages
   echo "To remove those packages, re-run with $0 --remove-cruft"
-  return 0   
+  exit 0   
 elif [ "--remove-cruft" = "${ACTION:-$1}" ] ; then
   ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install.  Nothing to do.  All good." && return 0
   remove_cruft_packages
-  return 0   
+  exit $?   
 elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
   if [  64 -eq $(getconf LONG_BIT) ]; then
-    has_cruft_packges 32bit && echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-run $0 --show_cruft to see them." && return 0
+    has_cruft_packages 32bit && echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-run $0 --show_cruft to see them." && return 0
     echo "Distro is already 64 bit.  Cannot locate any 32 bit packages.  All good."
-    return 0 
+    exit 0 
   fi
-  has_cruft_packges oldpkg && [  -z "$IGNORECRUFT" ] && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
+  has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
   ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && return 0
   crossgrade_debian
   ret=$?
-  return $ret   
+  exit $ret   
 else
   print_usage
 fi

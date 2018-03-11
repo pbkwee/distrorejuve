@@ -929,10 +929,33 @@ function cruft_packages0() {
       has_cruft=$((has_cruft+1))
       [  ! -z "$show" ] && echo "dss:warn: There are some i386 application packages still installed.  They can be removed by running $0 --remove-cruft.  They are: $(grep -v '^lib' "$cruftlog" | tr '\n' ' ') $(grep '^lib' "$cruftlog" | tr '\n' ' ')."
       if [  ! -z "$remove" ]; then
+      
+        echo "dss:trace: cross grading figuring out essential packages."
+        local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && essentialpackages="$essentialpackages $i:amd64"; done
+        echo "dss:trace: cross grading downloading essential packages via download and dpkg_install."
+        [  ! -z "$essentialpackages"] && if apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages; then
+          dpkg_install /var/cache/apt/archives/*_amd64.deb
+          [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
+          mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
+          dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
+        else
+          echo "dss:trace: cross grading downloading essential packages (after download+install failed) via download and separate install" 
+          apt-get $APT_GET_INSTALL_OPTIONS download $essentialpackages
+          dpkg_install *_amd64.deb
+          [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
+          mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
+          dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
+        fi
+             
         # install 64 versions of the packages if we can.
-        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v '^lib' "$cruftlog" | tr '\n' ' ' | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+        echo "dss:trace: bulk installing 64bit versions of installed i386 apps"
+        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v '^lib' "$cruftlog" | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+        echo "dss:trace: force install check"
         apt-get -f $APT_GET_INSTALL_OPTIONS install
+        echo "dss:trace: individually installing 64bit versions of installed i386 apps"
         for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get $APT_GET_INSTALL_OPTIONS  install $i:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $i:i386; done
+        echo "dss:trace: force install check"
+        apt-get -f $APT_GET_INSTALL_OPTIONS install
         # [  $? -ne 0 ] && commandret=$((commandret+1))
         apt-get $APT_GET_INSTALL_OPTIONS remove $(grep -v '^lib' "$cruftlog" | tr '\n' ' ')
         [  $? -ne 0 ] && commandret=$((commandret+1))

@@ -738,34 +738,34 @@ function crossgrade_debian() {
   
   bittedness=$(getconf LONG_BIT)
   if echo $bittedness | grep -qai 64; then
-    echo "Already 64 bits.  Nothing to do."
+    echo "dss:info:Already 64 bits.  Nothing to do."
     [ $(dpkg -l | grep '^ii ' | grep ':i386' | wc -l ) -gt 0 ] && echo "i386 packages on this server (may need tidying up): $(dpkg -l | grep '^ii ' | grep ':i386')"
     return 0
   fi
   
   # see https://wiki.debian.org/CrossGrading
-  ! uname -a | grep -qai x86_64 && echo "Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
+  ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
 
   [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
-  [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
+  [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
   
-  echo "Current architecture: $(dpkg --print-architecture)"
-  echo "Foreign architectures: $(dpkg --print-foreign-architectures)"
+  echo "dss:trace:Current architecture: $(dpkg --print-architecture)"
+  echo "dss:trace:Foreign architectures: $(dpkg --print-foreign-architectures)"
   dpkg --add-architecture amd64
-  [ $? -ne 0 ] && echo "Failed adding amd64 architecture." 2>&1 && return 1
-  echo "dss:info: cross grading.  apt update/autoremove/upgrade/clean"
+  [ $? -ne 0 ] && echo "dss:error: Failed adding amd64 architecture." 2>&1 && return 1
+  echo "dss:info: cross grading distro from 32 to 64 bit."
   apt_get_update
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   apt-get $APT_GET_INSTALL_OPTIONS upgrade
   apt-get clean
-  echo "dss:info: cross grading.  grabbing key amd64 deb packages."
+  echo "dss:trace: cross grading.  grabbing key amd64 deb packages."
   apt-get --download-only $APT_GET_INSTALL_OPTIONS install dpkg:amd64 tar:amd64 apt:amd64
   # error if we append perl-base:amd64 to the line above...
   # and if we don't have perl-base then apt-get -f install has this error: E: Unmet dependencies
-  echo "dss:info: cross grading.  grabbing extra amd64 deb packages."
+  echo "dss:trace: cross grading.  grabbing extra amd64 deb packages."
   apt-get --download-only $APT_GET_INSTALL_OPTIONS install perl-base:amd64
   
-  echo "dss:info: cross grading.  installing key amd64 deb packages."
+  echo "dss:trace: cross grading.  installing key amd64 deb packages."
   # something about this removes apache2.  figure out why...
   dpkg_install /var/cache/apt/archives/*_amd64.deb
   if [ $? -ne 0 ]; then 
@@ -774,17 +774,17 @@ function crossgrade_debian() {
   [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
   mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
-  echo "dss:info: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
+  echo "dss:trace: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
   apt-get $APT_GET_INSTALL_OPTIONS -f install
   if [  $? -ne 0 ]; then
-    echo "dss:info: cross grading.  force installing amd64 packages failed, trying to download and install perl-base."
+    echo "dss:trace: cross grading.  force installing amd64 packages failed, trying to download and install perl-base."
     dpkg -l perl-base:i386 >/dev/null 2>&1 && ! dpkg -l perl-base:amd64 >/dev/null 2>&1 &&  apt-get $APT_GET_INSTALL_OPTIONS download perl-base:amd64 && dpkg --force-confnew --force-confdef --force-confmiss --install perl-base*amd64.deb && apt-get $APT_GET_INSTALL_OPTIONS -f install
   fi    
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
   # doesn't seem to achieve much...
   dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
-  echo "dss:info: cross grading.  force installing of amd64 packages after dpkg --set-selections."
+  echo "dss:trace: cross grading.  force installing of amd64 packages after dpkg --set-selections."
   apt-get -f install
   if [  $? -ne 0 ]; then
     echo "dss:error: cross grading failed after initial amd64 package installs.  See crossgrade_debian for a few suggestions to resolve manually."
@@ -792,14 +792,14 @@ function crossgrade_debian() {
   fi
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
-  echo "dss:info: cross grading figuring out essential packages."
+  echo "dss:trace: cross grading figuring out essential packages."
   local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && essentialpackages="$essentialpackages $i:amd64"; done
-  echo "dss:info: cross grading downloading essential packages."
+  echo "dss:trace: cross grading downloading essential packages."
   apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages
   apt-get --download-only $APT_GET_INSTALL_OPTIONS install init:amd64 
   #apt-get --download-only -y install systemd-sysv:amd64
   apt-get --download-only $APT_GET_INSTALL_OPTIONS install libc-bin:amd64
-  echo "dss:info: cross grading dpkg installing essential packages."
+  echo "dss:trace: cross grading dpkg installing essential packages."
   dpkg_install /var/cache/apt/archives/*_amd64.deb
   ret=$?
   [ $ret -ne 0 ] && echo "dss:error: dpkg install essenstial amd64.deb files failed" 2>&1 && return 1
@@ -807,7 +807,7 @@ function crossgrade_debian() {
   # workaround is:
   apt-get $APT_GET_INSTALL_OPTIONS install libpam-modules-bin:amd64
   
-  echo "dss:info: cross grading and installing vim/apache2."
+  echo "dss:trace: cross grading and installing vim/apache2."
   # these seem to be uninstalled by something above.
   apt-get $APT_GET_INSTALL_OPTIONS install vim apache2
   
@@ -815,12 +815,12 @@ function crossgrade_debian() {
   # do
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
    
-  echo "dss:info: cross grading and bulk replacing i386 apps with 64 bit versions"
+  echo "dss:trace: cross grading and bulk replacing i386 apps with 64 bit versions"
   local i386toremove="$(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | tr '\n' ' ')"
   local amd64toinstall="$(echo $i386toremove | sed 's/:i386/:amd64/g')"
   apt-get $APT_GET_INSTALL_OPTIONS  install $amd64toinstall && apt-get $APT_GET_INSTALL_OPTIONS remove $i386toremove
   
-  echo "dss:info: cross grading and individually installing 64 bit versions of all i386 packages."
+  echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages."
   for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get $APT_GET_INSTALL_OPTIONS  install $i:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $i:i386; done
 
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
@@ -828,6 +828,9 @@ function crossgrade_debian() {
   has_cruft_packages 32bit && show_cruft_packages
   
   # sample cleanup/finish up/suggestions:
+  
+  # bash : Conflicts: bash:i386
+  # apt-get download bash; dpkg_install bash*64.deb
   
   #  libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6) =>
   # apt-get install libpam-modules-bin:amd64
@@ -900,7 +903,7 @@ function cruft_packages0() {
   # openssl-blacklist:all 0.5-3 installed: No available version in archive
   # ruby-did-you-mean:all/stretch 1.0.0-2 uptodate
   
-  echo "dss:info: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
+  echo "dss:trace: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
   
   if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep -v '^lib' | wc -l) ]; then
     has_cruft=$((has_cruft+1))
@@ -921,23 +924,25 @@ function cruft_packages0() {
     fi
   fi
   [  ! -z "$bit32" ] && if [ $(getconf LONG_BIT) -eq 64 ]; then
-    dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' > $cruftlog
-    if [  $(cat $cruftlog | head | wc -l ) -gt 0 ]; then
+    dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
+    if [  $(cat "$cruftlog" | head | wc -l ) -gt 0 ]; then
       has_cruft=$((has_cruft+1))
-      [  ! -z "$show" ] && echo "dss:warn: There are some i386 application packages still installed.  They can be removed by running $0 --remove-cruft.  They are: $(grep -v '^lib' $cruftlog | tr '\n' ' ') $(grep '^lib' $cruftlog | tr '\n' ' ')."
+      [  ! -z "$show" ] && echo "dss:warn: There are some i386 application packages still installed.  They can be removed by running $0 --remove-cruft.  They are: $(grep -v '^lib' "$cruftlog" | tr '\n' ' ') $(grep '^lib' "$cruftlog" | tr '\n' ' ')."
       if [  ! -z "$remove" ]; then
         # install 64 versions of the packages if we can.
-        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v '^lib' $cruftlog | tr '\n' ' ' | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v '^lib' "$cruftlog" | tr '\n' ' ' | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+        apt-get -f $APT_GET_INSTALL_OPTIONS install
+        for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get $APT_GET_INSTALL_OPTIONS  install $i:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $i:i386; done
         # [  $? -ne 0 ] && commandret=$((commandret+1))
-        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep -v '^lib' $cruftlog | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep -v '^lib' "$cruftlog" | tr '\n' ' ')
         [  $? -ne 0 ] && commandret=$((commandret+1))
-        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep '^lib' $cruftlog | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep '^lib' "$cruftlog" | tr '\n' ' ')
         [  $? -ne 0 ] && commandret=$((commandret+1)) 
         apt-get $APT_GET_INSTALL_OPTIONS autoremove
       fi
     fi
   fi
-  rm -f $cruftlog
+  [  -f "$cruftlog" ] && rm -f "$cruftlog"
   # returns 0 if cruft packages
   [  ! -z "$remove" ] && return $commandret
   if [  ! -z "$has" ]; then [ $has_cruft -gt 0 ] && return 0 || return 1; fi

@@ -61,6 +61,8 @@ Run with --show-cruft to see packages that do not belong to the current distro. 
 
 Run with --remove-cruft to remove old packages and 32 bit applications on 64 bit distros.
 
+Run with --remove-deprecated-packages to remove old packages
+
 Run with --to-64bit to convert a 32 bit distro to 64 bit.  NEW as at 2018-03/not so bullet-proof.  Only tested so far with Debian not Ubuntu.
 
 Run with --to-wheezy to get from squeeze to wheezy
@@ -815,7 +817,7 @@ function crossgrade_debian() {
    
   echo "dss:info: cross grading and bulk replacing i386 apps with 64 bit versions"
   local i386toremove="$(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | tr '\n' ' ')"
-  local amd64toinstall="$(echo $i386toremove | sed 's/:i386/:amd64/')"
+  local amd64toinstall="$(echo $i386toremove | sed 's/:i386/:amd64/g')"
   apt-get $APT_GET_INSTALL_OPTIONS  install $amd64toinstall && apt-get $APT_GET_INSTALL_OPTIONS remove $i386toremove
   
   echo "dss:info: cross grading and individually installing 64 bit versions of all i386 packages."
@@ -1850,22 +1852,26 @@ elif [ "--fix-vuln" = "${ACTION:-$1}" ] ; then
   print_vulnerability_status afterfix
   if [ $ret -eq 0 ] ; then true ; else false; fi
 elif [ "--show-cruft" = "${ACTION:-$1}" ] ; then
-  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && return 0
+  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && exit 0
   show_cruft_packages
   echo "To remove those packages, re-run with $0 --remove-cruft"
   exit 0   
 elif [ "--remove-cruft" = "${ACTION:-$1}" ] ; then
-  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install.  Nothing to do.  All good." && return 0
+  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install.  Nothing to do.  All good." && exit 0
   remove_cruft_packages
+  exit $?   
+elif [ "--remove-deprecated-packages" = "${ACTION:-$1}" ] ; then
+  ! has_cruft_packages oldpkg echo "No cruft packages (all installed packages from the current distro).  Nothing to do.  All good." && exit 0
+  remove_cruft_packages oldpkg
   exit $?   
 elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
   if [  64 -eq $(getconf LONG_BIT) ]; then
-    has_cruft_packages 32bit && echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-run $0 --show_cruft to see them." && return 0
+    has_cruft_packages 32bit && echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-run $0 --show_cruft to see them." && exit 0
     echo "Distro is already 64 bit.  Cannot locate any 32 bit packages.  All good."
     exit 0 
   fi
-  has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
-  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && return 0
+  has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && exit 1
+  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && exit 0
   crossgrade_debian
   ret=$?
   exit $ret   

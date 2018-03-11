@@ -938,7 +938,7 @@ function cruft_packages0() {
   rm -f $cruftlog
   # returns 0 if cruft packages
   [  ! -z "$remove" ] && return $commandret
-  if [  ! -z "$has" ]; then [ $cruft -gt 0 ] && return 0 || return 1; fi
+  if [  ! -z "$has" ]; then [ $has_cruft -gt 0 ] && return 0 || return 1; fi
   [  ! -z "$show" ] && return 0
 }
   

@@ -1852,16 +1852,16 @@ elif [ "--fix-vuln" = "${ACTION:-$1}" ] ; then
   print_vulnerability_status afterfix
   if [ $ret -eq 0 ] ; then true ; else false; fi
 elif [ "--show-cruft" = "${ACTION:-$1}" ] ; then
-  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && exit 0
+  ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && exit 0
   show_cruft_packages
   echo "To remove those packages, re-run with $0 --remove-cruft"
   exit 0   
 elif [ "--remove-cruft" = "${ACTION:-$1}" ] ; then
-  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install.  Nothing to do.  All good." && exit 0
+  ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install.  Nothing to do.  All good." && exit 0
   remove_cruft_packages
   exit $?   
 elif [ "--remove-deprecated-packages" = "${ACTION:-$1}" ] ; then
-  ! has_cruft_packages oldpkg echo "No cruft packages (all installed packages from the current distro).  Nothing to do.  All good." && exit 0
+  ! has_cruft_packages oldpkg && echo "No cruft packages (all installed packages from the current distro).  Nothing to do.  All good." && exit 0
   remove_cruft_packages oldpkg
   exit $?   
 elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
@@ -1871,7 +1871,7 @@ elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
     exit 0 
   fi
   has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && exit 1
-  ! has_cruft_packages echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && exit 0
+  ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install." && exit 0
   crossgrade_debian
   ret=$?
   exit $ret   

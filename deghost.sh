@@ -709,7 +709,7 @@ return $ret
 }
 
 function dpkg_install() {
-  [  -z "$@" ] && return 0
+  [  -z "$1" ] && return 0
   local tmplog=$(mktemp "tmplog.dpkginstall.XXXXXX.log")
   dpkg --force-confnew --force-confdef --force-confmiss --install $@ 2>&1 | tee "$tmplog"
   ret=$?
@@ -1301,6 +1301,7 @@ fi
 # report -dist or -old file changes
 tweak_broken_configs
 print_config_state_changes
+echo "dss:trace:dist_upgrade completed $(print_distro_info)"
 
 return $ret
 }

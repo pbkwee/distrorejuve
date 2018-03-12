@@ -949,7 +949,7 @@ function cruft_packages0() {
              
         # install 64 versions of the packages if we can.
         echo "dss:trace: bulk installing 64bit versions of installed i386 apps"
-        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v '^lib' "$cruftlog" | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v "$cruftlog" | sed 's/:i386/:amd64/g' | tr '\n' ' ')
         echo "dss:trace: force install check"
         apt-get -f $APT_GET_INSTALL_OPTIONS install
         echo "dss:trace: individually installing 64bit versions of installed i386 apps"
@@ -957,11 +957,12 @@ function cruft_packages0() {
         echo "dss:trace: force install check"
         apt-get -f $APT_GET_INSTALL_OPTIONS install
         # [  $? -ne 0 ] && commandret=$((commandret+1))
+        echo "dss:trace: removing 32 bit libraries"
         apt-get $APT_GET_INSTALL_OPTIONS remove $(grep -v '^lib' "$cruftlog" | tr '\n' ' ')
-        [  $? -ne 0 ] && commandret=$((commandret+1))
-        apt-get $APT_GET_INSTALL_OPTIONS remove $(grep '^lib' "$cruftlog" | tr '\n' ' ')
-        [  $? -ne 0 ] && commandret=$((commandret+1)) 
+        echo "dss:trace: individually removing i386 libraries."
+        for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep 'lib' ); do apt-get $APT_GET_INSTALL_OPTIONS  remove $i; done
         apt-get $APT_GET_INSTALL_OPTIONS autoremove
+        [  $(dpkg -l | grep ':i386' | grep '^ii' | wc -l) -gt 0 ] && commandret=$((commandret+1)) 
       fi
     fi
   fi

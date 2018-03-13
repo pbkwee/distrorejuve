@@ -785,6 +785,7 @@ function crossgrade_debian() {
   echo "dss:trace: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
   apt-get $APT_GET_INSTALL_OPTIONS -f install
   ret=$?
+  local essentialtoinstall=
   if [  $ret -ne 0 ]; then
     # apt-get -f install=>
     # The following NEW packages will be installed:
@@ -793,11 +794,6 @@ function crossgrade_debian() {
     # This should NOT be done unless you know exactly what you are doing!
     #  dash
     #0 upgraded, 1 newly installed, 1 to remove and 0 not upgraded.
-  fi
-  apt-get $APT_GET_INSTALL_OPTIONS -f install
-  ret=$?
-  local essentialtoinstall=
-  if [  $ret -ne 0 ]; then
     local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 5 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ')"
   fi
   if [  ! -z "$essentialtoinstall" ]; then  
@@ -813,6 +809,12 @@ function crossgrade_debian() {
     dpkg_install *.deb
     cd -
   fi    
+  apt-get $APT_GET_INSTALL_OPTIONS -f install
+  ret=$?
+  if [  $ret -ne 0 ]; then
+    echo "dss:error: apt-get -f install failed.  we are stuck."
+    exit 1
+  fi
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
   # doesn't seem to achieve much...

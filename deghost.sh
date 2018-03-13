@@ -764,7 +764,7 @@ function crossgrade_debian() {
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   apt-get $APT_GET_INSTALL_OPTIONS upgrade
   apt-get clean
-  if ! dpkg -l | grep '^^ii.*dpkg.*amd64'; then
+  if ! dpkg -l | egrep '^^ii.*dpkg.*amd64'; then
     echo "dss:trace: cross grading.  grabbing key amd64 deb packages."
     apt-get --download-only $APT_GET_INSTALL_OPTIONS install dpkg:amd64 tar:amd64 apt:amd64
     # error if we append perl-base:amd64 to the line above...
@@ -784,16 +784,41 @@ function crossgrade_debian() {
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   echo "dss:trace: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
   apt-get $APT_GET_INSTALL_OPTIONS -f install
-  if [  $? -ne 0 ]; then
-    echo "dss:trace: cross grading.  force installing amd64 packages failed, trying to download and install perl-base."
-    dpkg -l | egrep -qai '^ii.*perl-base.*i386' && ! dpkg -l | egrep -qai '^^ii.*perl-base.*amd64' &&  apt-get $APT_GET_INSTALL_OPTIONS download perl-base:amd64 && dpkg_install perl-base*amd64.deb && apt-get $APT_GET_INSTALL_OPTIONS -f install
+  ret=$?
+  if [  $ret -ne 0 ]; then
+    # apt-get -f install=>
+    # The following NEW packages will be installed:
+    #  dash:i386
+    # WARNING: The following essential packages will be removed.
+    # This should NOT be done unless you know exactly what you are doing!
+    #  dash
+    #0 upgraded, 1 newly installed, 1 to remove and 0 not upgraded.
+  fi
+  apt-get $APT_GET_INSTALL_OPTIONS -f install
+  ret=$?
+  local essentialtoinstall=
+  if [  $ret -ne 0 ]; then
+    local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 5 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ')"
+  fi
+  if [  ! -z "$essentialtoinstall" ]; then  
+    local i=;
+    mkdir -p deghostinfo/$$/debs
+    cd deghostinfo/$$/debs
+    echo "dss:trace: there may be some essential packages not installed.  trying to install 32 and 64 bit versions of: $essentialtoinstall"
+    for i in $essentialtoinstall; do 
+      apt-get download $i
+      apt-get download $i:i386
+      apt-get download $i:amd64
+    done  
+    dpkg_install *.deb
+    cd -
   fi    
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
   # doesn't seem to achieve much...
   dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
   echo "dss:trace: cross grading.  force installing of amd64 packages after dpkg --set-selections."
-  apt-get -f install
+  apt-get -f $APT_GET_INSTALL_OPTIONS install
   if [  $? -ne 0 ]; then
     echo "dss:error: cross grading failed after initial amd64 package installs.  See crossgrade_debian for a few suggestions to resolve manually."
     return 1 
@@ -1910,6 +1935,14 @@ elif [ "--remove-deprecated-packages" = "${ACTION:-$1}" ] ; then
   remove_cruft_packages oldpkg
   exit $?   
 elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
+  if [  64 -eq $(getconf LONG_BIT) ]; then
+    if has_cruft_packages 32bit; then 
+      echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-running crossgrade."
+    else 
+      echo "Distro is already 64 bit.  Cannot locate any 32 bit packages.  All good."
+      exit 0
+    fi 
+  fi
   has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && exit 1
   crossgrade_debian
   ret=$?

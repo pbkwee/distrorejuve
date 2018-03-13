@@ -720,11 +720,13 @@ function dpkg_install() {
      # /var/cache/apt/archives/tar_1.29b-1.1_amd64.deb
     local failedinstalls=$(cat "$tmplog" | grep --after-context 50 'Errors were encountered while processing:' | sed 's/.*Errors were encountered while processing://')
     if [  ! -z "$failedinstalls" ]; then
+      echo "dss:trace:dpkg_install: some .deb packages had issued.  retrying those: $failedinstalls"
       dpkg --force-confnew --force-confdef --force-confmiss --install $failedinstalls
       ret=$?
     fi
   fi
-  if [ $ret -ne 0 ]; then 
+  if [ $ret -ne 0 ]; then
+    echo "dss:trace:dpkg_install: some .deb packages had issued.  retrying to install all packages." 
     dpkg --force-confnew --force-confdef --force-confmiss --install $@
     ret=$?
   fi
@@ -769,7 +771,7 @@ function crossgrade_debian() {
   # something about this removes apache2.  figure out why...
   dpkg_install /var/cache/apt/archives/*_amd64.deb
   if [ $? -ne 0 ]; then 
-    [ $? -ne 0 ] && echo "dpkg install amd64.deb files failed" 2>&1 && return 1
+    [ $? -ne 0 ] && echo "dss:error: dpkg install amd64.deb files failed" 2>&1 && return 1
   fi
   [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
   mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
@@ -778,7 +780,7 @@ function crossgrade_debian() {
   apt-get $APT_GET_INSTALL_OPTIONS -f install
   if [  $? -ne 0 ]; then
     echo "dss:trace: cross grading.  force installing amd64 packages failed, trying to download and install perl-base."
-    dpkg -l perl-base:i386 >/dev/null 2>&1 && ! dpkg -l perl-base:amd64 >/dev/null 2>&1 &&  apt-get $APT_GET_INSTALL_OPTIONS download perl-base:amd64 && dpkg --force-confnew --force-confdef --force-confmiss --install perl-base*amd64.deb && apt-get $APT_GET_INSTALL_OPTIONS -f install
+    dpkg -l perl-base:i386 >/dev/null 2>&1 && ! dpkg -l perl-base:amd64 >/dev/null 2>&1 &&  apt-get $APT_GET_INSTALL_OPTIONS download perl-base:amd64 && dpkg_install perl-base*amd64.deb && apt-get $APT_GET_INSTALL_OPTIONS -f install
   fi    
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   

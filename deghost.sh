@@ -713,6 +713,13 @@ function dpkg_install() {
   local tmplog=$(mktemp "tmplog.dpkginstall.XXXXXX.log")
   dpkg --force-confnew --force-confdef --force-confmiss --install $@ 2>&1 | tee "$tmplog"
   ret=$?
+  if [  $ret -eq 0 ]; then
+    # dpkg: error processing archive /var/cache/apt/archives/bash_4.4-5_amd64.deb (--install):
+    # pre-dependency problem - not installing bash
+    # Errors were encountered while processing:
+    # /var/cache/apt/archives/bash_4.4-5_amd64.deb
+    egrep -qai 'Errors |pre-dependency problem|dpkg: error' "$tmplog" && ret=1 && echo "dss:warn: dpkg install lied about the return code.  will need to retry the install."
+  fi
   if [ $ret -ne 0 ]; then
     # first dpkg --install fails.  second one should work ok.  e.g.:
     # Errors were encountered while processing:
@@ -723,14 +730,17 @@ function dpkg_install() {
       echo "dss:trace:dpkg_install: some .deb packages had issued.  retrying those: $failedinstalls"
       dpkg --force-confnew --force-confdef --force-confmiss --install $failedinstalls
       ret=$?
+      
     fi
   fi
   if [ $ret -ne 0 ]; then
     echo "dss:trace:dpkg_install: some .deb packages had issued.  retrying to install all packages." 
-    dpkg --force-confnew --force-confdef --force-confmiss --install $@
+    dpkg --force-confnew --force-confdef --force-confmiss --install $@  2>&1 | tee "$tmplog"
     ret=$?
+    if [  $ret -eq 0 ]; then
+      egrep -qai 'Errors |pre-dependency problem|dpkg: error' "$tmplog" && ret=1 && echo "dss:warn: dpkg install lied about the return code(#2).  will need to retry the install."  
+    fi
   fi
-  
   [  -f "$tmplog" ] && rm -f "$tmplog"
   return $ret
 }
@@ -758,19 +768,20 @@ function crossgrade_debian() {
   [ $? -ne 0 ] && echo "dss:error: Failed adding amd64 architecture." 2>&1 && return 1
 
   echo "dss:info: cross grading distro from 32 to 64 bit."
-  local vimpkg="$(dpkg -l | grep '^^ ii' | grep -qai vim && echo vim)"
-  local apachepkg="$(dpkg -l | grep '^^ ii' | grep -qai apache2-bin && echo apache2-bin)"
+  local vimpkg="$(dpkg -l | grep '^.*ii' | grep -qai vim && echo vim)"
+  local apachepkg="$(dpkg -l | grep '^.*ii' | grep -qai apache2-bin && echo apache2-bin)"
   apt_get_update
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   apt-get $APT_GET_INSTALL_OPTIONS upgrade
   apt-get clean
-  if ! dpkg -l | egrep '^^ii.*dpkg.*amd64'; then
+  #if ! dpkg -l | egrep -qai '^ii.*dpkg.*amd64'; then
+  if true; then
     echo "dss:trace: cross grading.  grabbing key amd64 deb packages."
-    apt-get --download-only $APT_GET_INSTALL_OPTIONS install dpkg:amd64 tar:amd64 apt:amd64
+    apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install dpkg:amd64 tar:amd64 apt:amd64
     # error if we append perl-base:amd64 to the line above...
     # and if we don't have perl-base then apt-get -f install has this error: E: Unmet dependencies
     echo "dss:trace: cross grading.  grabbing extra amd64 deb packages."
-    apt-get --download-only $APT_GET_INSTALL_OPTIONS install perl-base:amd64
+    apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl-base:amd64
     
     echo "dss:trace: cross grading.  installing key amd64 deb packages."
     # something about this removes apache2.  figure out why...
@@ -991,7 +1002,7 @@ function cruft_packages0() {
              
         # install 64 versions of the packages if we can.
         echo "dss:trace: bulk installing 64bit versions of installed i386 apps"
-        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v "$cruftlog" | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+        apt-get $APT_GET_INSTALL_OPTIONS install $(grep -v '^lib' "$cruftlog" | sed 's/:i386/:amd64/g' | tr '\n' ' ')
         echo "dss:trace: force install check"
         apt-get -f $APT_GET_INSTALL_OPTIONS install
         echo "dss:trace: individually installing 64bit versions of installed i386 apps"

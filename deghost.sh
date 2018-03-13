@@ -738,16 +738,17 @@ function dpkg_install() {
 function crossgrade_debian() {
   [  ! -f /etc/debian_version ] && return 0
   
-  bittedness=$(getconf LONG_BIT)
-  if echo $bittedness | grep -qai 64; then
-    echo "dss:info:Already 64 bits.  Nothing to do."
-    [ $(dpkg -l | grep '^ii ' | grep ':i386' | wc -l ) -gt 0 ] && echo "i386 packages on this server (may need tidying up): $(dpkg -l | grep '^ii ' | grep ':i386')"
-    return 0
-  fi
-  
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
 
+  bittedness=$(getconf LONG_BIT)
+  if echo $bittedness | grep -qai 64; then
+    echo "dss:info:FYI getconf reports 64 bits."
+    #[ $(dpkg -l | grep '^ii ' | grep ':i386' | wc -l ) -gt 0 ] && echo "i386 packages on this server (may need tidying up): $(dpkg -l | grep '^ii ' | grep ':i386')"
+    #return 0
+    # may be part way through.  may still be 386 packages.  so carry on with the cross grade.
+  fi
+  
   [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
   [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
   
@@ -755,32 +756,37 @@ function crossgrade_debian() {
   echo "dss:trace:Foreign architectures: $(dpkg --print-foreign-architectures)"
   dpkg --add-architecture amd64
   [ $? -ne 0 ] && echo "dss:error: Failed adding amd64 architecture." 2>&1 && return 1
+
   echo "dss:info: cross grading distro from 32 to 64 bit."
+  local vimpkg="$(dpkg -l | grep '^^ ii' | grep -qai vim && echo vim)"
+  local apachepkg="$(dpkg -l | grep '^^ ii' | grep -qai apache2-bin && echo apache2-bin)"
   apt_get_update
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   apt-get $APT_GET_INSTALL_OPTIONS upgrade
   apt-get clean
-  echo "dss:trace: cross grading.  grabbing key amd64 deb packages."
-  apt-get --download-only $APT_GET_INSTALL_OPTIONS install dpkg:amd64 tar:amd64 apt:amd64
-  # error if we append perl-base:amd64 to the line above...
-  # and if we don't have perl-base then apt-get -f install has this error: E: Unmet dependencies
-  echo "dss:trace: cross grading.  grabbing extra amd64 deb packages."
-  apt-get --download-only $APT_GET_INSTALL_OPTIONS install perl-base:amd64
-  
-  echo "dss:trace: cross grading.  installing key amd64 deb packages."
-  # something about this removes apache2.  figure out why...
-  dpkg_install /var/cache/apt/archives/*_amd64.deb
-  if [ $? -ne 0 ]; then 
-    [ $? -ne 0 ] && echo "dss:error: dpkg install amd64.deb files failed" 2>&1 && return 1
+  if ! dpkg -l | grep '^^ii.*dpkg.*amd64'; then
+    echo "dss:trace: cross grading.  grabbing key amd64 deb packages."
+    apt-get --download-only $APT_GET_INSTALL_OPTIONS install dpkg:amd64 tar:amd64 apt:amd64
+    # error if we append perl-base:amd64 to the line above...
+    # and if we don't have perl-base then apt-get -f install has this error: E: Unmet dependencies
+    echo "dss:trace: cross grading.  grabbing extra amd64 deb packages."
+    apt-get --download-only $APT_GET_INSTALL_OPTIONS install perl-base:amd64
+    
+    echo "dss:trace: cross grading.  installing key amd64 deb packages."
+    # something about this removes apache2.  figure out why...
+    dpkg_install /var/cache/apt/archives/*_amd64.deb
+    if [ $? -ne 0 ]; then 
+      [ $? -ne 0 ] && echo "dss:error: dpkg install amd64.deb files failed" 2>&1 && return 1
+    fi
+    [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
+    mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
   fi
-  [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
-  mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   echo "dss:trace: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
   apt-get $APT_GET_INSTALL_OPTIONS -f install
   if [  $? -ne 0 ]; then
     echo "dss:trace: cross grading.  force installing amd64 packages failed, trying to download and install perl-base."
-    dpkg -l perl-base:i386 >/dev/null 2>&1 && ! dpkg -l perl-base:amd64 >/dev/null 2>&1 &&  apt-get $APT_GET_INSTALL_OPTIONS download perl-base:amd64 && dpkg_install perl-base*amd64.deb && apt-get $APT_GET_INSTALL_OPTIONS -f install
+    dpkg -l | egrep -qai '^ii.*perl-base.*i386' && ! dpkg -l | egrep -qai '^^ii.*perl-base.*amd64' &&  apt-get $APT_GET_INSTALL_OPTIONS download perl-base:amd64 && dpkg_install perl-base*amd64.deb && apt-get $APT_GET_INSTALL_OPTIONS -f install
   fi    
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
@@ -795,23 +801,30 @@ function crossgrade_debian() {
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
   echo "dss:trace: cross grading figuring out essential packages."
-  local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && essentialpackages="$essentialpackages $i:amd64"; done
-  echo "dss:trace: cross grading downloading essential packages."
-  apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages
-  apt-get --download-only $APT_GET_INSTALL_OPTIONS install init:amd64 
-  #apt-get --download-only -y install systemd-sysv:amd64
-  apt-get --download-only $APT_GET_INSTALL_OPTIONS install libc-bin:amd64
-  echo "dss:trace: cross grading dpkg installing essential packages."
-  dpkg_install /var/cache/apt/archives/*_amd64.deb
-  ret=$?
-  [ $ret -ne 0 ] && echo "dss:error: dpkg install essenstial amd64.deb files failed" 2>&1 && return 1
+  local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep ':i386' | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do 
+    apt-cache show $i | grep -qai 'Essential: yes' && ! dpkg -l | egrep -qai '^ii.*$i.*amd64' && essentialpackages="$essentialpackages $i:amd64"
+  done
+  
+  echo "dss:trace: cross grading essential packages are: $essentialpackages"
+  if [ ! -z "$essentialpackages" ]; then
+    echo "dss:trace: cross grading downloading essential packages."
+    apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages
+    apt-get --download-only $APT_GET_INSTALL_OPTIONS install init:amd64 
+    #apt-get --download-only -y install systemd-sysv:amd64
+    apt-get --download-only $APT_GET_INSTALL_OPTIONS install libc-bin:amd64
+    echo "dss:trace: cross grading dpkg installing essential packages."
+    dpkg_install /var/cache/apt/archives/*_amd64.deb
+    ret=$?
+    [ $ret -ne 0 ] && echo "dss:error: dpkg install essenstial amd64.deb files failed" 2>&1 && return 1
+  fi
+  
   # getting a dependency issue on apt-get remove a few things: libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6)
   # workaround is:
   apt-get $APT_GET_INSTALL_OPTIONS install libpam-modules-bin:amd64
   
-  echo "dss:trace: cross grading and installing vim/apache2."
+  
   # these seem to be uninstalled by something above.
-  apt-get $APT_GET_INSTALL_OPTIONS install vim apache2
+  [ ! -z "${vimpkg}${apachepkg}"] && echo "dss:trace: cross grading and installing vim/apache2." && apt-get $APT_GET_INSTALL_OPTIONS install $apachepkg $vimpkg
   
   # for all i386 apps, install the amd64 and remove the i386.  some will fail, that's ok.
   # do
@@ -1897,11 +1910,6 @@ elif [ "--remove-deprecated-packages" = "${ACTION:-$1}" ] ; then
   remove_cruft_packages oldpkg
   exit $?   
 elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
-  if [  64 -eq $(getconf LONG_BIT) ]; then
-    has_cruft_packages 32bit && echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-run $0 --show_cruft to see them." && exit 0
-    echo "Distro is already 64 bit.  Cannot locate any 32 bit packages.  All good."
-    exit 0 
-  fi
   has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && exit 1
   crossgrade_debian
   ret=$?

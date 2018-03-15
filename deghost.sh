@@ -349,8 +349,12 @@ function upgrade_precondition_checks() {
     [ -z "$IGNOREKERNEL" ] && ret=$(($ret+1))
   fi
   # ii  dmidecode                       2.9-1.2build1                           Dump Desktop Management Interface data
+  local libx11=
   if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
-    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | tr '\r\n' ' ')"
+    # ignoring some packages since they are 'fine'.  and typically some of them (eg libx11) are required by things like imagemagick and php-gd
+    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'libx11|libx11-data|x11-common|xauth|xfonts-encodings|xfonts-utils|msttcorefonts' | tr '\r\n' ' ')"
+  fi
+  if [  ! -z "$libx11" ]; then
     echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y"
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
     [ -z "$IGNOREX11" ] && ret=$(($ret+1))
@@ -503,13 +507,14 @@ function add_missing_debian_keys() {
   print_distro_info | grep -qai debian || return 0
   echo "dss:info:checking debian keys"
   # import the lts key
-  if ! apt-key list | grep -qai "46925553"; then
+  # sometimes its like '...AD62 4692 5553' other times its like '...AD6246925553'
+  if ! apt-key list | egrep -qai "4692.*5553"; then
     echo "dss:info: installing the deb 7 2020 key"
     if ! gpg --recv-key  8B48AD6246925553 ; then gpg --keyserver pgpkeys.mit.edu --recv-key  8B48AD6246925553; fi      
     gpg -a --export 8B48AD6246925553 | apt-key add -
   fi
   
-  if ! apt-key list | grep -qai "473041FA"; then
+  if ! apt-key list | egrep -qai "4730.*41FA"; then
     # Debian Archive Automatic Signing Key (6.0/squeeze) <ftpmaster@debian.org>
     echo "dss:info: installing the deb 6 key"
     gpg --recv-key AED4B06F473041FA
@@ -718,7 +723,15 @@ function dpkg_install() {
     # pre-dependency problem - not installing bash
     # Errors were encountered while processing:
     # /var/cache/apt/archives/bash_4.4-5_amd64.deb
+    
+    # Errors were encountered while processing:
+    # gcj-6-jre-lib
+    # openjdk-8-jre-headless:amd64
+    # postfix
+    # dss:warn: dpkg install lied about the return code(#2).  will need to retry the install.
+    
     egrep -qai 'Errors |pre-dependency problem|dpkg: error' "$tmplog" && ret=1 && echo "dss:warn: dpkg install lied about the return code.  will need to retry the install."
+    
   fi
   if [ $ret -ne 0 ]; then
     # first dpkg --install fails.  second one should work ok.  e.g.:
@@ -758,6 +771,12 @@ function crossgrade_debian() {
     #return 0
     # may be part way through.  may still be 386 packages.  so carry on with the cross grade.
   fi
+  local now=$(date +%s)
+
+  # slightly different config file state name.  e.g. regular upgrade can remove things like dovecot if they were not used.
+  # and this different file means they won't get reinstalled by mistake
+  [  ! -f /root/deghostinfo/crossgrade.preupgrade.dpkg.$$ ] && record_config_state /root/deghostinfo/crossgrade.preupgrade.dpkg.$$
+  [  -f /root/deghostinfo/crossgrade.preupgrade.dpkg.$$ ] && [  ! -f /root/deghostinfo/preupgrade.dpkg.$$ ] && cp /root/deghostinfo/crossgrade.preupgrade.dpkg.$$ /root/deghostinfo/preupgrade.dpkg.$$
   
   [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
   [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
@@ -809,12 +828,15 @@ function crossgrade_debian() {
   fi
   if [  ! -z "$essentialtoinstall" ]; then  
     local i=;
-    mkdir -p deghostinfo/$$/debs
-    cd deghostinfo/$$/debs
-    echo "dss:trace: there may be some essential packages not installed.  trying to install 32 and 64 bit versions of: $essentialtoinstall"
-    for i in $essentialtoinstall; do 
-      apt-get download $i
-      apt-get download $i:i386
+    mkdir -p deghostinfo/$$/essentialdebs
+    cd deghostinfo/$$/essentialdebs
+    echo "dss:trace: apt-get -f install had errors.  there may be some essential packages not installed.  trying to install 32 and 64 bit versions of: $essentialtoinstall"
+    for i in $essentialtoinstall; do
+      i=$(echo $i | sed 's/:i386//')
+      i=$(echo $i | sed 's/:amd64//') 
+      # had been downloading 64 and 32 bit versions.  but installing both (for say perl-base) resulted in dpkg -l listing just the i386 version. 
+      #apt-get download $i
+      #apt-get download $i:i386
       apt-get download $i:amd64
     done  
     dpkg_install *.deb
@@ -868,15 +890,51 @@ function crossgrade_debian() {
   # do
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
    
-  echo "dss:trace: cross grading and bulk replacing i386 apps with 64 bit versions"
-  local i386toremove="$(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | tr '\n' ' ')"
-  local amd64toinstall="$(echo $i386toremove | sed 's/:i386/:amd64/g')"
-  apt-get $APT_GET_INSTALL_OPTIONS  install $amd64toinstall && apt-get $APT_GET_INSTALL_OPTIONS remove $i386toremove
-  
-  echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages."
-  for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt-get $APT_GET_INSTALL_OPTIONS  install $i:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $i:i386; done
+  local i=0
+  for i in 0 1; do  
+    echo "dss:trace: cross grading and bulk replacing i386 apps with 64 bit versions"
+    local i386toremove="$(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | tr '\n' ' ')"
+    local amd64toinstall="$(echo $i386toremove | sed 's/:i386/:amd64/g')"
+    [  -z "$amd64toinstall" ] && [  -z "$i386toremove" ] && break
+    local ret=0
+    apt-get $APT_GET_INSTALL_OPTIONS  install $amd64toinstall && apt-get $APT_GET_INSTALL_OPTIONS remove $i386toremove
+    [  $? -ne 0 ] && ret=$((ret+1))    
+    echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages."
+    local pkg=
+    for pkg in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do 
+      apt-get $APT_GET_INSTALL_OPTIONS  install $pkg:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $pkg:i386 && apt-get -f $APT_GET_INSTALL_OPTIONS install
+      [  $? -ne 0 ] && ret=$((ret+1))
+    done
+    [  $ret -eq 0] && break
+  done
+    
 
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
+  
+  ## apt-show-versions  | grep amd64 | grep 'not installed'
+  # acl:amd64 not installed
+  # aptitude:amd64 not installed
+  # =>
+  # # echo "$available"
+  #acl
+  #aptitude
+  #bsd-mailx
+  local fromfile="$(find /root/deghostinfo/ -mtime -1 | grep crossgrade)"
+  [ ! -z $fromfile ] && fromfile="$(ls -1rt $fromfile | head -n 1)"
+  local uninstalled="$(print_config_state_changes "$fromfile" | grep 'dss:config-state-changes:-installed:' | sed 's/.*installed://' | sed 's/:i386//' | sed 's/:amd64//' | grep -v '^ *$' | sed 's/$/:amd64/' | tr '\n' ' ')"
+  local available=$(apt-show-versions  $uninstalled | grep amd64 | grep 'not installed' | sed 's/ not installed.*//')
+  local i=
+  local toreinstall=
+  for i in $uninstalled; do 
+    # sometimes packages are removed, but due to being deprecated.  $available will contain only the packages on the current distro
+    echo "$available" | egrep -qai "^$i\$" && toreinstall="$toreinstall $i"
+  done 
+  [ ! -z "$toreinstall" ] && echo "dss:info: Will reinstall some packages that have been removed during the crossgrade: $(echo $toreinstall)"
+  for i in $toreinstall; do 
+    apt-get $APT_GET_INSTALL_OPTIONS  install $i
+  done
+  
+  print_config_state_changes
   
   has_cruft_packages 32bit && show_cruft_packages
   
@@ -1181,7 +1239,7 @@ function print_minimal_config() {
   return 0
 }
 function print_pkg_to_modified_diff() {
-mkdir /root/pkgdiff.$$
+[  ! -d "/root/pkgdiff.$$" ] && mkdir /root/pkgdiff.$$
 # get a list of config files in packages that have been changed by the user
 local modifiedconfigfiles=$(dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort)
 local modifiedconfigfile
@@ -1241,8 +1299,14 @@ function print_config_state_changes() {
   local now=$(date +%s)
   record_config_state /root/deghostinfo/postupgrade.dpkg.$now
   # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
-  local fromfile=$(ls -1rt $(find /root/deghostinfo/ -mtime -1 | grep preupgrade) | head -n 1)
+  local fromfile="${1}"
+  if [  -z "$fromfile" ]; then
+    fromfile="$(find /root/deghostinfo/ -mtime -1 | grep preupgrade)"
+    [  ! -z "$fromfile" ] && fromfile="$(ls -1rt $fromfile | head -n 1)"
+  fi 
   [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
+  # no prior changes just yet.
+  [  ! -f  "$fromfile" ] && return 0
   echo "dss:info: Config changes to check.  e.g. different processes after upgrade.  e.g. different ports.  e.g. different apache status output.  e.g. changes to dpkg-old/dpkg-dist files.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
   print_minimal_config_diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:config-state-changes:" $0}'
   

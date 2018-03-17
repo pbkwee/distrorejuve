@@ -19,6 +19,8 @@ DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN squeeze-lts"
 DEBIAN_CURRENT="jessie stretch"
 IS_DEBUG=
 APT_GET_INSTALL_OPTIONS=' -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss '
+# export this variable, e.g. to DAYS_UPGRADE_ONGOING=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
+DAYS_UPGRADE_ONGOING="${DAYS_UPGRADE_ONGOING:-1}"
 function print_usage() {
   echo "
 # deghost
@@ -36,14 +38,14 @@ Example usage to dist upgrade to latest Debian or Ubuntu disto. First make a bac
 sudo bash deghost.sh --dist-upgrade | tee -a deghost.log
 
 Uses:
-- Enable archive repositories for older Debian distros
 - Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
 - Dist upgrade Ubuntu distros to the next LTS version.  Then from LTS version to LTS version.
-- On completion provides information on config changes (modified config files, changed ports)
+- On completion provides information on config changes (modified config files, changed ports, changed packages, changed running processes)
 - Install missing Debian keys
 - Handles a few common Apache config issues after a distro upgrade.
 - Designed to run unattended without lots of prompting.
 - Burgeoning support to cross grade 32 bit distros to 64 bit
+- Show/remove cruft to permit tidy up of packages installed from non-current (old) repositories
 
 Arguments:
   
@@ -352,6 +354,9 @@ function upgrade_precondition_checks() {
   local libx11=
   if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
     # ignoring some packages since they are 'fine'.  and typically some of them (eg libx11) are required by things like imagemagick and php-gd
+    # install ok installed utils zip
+    # install ok installed vcs cvs
+    # install ok installed vcs patch
     local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'libx11|libx11-data|x11-common|xauth|xfonts-encodings|xfonts-utils|msttcorefonts' | tr '\r\n' ' ')"
   fi
   if [  ! -z "$libx11" ]; then
@@ -529,7 +534,7 @@ function disable_debian_repos() {
   local name=$1
   # disable both squeeze and squeeze lts if squeeze
   [ "$name" == "squeeze" ] && disable_debian_repos squeeze-lts
-  [ ! -z "$IS_DEBUG" ] && echo "dss:trace:sources:disable_debian_repos:pre:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
+  [ ! -z "$IS_DEBUG" ] && echo "dss:sources:disable_debian_repos:pre:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
   {
     local line=
     cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
@@ -567,13 +572,13 @@ function disable_debian_repos() {
     rm /etc/apt/sources.list.$$ 
     return 0
   fi
-  [ ! -z "$IS_DEBUG" ] && echo "dss:trace:sources:disable_debian_repos:post:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')" 
+  [ ! -z "$IS_DEBUG" ] && echo "dss:sources:disable_debian_repos:post:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')" 
   prep_ghost_output_dir
   cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: disable_debian_repos $name diff follows:"
-  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
+  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
-  echo "$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:info:sources:disable_debian_repos:post:" $0}'
+  echo "$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:disable_debian_repos:post:" $0}'
   return 0
 }
 
@@ -621,7 +626,7 @@ function enable_debian_archive() {
   prep_ghost_output_dir
   cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: enabling debian archive repos.  diff follows:"
-  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:info: " $1}'
+  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff:sources: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
   [ ! -z "$IS_DEBUG" ] && echo "apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:trace:sources:enable_debian_archive:post:" $0 }'
   return 0
@@ -676,7 +681,7 @@ function print_failed_dist_upgrade_tips() {
   echo "In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
   echo "In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
   echo "May be worth trying: aptitude -vv full-upgrade" 
-  echo "after attempting a fix manuall, rerun the deghost command"
+  echo "after attempting a fix manuall, rerun the bash deghost.sh  command"
 }
 
 function dist_upgrade_lenny_to_squeeze() {
@@ -713,11 +718,24 @@ ret=$?
 return $ret
 }
 
+function apt_get_f_install() {
+  local tmplog=$(mktemp "tmplog.aptgetfinstall.XXXXXX.log")
+  apt-get $APT_GET_INSTALL_OPTIONS -f install | tee $tmplog
+  local ret=${PIPESTATUS[0]}
+  #  trying to overwrite shared '/usr/share/doc/libkmod2/changelog.Debian.gz', which is different from other instances of package libkmod2:amd64
+  local overwrites="$(grep "trying to overwrite shared '/usr/share/doc/.*/changelog.Debian.gz" $tmplog | sed 's#.*trying to overwrite shared .##g' | sed 's#., which is different from other instances of package.*##g')"
+  local i=
+  for i in $overwrites; do [  -f $i ] && rm -f $i && echo "dss:info: removing $i to try and get packages to install correctly.  (Ubuntu issue)."; done
+  [  ! -z "$overwrites" ] && apt-get $APT_GET_INSTALL_OPTIONS -f install && ret=$?
+  rm -rf "$tmplog"
+  return $ret
+}
+
 function dpkg_install() {
   [  -z "$1" ] && return 0
   local tmplog=$(mktemp "tmplog.dpkginstall.XXXXXX.log")
   dpkg --force-confnew --force-confdef --force-confmiss --install $@ 2>&1 | tee "$tmplog"
-  ret=$?
+  ret=${PIPESTATUS[0]}
   if [  $ret -eq 0 ]; then
     # dpkg: error processing archive /var/cache/apt/archives/bash_4.4-5_amd64.deb (--install):
     # pre-dependency problem - not installing bash
@@ -731,8 +749,14 @@ function dpkg_install() {
     # dss:warn: dpkg install lied about the return code(#2).  will need to retry the install.
     
     egrep -qai 'Errors |pre-dependency problem|dpkg: error' "$tmplog" && ret=1 && echo "dss:warn: dpkg install lied about the return code.  will need to retry the install."
+    # maybe it never lied?  Changed from ret=$? to ret=${PIPESTATUS[0]} because of the pipe to tee
     
   fi
+  # https://bugs.launchpad.net/ubuntu/+source/perl/+bug/1574351
+  # dpkg: error processing archive libperl5.22_5.22.1-9ubuntu0.2_amd64.deb (--install):
+  # trying to overwrite shared '/usr/share/doc/libperl5.22/changelog.Debian.gz', which is different from other instances of package libperl5.22:amd64
+  
+  egrep -qai "trying to overwrite shared '/usr/share/doc/libperl5.22/changelog.Debian.gz" "$tmplog" && echo "dss:info: handling libperl issue." && rm -f /usr/share/doc/libperl5.22/changelog.Debian.gz 
   if [ $ret -ne 0 ]; then
     # first dpkg --install fails.  second one should work ok.  e.g.:
     # Errors were encountered while processing:
@@ -740,14 +764,14 @@ function dpkg_install() {
      # /var/cache/apt/archives/tar_1.29b-1.1_amd64.deb
     local failedinstalls=$(cat "$tmplog" | grep --after-context 50 'Errors were encountered while processing:' | sed 's/.*Errors were encountered while processing://')
     if [  ! -z "$failedinstalls" ]; then
-      echo "dss:trace:dpkg_install: some .deb packages had issued.  retrying those: $failedinstalls"
+      echo "dss:trace:dpkg_install: some .deb packages had issues.  retrying those: $failedinstalls"
       dpkg --force-confnew --force-confdef --force-confmiss --install $failedinstalls
       ret=$?
       
     fi
   fi
   if [ $ret -ne 0 ]; then
-    echo "dss:trace:dpkg_install: some .deb packages had issued.  retrying to install all packages." 
+    echo "dss:trace:dpkg_install: some .deb packages had issues.  retrying to install all packages." 
     dpkg --force-confnew --force-confdef --force-confmiss --install $@  2>&1 | tee "$tmplog"
     ret=$?
     if [  $ret -eq 0 ]; then
@@ -764,7 +788,7 @@ function crossgrade_debian() {
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
 
-  bittedness=$(getconf LONG_BIT)
+  local bittedness=$(getconf LONG_BIT)
   if echo $bittedness | grep -qai 64; then
     echo "dss:info:FYI getconf reports 64 bits."
     #[ $(dpkg -l | grep '^ii ' | grep ':i386' | wc -l ) -gt 0 ] && echo "i386 packages on this server (may need tidying up): $(dpkg -l | grep '^ii ' | grep ':i386')"
@@ -778,21 +802,23 @@ function crossgrade_debian() {
   [  ! -f /root/deghostinfo/crossgrade.preupgrade.dpkg.$$ ] && record_config_state /root/deghostinfo/crossgrade.preupgrade.dpkg.$$
   [  -f /root/deghostinfo/crossgrade.preupgrade.dpkg.$$ ] && [  ! -f /root/deghostinfo/preupgrade.dpkg.$$ ] && cp /root/deghostinfo/crossgrade.preupgrade.dpkg.$$ /root/deghostinfo/preupgrade.dpkg.$$
   
-  [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
-  [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
-  
   echo "dss:trace:Current architecture: $(dpkg --print-architecture)"
   echo "dss:trace:Foreign architectures: $(dpkg --print-foreign-architectures)"
-  dpkg --add-architecture amd64
-  [ $? -ne 0 ] && echo "dss:error: Failed adding amd64 architecture." 2>&1 && return 1
-
   echo "dss:info: cross grading distro from 32 to 64 bit."
   local vimpkg="$(dpkg -l | grep '^.*ii' | grep -qai vim && echo vim)"
   local apachepkg="$(dpkg -l | grep '^.*ii' | grep -qai apache2-bin && echo apache2-bin)"
   apt_get_update
+
+  [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
+  [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --show-cruft followed by bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
+  
+  dpkg --add-architecture amd64
+  [ $? -ne 0 ] && echo "dss:error: Failed adding amd64 architecture." 2>&1 && return 1
+
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   apt-get $APT_GET_INSTALL_OPTIONS upgrade
   apt-get clean
+
   #if ! dpkg -l | egrep -qai '^ii.*dpkg.*amd64'; then
   if true; then
     echo "dss:trace: cross grading.  grabbing key amd64 deb packages."
@@ -802,7 +828,7 @@ function crossgrade_debian() {
     echo "dss:trace: cross grading.  grabbing extra amd64 deb packages."
     apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl-base:amd64
     
-    echo "dss:trace: cross grading.  installing key amd64 deb packages."
+    echo "dss:trace: cross grading.  installing key amd64 deb packages: dpkg:amd64 tar:amd64 apt:amd64 perl-base:amd64"
     # something about this removes apache2.  figure out why...
     dpkg_install /var/cache/apt/archives/*_amd64.deb
     if [ $? -ne 0 ]; then 
@@ -813,10 +839,11 @@ function crossgrade_debian() {
   fi
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   echo "dss:trace: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
-  apt-get $APT_GET_INSTALL_OPTIONS -f install
-  ret=$?
-  local essentialtoinstall=
-  if [  $ret -ne 0 ]; then
+  local i=0
+  for i in 0 1; do
+    apt_get_f_install
+    ret=$?
+    [ $ret -eq 0 ] && break;
     # apt-get -f install=>
     # The following NEW packages will be installed:
     #  dash:i386
@@ -824,9 +851,11 @@ function crossgrade_debian() {
     # This should NOT be done unless you know exactly what you are doing!
     #  dash
     #0 upgraded, 1 newly installed, 1 to remove and 0 not upgraded.
-    local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 5 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ')"
-  fi
-  if [  ! -z "$essentialtoinstall" ]; then  
+    # remove 'due to stuff' e.g.:
+    #   dpkg:amd64 tar:amd64 (due to dpkg:amd64) perl-base:amd64
+    
+    local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 5 'WARNING: The following essential packages will be removed.' | grep '^ ' | sed  -r 's/\(due to \S*?\)//g' | tr '\n' ' ')"
+    [  -z "$essentialtoinstall" ] && break  
     local i=;
     mkdir -p deghostinfo/$$/essentialdebs
     cd deghostinfo/$$/essentialdebs
@@ -841,8 +870,8 @@ function crossgrade_debian() {
     done  
     dpkg_install *.deb
     cd -
-  fi    
-  apt-get $APT_GET_INSTALL_OPTIONS -f install
+  done    
+  apt_get_f_install
   ret=$?
   if [  $ret -ne 0 ]; then
     echo "dss:error: apt-get -f install failed.  we are stuck."
@@ -860,13 +889,16 @@ function crossgrade_debian() {
   fi
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
-  echo "dss:trace: cross grading figuring out essential packages."
-  local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep ':i386' | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do 
-    apt-cache show $i | grep -qai 'Essential: yes' && ! dpkg -l | egrep -qai '^ii.*$i.*amd64' && essentialpackages="$essentialpackages $i:amd64"
-  done
-  
-  echo "dss:trace: cross grading essential packages are: $essentialpackages"
-  if [ ! -z "$essentialpackages" ]; then
+  for i in 0; do
+    echo "dss:trace: cross grading figuring out essential packages."
+    local essentialpackages=;
+    local i386apps="$(dpkg -l | grep '^ii' | grep ':i386' | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' )" 
+    for i in $i386apps; do 
+      apt-cache show $i | grep -qai 'Essential: yes' && ! dpkg -l | egrep -qai '^ii.*$i.*amd64' && essentialpackages="$essentialpackages $i:amd64"
+    done
+    
+    [ -z "$essentialpackages" ] && break
+    echo "dss:trace: cross grading essential packages are: $essentialpackages"
     echo "dss:trace: cross grading downloading essential packages."
     apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages
     apt-get --download-only $APT_GET_INSTALL_OPTIONS install init:amd64 
@@ -876,7 +908,7 @@ function crossgrade_debian() {
     dpkg_install /var/cache/apt/archives/*_amd64.deb
     ret=$?
     [ $ret -ne 0 ] && echo "dss:error: dpkg install essenstial amd64.deb files failed" 2>&1 && return 1
-  fi
+  done
   
   # getting a dependency issue on apt-get remove a few things: libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6)
   # workaround is:
@@ -884,7 +916,7 @@ function crossgrade_debian() {
   
   
   # these seem to be uninstalled by something above.
-  [ ! -z "${vimpkg}${apachepkg}"] && echo "dss:trace: cross grading and installing vim/apache2." && apt-get $APT_GET_INSTALL_OPTIONS install $apachepkg $vimpkg
+  [ ! -z "${vimpkg}${apachepkg}" ] && echo "dss:trace: cross grading and installing vim/apache2." && apt-get $APT_GET_INSTALL_OPTIONS install $apachepkg $vimpkg
   
   # for all i386 apps, install the amd64 and remove the i386.  some will fail, that's ok.
   # do
@@ -901,11 +933,14 @@ function crossgrade_debian() {
     [  $? -ne 0 ] && ret=$((ret+1))    
     echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages."
     local pkg=
-    for pkg in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do 
-      apt-get $APT_GET_INSTALL_OPTIONS  install $pkg:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $pkg:i386 && apt-get -f $APT_GET_INSTALL_OPTIONS install
-      [  $? -ne 0 ] && ret=$((ret+1))
+    local i386toremove="$(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//')"
+    for pkg in $i386toremove ; do 
+      apt-get $APT_GET_INSTALL_OPTIONS  install $pkg:amd64
+      local lret=$?
+      [  $lret -eq 0 ] && apt-get $APT_GET_INSTALL_OPTIONS remove $pkg:i386 
+      [  $lret -ne 0 ] && ret=$((ret+1)) && apt-get -f $APT_GET_INSTALL_OPTIONS install
     done
-    [  $ret -eq 0] && break
+    [  $ret -eq 0 ] && break
   done
     
 
@@ -914,14 +949,18 @@ function crossgrade_debian() {
   ## apt-show-versions  | grep amd64 | grep 'not installed'
   # acl:amd64 not installed
   # aptitude:amd64 not installed
+  # banana not available for architecture amd64
+  # tar:amd64/xenial-security 1.28-2.1ubuntu0.1 uptodate
+  # tar:i386 not installed
+  
   # =>
   # # echo "$available"
   #acl
   #aptitude
   #bsd-mailx
-  local fromfile="$(find /root/deghostinfo/ -mtime -1 | grep crossgrade)"
-  [ ! -z $fromfile ] && fromfile="$(ls -1rt $fromfile | head -n 1)"
-  local uninstalled="$(print_config_state_changes "$fromfile" | grep 'dss:config-state-changes:-installed:' | sed 's/.*installed://' | sed 's/:i386//' | sed 's/:amd64//' | grep -v '^ *$' | sed 's/$/:amd64/' | tr '\n' ' ')"
+  local fromfile="$(find /root/deghostinfo/ -mtime -${DAYS_UPGRADE_ONGOING} | grep crossgrade)"
+  [ ! -z "$fromfile" ] && fromfile="$(ls -1rt $fromfile | head -n 1)"
+  local uninstalled="$(print_config_state_changes "$fromfile" | grep '^dss:configdiff:statechanges:-installed:' | sed 's/.*installed://' | sed 's/:i386//' | sed 's/:amd64//' | grep -v '^ *$' | sed 's/$/:amd64/' | tr '\n' ' ')"
   local available=$(apt-show-versions  $uninstalled | grep amd64 | grep 'not installed' | sed 's/ not installed.*//')
   local i=
   local toreinstall=
@@ -937,6 +976,8 @@ function crossgrade_debian() {
   print_config_state_changes
   
   has_cruft_packages 32bit && show_cruft_packages
+  
+  echo "dss:info: Cross grade has complete.  $(has_cruft_packages 32bit && echo 'has some 32 bit packages still (see above)' || echo 'no 32 bit packages remain (good)')"
   
   # sample cleanup/finish up/suggestions:
   
@@ -1014,7 +1055,7 @@ function cruft_packages0() {
   # openssl-blacklist:all 0.5-3 installed: No available version in archive
   # ruby-did-you-mean:all/stretch 1.0.0-2 uptodate
   
-  echo "dss:trace: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
+  #echo "dss:trace: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
   
   if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep -v '^lib' | wc -l) ]; then
     has_cruft=$((has_cruft+1))
@@ -1038,13 +1079,13 @@ function cruft_packages0() {
     dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
     if [  $(cat "$cruftlog" | head | wc -l ) -gt 0 ]; then
       has_cruft=$((has_cruft+1))
-      [  ! -z "$show" ] && echo "dss:warn: There are some i386 application packages still installed.  They can be removed by running $0 --remove-cruft.  They are: $(grep -v '^lib' "$cruftlog" | tr '\n' ' ') $(grep '^lib' "$cruftlog" | tr '\n' ' ')."
+      [  ! -z "$show" ] && echo "dss:warn: There are some i386 application packages still installed.  They can be removed by running bash $0 --remove-cruft.  They are: $(grep -v '^lib' "$cruftlog" | tr '\n' ' ') $(grep '^lib' "$cruftlog" | tr '\n' ' ')."
       if [  ! -z "$remove" ]; then
       
         echo "dss:trace: cross grading figuring out essential packages."
         local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | grep -qai 'Essential: yes' && essentialpackages="$essentialpackages $i:amd64"; done
         echo "dss:trace: cross grading downloading essential packages via download and dpkg_install."
-        [  ! -z "$essentialpackages"] && if apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages; then
+        [  ! -z "$essentialpackages" ] && if apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages; then
           dpkg_install /var/cache/apt/archives/*_amd64.deb
           [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
           mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
@@ -1134,11 +1175,11 @@ function tweak_broken_configs() {
     if [ ! -d /etc/mysql ]; then break; fi
     
     echo "dss:info: MySQL appears to have been installed, but no longer present.  This can happen between debian 8 and debian 9.  As mysql is replaced by mariadb.  Attempting to install mysql-server which would pull in mariadb."
-    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:pre:" $0}'
+    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:pre:" $0}'
     
     apt-get  $APT_GET_INSTALL_OPTIONS  install mysql-server
     if [ $? -ne 0 ]; then break; fi
-    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:info:mysqlrelatedpackages:post:" $0}'
+    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:post:" $0}'
     break
   done
   for i in $(find /etc/cron.* -type f -name 000loaddelay); do
@@ -1209,7 +1250,7 @@ disable_debian_repos $old_distro
 if ! grep -qai "^ *deb.* ${new_distro}[ /-]" /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
   echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
-  echo "$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:info:sources:dist_upgrade_x_to_y:" $0}'
+  echo "$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:dist_upgrade_x_to_y:" $0}'
 fi
 
 # redo to convert the above to archive where appropriate.  And add lts if appropriate.
@@ -1272,7 +1313,7 @@ for modifiedconfigfile in $modifiedconfigfiles; do
   [ -f "./${modifiedconfigfile}" ] && [ ! -f "${modifiedconfigfile}.dpkg-dist" ] && cp "./${modifiedconfigfile}" "${modifiedconfigfile}.dpkg-dist"
   [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:info:modifiedfilereplace:To replace edited file with dist file: mv $modifiedconfigfile $modifiedconfigfile.dpkg-old; mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
   # show a diff
-  print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:info:modifiedfilediff:'$pkg':'$modifiedconfigfile':" $0}'
+  print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:configdiff:modifiedconfig:'$pkg':'$modifiedconfigfile':" $0}'
 done
 
 # cleanup
@@ -1301,17 +1342,18 @@ function print_config_state_changes() {
   # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
   local fromfile="${1}"
   if [  -z "$fromfile" ]; then
-    fromfile="$(find /root/deghostinfo/ -mtime -1 | grep preupgrade)"
+    fromfile="$(find /root/deghostinfo/ -mtime -${DAYS_UPGRADE_ONGOING} | grep preupgrade)"
     [  ! -z "$fromfile" ] && fromfile="$(ls -1rt $fromfile | head -n 1)"
   fi 
   [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
   # no prior changes just yet.
   [  ! -f  "$fromfile" ] && return 0
   echo "dss:info: Config changes to check.  e.g. different processes after upgrade.  e.g. different ports.  e.g. different apache status output.  e.g. changes to dpkg-old/dpkg-dist files.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
-  print_minimal_config_diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:config-state-changes:" $0}'
+  print_minimal_config_diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:configdiff:statechanges:" $0}'
   
-  echo "dss:info:How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files."
   local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
+  [  -z "$files" ] && echo "dss:info: Looks like the server is using all distro-provided config files (no local overrides).  That makes it easy."
+  [ ! -z "$files" ] && echo "dss:info:key:How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files?"
   for file in $files; do
     # defer to the new and improved print_pkg_to_modified_diff function (debian/ubuntu only)
     echo $file | grep -q 'dpkg-dist' && continue 
@@ -1324,7 +1366,7 @@ function print_config_state_changes() {
     [ -z "$current" ] || [ ! -f $current ] && continue
     
     echo "dss:pkgdiff:$current To use the dist file: mv $current $current.dpkg-old; mv $file $current"
-    print_minimal_config_diff $file $current | awk '{print "dss:pkgdiff:" $0}'
+    print_minimal_config_diff $file $current | awk '{print "dss:configdiff:pkgconfig:" $0}'
   done
   print_pkg_to_modified_diff
   
@@ -1340,10 +1382,10 @@ function record_config_state() {
   prep_ghost_output_dir
   local file=$1
   if [ -z "$file" ]; then 
-    file=/root/deghostinfo/preupgrade.dpkg.$$
+    file="/root/deghostinfo/preupgrade.dpkg.$$"
   fi
   # don't overwrite the preupgrade file
-  echo $file | grep preupgrade && [ -f $file ] && return 0
+  echo $file | grep -qai preupgrade && [ -f $file ] && return 0
   
   local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
   > $file
@@ -1386,12 +1428,12 @@ apt_get_update
 record_config_state
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get $APT_GET_INSTALL_OPTIONS autoremove
-apt-get $APT_GET_INSTALL_OPTIONS -f install
+apt_get_f_install
 echo "dss:info: running an apt-get upgrade"
 apt-get $APT_GET_INSTALL_OPTIONS upgrade
 ret=$?
 apt-get $APT_GET_INSTALL_OPTIONS autoremove
-apt-get $APT_GET_INSTALL_OPTIONS -f install
+apt_get_f_install
 if [ $ret -ne 0 ]; then
   echo "dss:info: apt-get upgrade failed.  trying a dist-ugprade..."
   apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
@@ -1414,7 +1456,7 @@ upgrade_precondition_checks || return $?
 echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
 apt_get_upgrade || return 1
 echo "dss:trace:apt_get_dist_upgrade"
-apt-get  $APT_GET_INSTALL_OPTIONS  -f install
+apt_get_f_install
 apt-get  $APT_GET_INSTALL_OPTIONS  install dpkg
 apt-get  $APT_GET_INSTALL_OPTIONS  autoremove
 apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
@@ -1570,7 +1612,7 @@ convertfile $name $name debian.org "#" /etc/apt/sources.list
 #sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
 
 echo "deb http://archive.debian.org/debian/ $name main non-free contrib" >> /etc/apt/sources.list
-echo "$name apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:info:sources:convert_old_debian_repo:" $0}'
+echo "$name apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:convert_old_debian_repo:" $0}'
 done
 return 0
 }
@@ -2001,7 +2043,7 @@ elif [ "--fix-vuln" = "${ACTION:-$1}" ] ; then
 elif [ "--show-cruft" = "${ACTION:-$1}" ] ; then
   ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install)." && exit 0
   show_cruft_packages
-  echo "To remove those packages, re-run with $0 --remove-cruft"
+  echo "To remove those packages, re-run with bash $0 --remove-cruft"
   exit 0   
 elif [ "--remove-cruft" = "${ACTION:-$1}" ] ; then
   ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install).  Nothing to do.  All good." && exit 0
@@ -2020,7 +2062,7 @@ elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
       exit 0
     fi 
   fi
-  has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running $0 --show-cruft followed by $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && exit 1
+  has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && show_cruft_packages && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && exit 1
   crossgrade_debian
   ret=$?
   exit $ret   

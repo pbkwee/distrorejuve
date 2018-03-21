@@ -138,7 +138,7 @@ function is_vulnerable() {
 }
 
 function prep_ghost_output_dir() {
-if [ ! -d /root/deghostinfo ] ; then echo "dss:info: Creating /root/deghostinfo."; mkdir /root/deghostinfo; fi
+if [ ! -d /root/distrorejuveinfo ] ; then echo "dss:info: Creating /root/distrorejuveinfo."; mkdir /root/distrorejuveinfo; fi
 return 0
 }
 
@@ -427,7 +427,7 @@ if ! grep -qai "^6." /etc/debian_version; then return 0; fi
 if ! grep -qai "^ *deb.*stable" /etc/apt/sources.list ; then echo "dss:info: Not using 'stable' repo.  Not converting deb6 stable to squeeze"; return 0; fi
 
 prep_ghost_output_dir
-cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
+cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
 
 convertfile stable squeeze "debian.org" "" /etc/apt/sources.list
 convertfile stable squeeze "debian.net" "" /etc/apt/sources.list
@@ -479,7 +479,7 @@ if [ -z "$CODENAME" ]; then echo "dss:error: We require a codename here.  e.g. c
 grep -qai '^ *deb .*old-releases.ubuntu.com' /etc/apt/sources.list && ! grep -qai "^ *deb.*archive.ub*$CODENAME" /etc/apt/sources.list && if ! grep -qai "^ *deb.*security.ub.*$CODENAME" /etc/apt/sources.list; then echo "dss:info: Already running an 'old-releases' $CODENAME repository."; return 0; fi
 
 prep_ghost_output_dir
-cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
+cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
 
 echo "dss:info: Commenting out expired $CODENAME repository"
 sed -i "s@^ *deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@#deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@" /etc/apt/sources.list
@@ -575,7 +575,7 @@ function disable_debian_repos() {
   fi
   [ ! -z "$IS_DEBUG" ] && echo "dss:sources:disable_debian_repos:post:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')" 
   prep_ghost_output_dir
-  cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
+  cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: disable_debian_repos $name diff follows:"
   print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
@@ -625,7 +625,7 @@ function enable_debian_archive() {
     return 0
   fi 
   prep_ghost_output_dir
-  cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
+  cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: enabling debian archive repos.  diff follows:"
   print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff:sources: " $1}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
@@ -639,9 +639,9 @@ function print_uninstall_dovecot() {
   # trusty 2.9, precise 2.0, lucid (=10.4) 1.29 per https://launchpad.net/ubuntu/+source/dovecot
   echo "dss:info:Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
   echo "dss:info:Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "dss:info:Please remove dovecot.  Then re-install/reconfigure it afterwards.  Saving the current dovecot config to /root/deghostinfo/postconf.log.$$"
+  echo "dss:info:Please remove dovecot.  Then re-install/reconfigure it afterwards.  Saving the current dovecot config to /root/distrorejuveinfo/postconf.log.$$"
   prep_ghost_output_dir
-  postconf -n > /root/deghostinfo/postconf.log.$$
+  postconf -n > /root/distrorejuveinfo/postconf.log.$$
   echo apt-get -y remove $(dpkg -l | grep dovecot | grep ii | awk '{print $2}')
   # dovecot reinstall tips
   
@@ -682,7 +682,7 @@ function print_failed_dist_upgrade_tips() {
   echo "In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
   echo "In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
   echo "May be worth trying: aptitude -vv full-upgrade" 
-  echo "after attempting a fix manuall, rerun the bash deghost.sh  command"
+  echo "after attempting a fix manuall, rerun the bash distrorejuve.sh  command"
 }
 
 function dist_upgrade_lenny_to_squeeze() {
@@ -852,8 +852,8 @@ function crossgrade_debian() {
 
   # slightly different config file state name.  e.g. regular upgrade can remove things like dovecot if they were not used.
   # and this different file means they won't get reinstalled by mistake
-  [  ! -f /root/deghostinfo/crossgrade.preupgrade.dpkg.$$ ] && record_config_state /root/deghostinfo/crossgrade.preupgrade.dpkg.$$
-  [  -f /root/deghostinfo/crossgrade.preupgrade.dpkg.$$ ] && [  ! -f /root/deghostinfo/preupgrade.dpkg.$$ ] && cp /root/deghostinfo/crossgrade.preupgrade.dpkg.$$ /root/deghostinfo/preupgrade.dpkg.$$
+  [  ! -f /root/distrorejuveinfo/crossgrade.preupgrade.dpkg.$$ ] && record_config_state /root/distrorejuveinfo/crossgrade.preupgrade.dpkg.$$
+  [  -f /root/distrorejuveinfo/crossgrade.preupgrade.dpkg.$$ ] && [  ! -f /root/distrorejuveinfo/preupgrade.dpkg.$$ ] && cp /root/distrorejuveinfo/crossgrade.preupgrade.dpkg.$$ /root/distrorejuveinfo/preupgrade.dpkg.$$
   
   echo "dss:trace:Current architecture: $(dpkg --print-architecture)"
   echo "dss:trace:Foreign architectures: $(dpkg --print-foreign-architectures)"
@@ -893,8 +893,8 @@ function crossgrade_debian() {
       if [ $? -ne 0 ]; then 
         [ $? -ne 0 ] && echo "dss:error: dpkg install amd64.deb files failed" 2>&1 && return 1
       fi
-      [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
-      mv $debs /root/deghostinfo/$$
+      [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
+      mv $debs /root/distrorejuveinfo/$$
     fi
   fi
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
@@ -917,8 +917,8 @@ function crossgrade_debian() {
     local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | sed  -r 's/\(due to \S*?\)//g' | tr '\n' ' ')"
     [  -z "$essentialtoinstall" ] && break  
     local i=;
-    mkdir -p deghostinfo/$$/essentialdebs
-    cd deghostinfo/$$/essentialdebs
+    mkdir -p distrorejuveinfo/$$/essentialdebs
+    cd distrorejuveinfo/$$/essentialdebs
     echo "dss:trace: apt-get -f install had errors.  there may be some essential packages not installed.  trying to install 32 and 64 bit versions of: $essentialtoinstall"
     for i in $essentialtoinstall; do
       i=$(echo $i | sed 's/:i386//')
@@ -961,8 +961,8 @@ function crossgrade_debian() {
     
     [ -z "$essentialpackages" ] && break
     local debs="$(find /var/cache/apt/archives -name '*_amd64.deb')"
-    [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
-    [  ! -z "$debs" ] && mv $debs /root/deghostinfo/$$
+    [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
+    [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
     echo "dss:info: cross grading essential packages to download: $essentialpackages"
     apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages
     apt-get --download-only $APT_GET_INSTALL_OPTIONS install init:amd64 
@@ -972,7 +972,7 @@ function crossgrade_debian() {
     local debs="$(find /var/cache/apt/archives -name '*_amd64.deb')"
     [  ! -z "$debs" ] && dpkg_install $debs
     ret=$?
-    [  ! -z "$debs" ] && mv $debs /root/deghostinfo/$$
+    [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
     [ $ret -ne 0 ] && echo "dss:error: dpkg install essential amd64.deb files failed" 2>&1 && return 1
   done
   
@@ -1031,7 +1031,7 @@ function crossgrade_debian() {
   #bsd-mailx
   local loop=
   for loop in 0; do 
-    local fromfile="$(find /root/deghostinfo/ -mtime -${DAYS_UPGRADE_ONGOING} | grep crossgrade)"
+    local fromfile="$(find /root/distrorejuveinfo/ /root/deghostinfo/ -mtime -${DAYS_UPGRADE_ONGOING} 2>/dev/null | grep crossgrade)"
     [ ! -z "$fromfile" ] && fromfile="$(ls -1rt $fromfile | head -n 1)"
     [  -z "$fromfile" ] && break
     local uninstalled="$(print_config_state_changes "$fromfile" | grep '^dss:configdiff:statechanges:-installed:' | sed 's/.*installed://' | sed 's/:i386//' | sed 's/:amd64//' | grep -v '^ *$' | grep -v wpasupplicant | tr '\n' ' ')"
@@ -1189,15 +1189,15 @@ function cruft_packages0() {
           echo "dss:trace: cross grading downloading essential packages via download and dpkg_install."
           [  ! -z "$essentialpackages" ] && if apt-get --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages; then
             dpkg_install /var/cache/apt/archives/*_amd64.deb
-            [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
-            mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
+            [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
+            mv /var/cache/apt/archives/*amd64.deb /root/distrorejuveinfo/$$
             dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
           else
             echo "dss:trace: cross grading downloading essential packages (after download+install failed) via download and separate install" 
             apt-get $APT_GET_INSTALL_OPTIONS download $essentialpackages
             dpkg_install *_amd64.deb
-            [  ! -d /root/deghostinfo/$$ ] && mkdir /root/deghostinfo/$$
-            mv /var/cache/apt/archives/*amd64.deb /root/deghostinfo/$$
+            [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
+            mv /var/cache/apt/archives/*amd64.deb /root/distrorejuveinfo/$$
             dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
           fi
         done
@@ -1442,18 +1442,18 @@ function print_minimal_config_diff() {
 function print_config_state_changes() {
   prep_ghost_output_dir
   local now=$(date +%s)
-  record_config_state /root/deghostinfo/postupgrade.dpkg.$now
+  record_config_state /root/distrorejuveinfo/postupgrade.dpkg.$now
   # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
   local fromfile="${1}"
   if [  -z "$fromfile" ]; then
-    fromfile="$(find /root/deghostinfo/ -mtime -${DAYS_UPGRADE_ONGOING} | grep preupgrade)"
+    fromfile="$(find /root/distrorejuveinfo/ /root/deghostinfo/ -mtime -${DAYS_UPGRADE_ONGOING} 2>/dev/null | grep preupgrade)"
     [  ! -z "$fromfile" ] && fromfile="$(ls -1rt $fromfile | head -n 1)"
   fi 
-  [ -z "$fromfile" ] && fromfile=/root/deghostinfo/preupgrade.dpkg.$$
+  [ -z "$fromfile" ] && fromfile=/root/distrorejuveinfo/preupgrade.dpkg.$$
   # no prior changes just yet.
   [  ! -f  "$fromfile" ] && return 0
   echo "dss:info: Config changes to check.  e.g. different processes after upgrade.  e.g. different ports.  e.g. different apache status output.  e.g. changes to dpkg-old/dpkg-dist files.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
-  print_minimal_config_diff $fromfile /root/deghostinfo/postupgrade.dpkg.$now | awk '{print "dss:configdiff:statechanges:" $0}'
+  print_minimal_config_diff $fromfile /root/distrorejuveinfo/postupgrade.dpkg.$now | awk '{print "dss:configdiff:statechanges:" $0}'
   
   local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
   [  -z "$files" ] && echo "dss:info: Looks like the server is using all distro-provided config files (no local overrides).  That makes it easy."
@@ -1486,7 +1486,7 @@ function record_config_state() {
   prep_ghost_output_dir
   local file=$1
   if [ -z "$file" ]; then 
-    file="/root/deghostinfo/preupgrade.dpkg.$$"
+    file="/root/distrorejuveinfo/preupgrade.dpkg.$$"
   fi
   # don't overwrite the preupgrade file
   echo $file | grep -qai preupgrade && [ -f $file ] && return 0
@@ -1644,7 +1644,7 @@ for start in $ALL_UBUNTU; do
     echo "dss:info:Current Ubuntu distro is $current.  No newer/better distro.  Finished." 
     return 0 
   fi
-  cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
+  cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
   # comment out package entries
   sed -i "s@^ *deb \(.*\)ubuntu.com\(.*\)@#deb \1ubuntu.com\2@" /etc/apt/sources.list
   # add in new repo names
@@ -1704,7 +1704,7 @@ if grep -qai "^ *deb http://archive.debian.org/debian/ ${name}[ /-]" /etc/apt/so
 fi
 
 prep_ghost_output_dir
-cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
+cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
 
 # comment out the old entries
 convertfile $name $name debian.org "#" /etc/apt/sources.list
@@ -1769,7 +1769,7 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   for distro in $DEBIAN_CURRENT; do 
     if grep -qai "^ *deb.* ${distro}[ /-]" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.* ${distro}[ /-]" /etc/apt/sources.list; then
        echo "dss:info: adding the $distro security repository to the sources.list"
-       cp /etc/apt/sources.list /root/deghostinfo/sources.list.$(date +%Y%m%d.%s)
+       cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
        echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
        apt_get_update
     fi
@@ -1862,9 +1862,9 @@ rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/yum-metadata-parser-1.0
 rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/centos-release-4-8.i386.rpm
 rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/yum-2.4.3-4.el4.centos.noarch.rpm
 prep_ghost_output_dir
-if [ ! -e /root/deghostinfo/CentOS-Base.repo ]; then 
-  echo "dss:info: Running cp /etc/yum.repos.d/CentOS-Base.repo /root/deghostinfo/CentOS-Base.repo" 
-  cp /etc/yum.repos.d/CentOS-Base.repo /root/deghostinfo/CentOS-Base.repo
+if [ ! -e /root/distrorejuveinfo/CentOS-Base.repo ]; then 
+  echo "dss:info: Running cp /etc/yum.repos.d/CentOS-Base.repo /root/distrorejuveinfo/CentOS-Base.repo" 
+  cp /etc/yum.repos.d/CentOS-Base.repo /root/distrorejuveinfo/CentOS-Base.repo
 fi
 
 wget -nc -O /etc/yum.repos.d/CentOS-Base.repo http://vault.centos.org/4.9/CentOS-Base.repo
@@ -2071,7 +2071,7 @@ EOJ
 
 
 ret=0
-echo "dss:trace:deghost:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
+echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
 if [ "--usage" = "${ACTION:-$1}" ] ; then
   print_usage
 elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
@@ -2124,7 +2124,7 @@ elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   print_config_state_changes
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--source" = "${ACTION:-$1}" ] ; then 
-  echo "dss: Loading deghost functions"
+  echo "dss: Loading distrorejuve functions"
 elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
   print_info
   packages_upgrade

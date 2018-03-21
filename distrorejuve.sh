@@ -23,19 +23,19 @@ APT_GET_INSTALL_OPTIONS=' -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::C
 DAYS_UPGRADE_ONGOING="${DAYS_UPGRADE_ONGOING:-7}"
 function print_usage() {
   echo "
-# deghost
+# distrorejuve
 
-deghost is a utility that helps with upgrading distros. It works on a number of different distros (Ubuntu, 
+distrorejuve is a utility that helps with upgrading distros. It works on a number of different distros (Ubuntu, 
 Debian, Centos). It uses apt, yum and repository corrections as appropriate. It can dist upgrade between 
 multiple versions for Ubuntu and Debian.
 
 To get the latest version of this script:
 
-wget -O deghost.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/deghost/master/deghost.sh
+wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
 Example usage to dist upgrade to latest Debian or Ubuntu disto. First make a backup of your server. Then run:
 
-sudo bash deghost.sh --dist-upgrade | tee -a deghost.log
+sudo bash distrorejuve.sh --dist-upgrade | tee -a distrorejuve.log
 
 Uses:
 - Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
@@ -81,11 +81,11 @@ Run with --fix-vuln to try and fix your server (doing minimal change e.g. just a
 
 Run with --break-eggs will run a --dist-upgrade if the server is vulnerable.
 
-Use with --source if you just wish to have the deghost functions available to you for testing
+Use with --source if you just wish to have the distrorejuve functions available to you for testing
 
 Written by Peter Bryant at http://launchtimevps.com
 
-Latest version (or thereabouts) will be available at https://github.com/pbkwee/deghost
+Latest version (or thereabouts) will be available at https://github.com/pbkwee/distrorejuve
 "
 }
 

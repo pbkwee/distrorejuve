@@ -5,7 +5,7 @@ export APT_LISTCHANGES_FRONTEND=none
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
-LTS_UBUNTU="dapper hardy lucid precise trusty xenial"
+LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic"
 #ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
 OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic"
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety"
@@ -824,7 +824,7 @@ function dpkg_install() {
 }
 
 function crossgrade_debian() {
-  [  ! -f /etc/debian_version ] && return 0
+  [  ! -f /etc/debian_version ] && echo "dss:info: Only debian and Ubuntu crossgrades are supported, but not $(print_distro_info)." && return 1
   
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1

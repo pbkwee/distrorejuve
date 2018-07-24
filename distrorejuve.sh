@@ -14,7 +14,9 @@ NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || e
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
 # in egrep code be aware of etch/stretch matching
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
-DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN squeeze-lts"
+# no archive for wheezy
+DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" | sed 's/wheezy//')"
+
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
 DEBIAN_CURRENT="jessie stretch"
 IS_DEBUG=
@@ -341,6 +343,7 @@ function fix_dns() {
   if ! host google.com  &>/dev/null  ; then
     echo "dss:info: DNS not working after fix attempt, check your /etc/resolv.conf and set, say, nameserver 8.8.8.8"
   fi
+  return 0
 }
 
 function upgrade_precondition_checks() {
@@ -503,7 +506,7 @@ function add_missing_ubuntu_keys() {
   [ ! -x /usr/bin/apt-key ] && return 0
   print_distro_info | grep -qai ubuntu || return 0
   # import the lts key
-
+  return 0
 }
 
 function add_missing_debian_keys() {
@@ -525,7 +528,7 @@ function add_missing_debian_keys() {
     gpg --recv-key AED4B06F473041FA
     gpg -a --export AED4B06F473041FA | apt-key add -
   fi
-
+  return 0
 }
 
 # e.g. test with diff /etc/apt/sources.list <(disable_debian_repos squeeze)
@@ -675,7 +678,7 @@ function print_uninstall_dovecot() {
   #E: Sub-process /usr/bin/dpkg returned an error code (1)
   
   
-  
+  return 0
 }
 
 function print_failed_dist_upgrade_tips() {
@@ -699,6 +702,8 @@ export old_distro=squeeze
 export old_ver="inux 6"
 export new_distro=wheezy
 dist_upgrade_x_to_y
+ret=$?
+return $ret
 }
 
 function dist_upgrade_wheezy_to_jessie() {
@@ -1105,6 +1110,7 @@ function crossgrade_debian() {
 
   # check 64 bit versions here?
   # dpkg -l | grep libc-bin
+  return 0
 }
 
 # e.g. has_cruft_packages && show_cruft_packages && reduce_cruft_packages
@@ -1315,18 +1321,21 @@ exit 0' > $i
     echo "dss:info: udev install result $ret $(dpkg -l | grep udev)"
     break 
   done
+  return 0
 }
 
 function dist_upgrade_x_to_y() {
 [ ! -e /etc/apt/sources.list ] && return 0
+echo "dss:trace:dist_upgrade_x_to_y:checking:olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
+
 if ! grep -qai "^ *deb.*$old_distro" -- /etc/apt/sources.list; then
+  echo "dss:info: Not finding $old_distro in /etc/apt/sources.list.  Skipping $old_distro to $new_distro"
   return 0
 fi
 if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
-return 0
+  echo "dss:info: Not finding $old_distro or $old_ver in lsb_release output.  Skipping $old_distro to $new_distro"
+  return 0
 fi
-
-echo "dss:trace:dist_upgrade_x_to_y:olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 
 if [ "$old_distro" == "lenny" ]; then
   if dpkg -l | grep -qai '^i.*dovecot'; then
@@ -1341,11 +1350,11 @@ upgrade_precondition_checks || return $?
 
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_upgrade:old:$old_distro:new:$new_distro"
 apt_get_upgrade
-ret=$?
+local ret=$?
 apt-get clean
 apt-get $APT_GET_INSTALL_OPTIONS autoremove
 if [ $ret -ne 0 ]; then
-  echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_${old_distro}_to_${new_distro}"
+  echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_x_to_y:${old_distro}_to_${new_distro}"
   return 1
 fi
 
@@ -1363,6 +1372,7 @@ enable_debian_archive
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 apt_get_dist_upgrade
 ret=$?
+echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
 
 apt-get $APT_GET_INSTALL_OPTIONS  autoremove
 if [ $ret -eq 0 ]; then
@@ -1422,7 +1432,8 @@ done
 
 # cleanup
 cd - >/dev/null
-rm -rf /root/pkgdiff.$$ 
+rm -rf /root/pkgdiff.$$
+return 0 
 }
 
 function print_minimal_config_diff() {
@@ -1479,7 +1490,8 @@ function print_config_state_changes() {
   [ -d /etc/apache2/sites-available ] && [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include.*sites-.*conf' /etc/apache2/apache2.conf && local nonconfsitefiles=$(find /etc/apache2/sites-available -type f | egrep -v '\.conf$|dpkg-')
   for file in $nonconfsitefiles; do
     echo "dss:warn: Apache config file '$file' should have a .conf extension: mv $file $file.conf;a2ensite $(basename $file).conf"   
-  done   
+  done 
+  return 0  
 }
 
 function record_config_state() {
@@ -1511,6 +1523,7 @@ function record_config_state() {
   ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' | egrep -v '^process: \[|COMMAND|init' | sort | uniq >> $file
   
   [  -x /usr/bin/dpkg ] && echo "Installed packages:" >> $file && dpkg -l | grep '^ii' | awk '{print $2}' | sed 's/:.*//' | sort | grep -v '^lib' | awk '{ print "installed: " $0 }' >> $file
+  return 0
 }
 
 function apt_get_update() {
@@ -1592,7 +1605,7 @@ if [ $ret -ne 0 ] ; then
 fi
 # report -dist or -old file changes
 tweak_broken_configs
-echo "dss:trace:dist_upgrade completed $(print_distro_info)"
+echo "dss:trace:dist_upgrade completed $(print_distro_info).  ret=$ret"
 
 return $ret
 }
@@ -1742,7 +1755,8 @@ which lsb_release >/dev/null 2>&1 && return 0
 echo "dss:info: Missing lsb release command.  trying to install it."
 apt_get_update
 apt_get_install lsb-release
-return $?
+ret=$?
+return $ret
 }
 
 function fix_via_apt_install() {
@@ -2044,6 +2058,7 @@ apt_get_upgrade || return $?
 
 yum_upgrade || return $?
 
+return 0
 }
 
 function dist_upgrade_to_latest() {

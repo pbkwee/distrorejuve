@@ -642,10 +642,11 @@ function print_uninstall_dovecot() {
   # trusty 2.9, precise 2.0, lucid (=10.4) 1.29 per https://launchpad.net/ubuntu/+source/dovecot
   echo "dss:info:Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
   echo "dss:info:Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "dss:info:Please remove dovecot.  Then re-install/reconfigure it afterwards.  Saving the current dovecot config to /root/distrorejuveinfo/postconf.log.$$"
+  echo "dss:info:Saving the current dovecot config to /root/distrorejuveinfo/postconf.log.$$"
+  echo "dss:info:Please remove dovecot.  You may do that with the following commands:"
   prep_ghost_output_dir
   postconf -n > /root/distrorejuveinfo/postconf.log.$$
-  echo apt-get -y remove $(dpkg -l | grep dovecot | grep ii | awk '{print $2}')
+  echo apt-get -y remove $(dpkg -l | grep dovecot | egrep -i 'ii|iF|iU' | awk '{print $2}')
   # dovecot reinstall tips
   
   # apt-get install dovecot-pop3d dovecot-imapd dovecot-managesieved dovecot-sieve
@@ -729,6 +730,13 @@ function rm_overwrite_files() {
    [  -z "$1" ] && return 1
    [  ! -f "$1" ] && return 1
    local tmplog="$1"
+   
+   
+  if egrep -qi "doveconf: Fatal: " "$tmplog"; then
+    # e.g. doveconf: Fatal: Error in configuration file /etc/dovecot/dovecot.conf: ssl enabled, but ssl_cert not set
+    echo "dss:error: issue with dovecot config.  Resolve (e.g. by removing dovecot for fixing the issue). $(egrep -i "doveconf: Fatal: " "$tmplog")"
+    print_uninstall_dovecot
+  fi
   #  trying to overwrite shared '/usr/share/doc/libkmod2/changelog.Debian.gz', which is different from other instances of package libkmod2:amd64
   # Unpacking libpython2.7-minimal:amd64 (2.7.12-1ubuntu0~16.04.3) ...
   # dpkg: error processing archive /var/cache/apt/archives/libpython2.7-minimal_2.7.12-1ubuntu0~16.04.3_amd64.deb (--install):
@@ -773,7 +781,9 @@ function apt_get_f_install() {
   local tmplog=$(mktemp "tmplog.aptgetfinstall.XXXXXX.log")
   apt-get $APT_GET_INSTALL_OPTIONS -f install | tee $tmplog
   local ret=${PIPESTATUS[0]}
-  [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS -f install && ret=$?
+  if [  $ret -ne 0 ]; then 
+    rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS -f install && ret=$?
+  fi
   rm -rf "$tmplog"
   return $ret
 }

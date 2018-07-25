@@ -513,7 +513,7 @@ function add_missing_debian_keys() {
   [ ! -e /etc/apt/sources.list ] && return 0
   [ ! -x /usr/bin/apt-key ] && return 0
   print_distro_info | grep -qai debian || return 0
-  echo "dss:info:checking debian keys"
+  echo "dss:info: checking debian keys"
   # import the lts key
   # sometimes its like '...AD62 4692 5553' other times its like '...AD6246925553'
   if ! apt-key list | egrep -qai "4692.*5553"; then
@@ -640,10 +640,10 @@ function print_uninstall_dovecot() {
   [ ! -f /etc/apt/sources.list ] && return 0
   ! dpkg -l | grep -qai '^i.*dovecot' && return 0
   # trusty 2.9, precise 2.0, lucid (=10.4) 1.29 per https://launchpad.net/ubuntu/+source/dovecot
-  echo "dss:info:Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
-  echo "dss:info:Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "dss:info:Saving the current dovecot config to /root/distrorejuveinfo/postconf.log.$$"
-  echo "dss:info:Please remove dovecot.  You may do that with the following commands:"
+  echo "dss:info: Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
+  echo "dss:info: Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
+  echo "dss:info: Saving the current dovecot config to /root/distrorejuveinfo/postconf.log.$$"
+  echo "dss:info: Please remove dovecot.  You may do that with the following commands:"
   prep_ghost_output_dir
   postconf -n > /root/distrorejuveinfo/postconf.log.$$
   echo apt-get -y remove $(dpkg -l | grep dovecot | egrep -i 'ii|iF|iU' | awk '{print $2}')
@@ -693,6 +693,8 @@ function dist_upgrade_lenny_to_squeeze() {
 export old_distro=lenny
 export old_ver="inux 5"
 export new_distro=wheezy
+export new_ver="inux 6"
+
 dist_upgrade_x_to_y
 ret=$?
 return $ret
@@ -702,6 +704,8 @@ function dist_upgrade_squeeze_to_wheezy() {
 export old_distro=squeeze
 export old_ver="inux 6"
 export new_distro=wheezy
+export new_ver="inux 7"
+
 dist_upgrade_x_to_y
 ret=$?
 return $ret
@@ -711,6 +715,7 @@ function dist_upgrade_wheezy_to_jessie() {
 export old_distro=wheezy
 export old_ver="inux 7"
 export new_distro=jessie
+export new_ver="inux 8"
 dist_upgrade_x_to_y
 ret=$?
 return $ret
@@ -720,6 +725,7 @@ function dist_upgrade_jessie_to_stretch() {
 export old_distro=jessie
 export old_ver="inux 8"
 export new_distro=stretch
+export new_ver="inux 9"
 dist_upgrade_x_to_y
 ret=$?
 return $ret
@@ -736,7 +742,12 @@ function rm_overwrite_files() {
     # e.g. doveconf: Fatal: Error in configuration file /etc/dovecot/dovecot.conf: ssl enabled, but ssl_cert not set
     echo "dss:error: issue with dovecot config.  Resolve (e.g. by removing dovecot for fixing the issue). $(egrep -i "doveconf: Fatal: " "$tmplog")"
     print_uninstall_dovecot
+  elif egrep -qi "doveconf: Warning: Obsolete setting in" "$tmplog"; then
+    echo "dss:warn: issue with obsolete dovecot config.  $(egrep -i "doveconf: Fatal: " "$tmplog")"
+    echo "dss:warn: May pay to remove dovecot per the instructions below."
+    print_uninstall_dovecot
   fi
+  
   #  trying to overwrite shared '/usr/share/doc/libkmod2/changelog.Debian.gz', which is different from other instances of package libkmod2:amd64
   # Unpacking libpython2.7-minimal:amd64 (2.7.12-1ubuntu0~16.04.3) ...
   # dpkg: error processing archive /var/cache/apt/archives/libpython2.7-minimal_2.7.12-1ubuntu0~16.04.3_amd64.deb (--install):
@@ -846,7 +857,7 @@ function crossgrade_debian() {
 
   local bittedness=$(getconf LONG_BIT)
   if echo $bittedness | grep -qai 64; then
-    echo "dss:info:FYI getconf reports 64 bits."
+    echo "dss:info: FYI getconf reports 64 bits."
     #[ $(dpkg -l | grep '^ii ' | grep ':i386' | wc -l ) -gt 0 ] && echo "i386 packages on this server (may need tidying up): $(dpkg -l | grep '^ii ' | grep ':i386')"
     #return 0
     # may be part way through.  may still be 386 packages.  so carry on with the cross grade.
@@ -1254,22 +1265,22 @@ function tweak_broken_configs() {
     fi
     if grep -qa '^Include /etc/apache2/httpd.conf' /etc/apache2/apache2.conf && [ ! -f /etc/apache2/httpd.conf ]; then 
       replace "Include /etc/apache2/httpd.conf" "#Include /etc/apache2/httpd.conf" -- /etc/apache2/apache2.conf
-      echo "dss:info:Commenting out Include /etc/apache2/httpd.conf for non existent file"
+      echo "dss:info: Commenting out Include /etc/apache2/httpd.conf for non existent file"
     fi
     if grep -qa '^Include httpd.conf' /etc/apache2/apache2.conf && [ ! -f /etc/apache2/httpd.conf ]; then 
       replace "Include httpd.conf" "#Include httpd.conf" -- /etc/apache2/apache2.conf
-      echo "dss:info:Commenting out Include httpd.conf for non existent file"
+      echo "dss:info: Commenting out Include httpd.conf for non existent file"
     fi
     if ! /usr/sbin/apache2ctl -S &> /dev/null && grep -qa '^LockFile ' /etc/apache2/apache2.conf; then
         replace "LockFile" "#LockFile" -- /etc/apache2/apache2.conf
-        echo "dss:info:Commented out Lockfile in /etc/apache2/apache2.conf"
+        echo "dss:info: Commented out Lockfile in /etc/apache2/apache2.conf"
     fi
     if [ -f /etc/apache2/mods-available/ssl.conf ] && /usr/sbin/apache2ctl -S 2>&1 | grep -qai "Invalid command 'SSLMutex'"; then
       replace "SSLMutex" "#SSLMutex" -- /etc/apache2/mods-available/ssl.conf
     fi
     if /usr/sbin/apache2ctl -S 2>&1 | grep -qai 'Ignoring deprecated use of DefaultType'; then
       replace "DefaultType" "#DefaultType" -- /etc/apache2/apache2.conf 
-      echo "dss:info:Commented out DefaultType in /etc/apache2/apache2.conf"
+      echo "dss:info: Commented out DefaultType in /etc/apache2/apache2.conf"
     fi
   fi 
   # error of sshd[1762]: Missing privilege separation directory: /var/run/sshd
@@ -1314,7 +1325,7 @@ function tweak_broken_configs() {
 declare -i random=$(expr $(ifconfig eth0 | grep -v inet6  | grep  "inet" | head -n 1 | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
 sleep ${random}
 exit 0' > $i
-    echo "dss:info:updating load delay script: $i"
+    echo "dss:info: updating load delay script: $i"
   done
   # fix missing udev
   while true; do
@@ -1353,7 +1364,7 @@ if [ "$old_distro" == "lenny" ]; then
     return 1
   fi
   add_missing_debian_keys
-  [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info:created /dev/pts"
+  [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
 fi
   
 upgrade_precondition_checks || return $?
@@ -1386,10 +1397,13 @@ echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_di
 
 apt-get $APT_GET_INSTALL_OPTIONS  autoremove
 if [ $ret -eq 0 ]; then
-	if lsb_release -a 2>/dev/null| egrep -qai '${new_distro}'; then
+	if lsb_release -a 2>/dev/null| egrep -qai '${new_distro}|${new_ver:-xxxxx}'; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
 	  echo "dss:info: dist-upgrade from ${old_distro} to ${new_distro} appears to have worked." 
 	  return 0; 
+	else
+	  echo "dss:warn: dist-upgrade from ${old_distro} appears to have failed.  lsb_release does not match '${new_distro}' or '${new_ver:-xxxxx}': $(lsb_release -a)"
+	  return 1
 	fi
 fi
 return 1
@@ -1435,7 +1449,7 @@ for modifiedconfigfile in $modifiedconfigfiles; do
   
   # pop a copy there so we can replace current file if desired
   [ -f "./${modifiedconfigfile}" ] && [ ! -f "${modifiedconfigfile}.dpkg-dist" ] && cp "./${modifiedconfigfile}" "${modifiedconfigfile}.dpkg-dist"
-  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:info:modifiedfilereplace:To replace edited file with dist file: mv $modifiedconfigfile $modifiedconfigfile.dpkg-old; mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
+  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:modifiedfilereplace:To replace edited file with dist file: mv $modifiedconfigfile $modifiedconfigfile.dpkg-old; mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
   # show a diff
   print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:configdiff:modifiedconfig:'$pkg':'$modifiedconfigfile':" $0}'
 done
@@ -1478,7 +1492,7 @@ function print_config_state_changes() {
   
   local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
   [  -z "$files" ] && echo "dss:info: Looks like the server is using all distro-provided config files (no local overrides).  That makes it easy."
-  [ ! -z "$files" ] && echo "dss:info:key:How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files?"
+  [ ! -z "$files" ] && echo "dss:info:key: How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files?"
   for file in $files; do
     # defer to the new and improved print_pkg_to_modified_diff function (debian/ubuntu only)
     echo $file | grep -q 'dpkg-dist' && continue 
@@ -1658,13 +1672,13 @@ for start in $ALL_UBUNTU; do
        removed="$remove $removed"
        candidates="$(echo $candidates | sed "s/$remove//")"
     done
-    echo "dss:info:current distro ($current) is an Ubuntu LTS.  Skipping non-LTS versions: $removed; Leaving LTS versions of: $candidates"
+    echo "dss:info: current distro ($current) is an Ubuntu LTS.  Skipping non-LTS versions: $removed; Leaving LTS versions of: $candidates"
   fi 
   # comment out current sources entries
   prep_ghost_output_dir
   local next=$(echo $candidates | awk '{print $1}')
   if [ -z "$next" ]; then
-    echo "dss:info:Current Ubuntu distro is $current.  No newer/better distro.  Finished." 
+    echo "dss:info: Current Ubuntu distro is $current.  No newer/better distro.  Finished." 
     return 0 
   fi
   cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
@@ -1862,7 +1876,7 @@ function yum_enable_rhel4() {
 [ ! -f /etc/redhat-release ] && return 0
 ! grep -qai 'release.* 4' /etc/redhat-release && return 0
 if which yum >/dev/null 2>&1; then echo "dss:info: yum enabled on a rhel4 distro already."; return 0; fi
-echo "dss:info:yum not enabled on $(print_distro_info).  Trying to enable it."
+echo "dss:info: yum not enabled on $(print_distro_info).  Trying to enable it."
 {
 rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/libxml2-2.6.16-12.6.i386.rpm
 rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/libxml2-python-2.6.16-12.6.i386.rpm

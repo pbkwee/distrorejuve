@@ -328,7 +328,6 @@ function print_info() {
   echo "dss:info: Checking for disk space on host"
   df -m | awk '{print "dss:dfm:" $0}'
   which dpkg-query >/dev/null && dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
-  print_pkg_to_modified_diff
   [ -f /etc/apt/sources.list ] && cat /etc/apt/sources.list | egrep -v '^$|^#' | awk '{print "dss:aptsources:" $0}'
   return 0
 }
@@ -683,10 +682,10 @@ function print_uninstall_dovecot() {
 }
 
 function print_failed_dist_upgrade_tips() {
-  echo "In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
-  echo "In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
-  echo "May be worth trying: aptitude -vv full-upgrade" 
-  echo "after attempting a fix manuall, rerun the bash distrorejuve.sh  command"
+  echo "dss:warn: In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
+  echo "dss:warn: In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
+  echo "dss:warn: May be worth trying: aptitude -vv full-upgrade" 
+  echo "dss:warn: after attempting a fix manually, rerun the bash distrorejuve.sh  command"
 }
 
 function dist_upgrade_lenny_to_squeeze() {
@@ -1025,7 +1024,7 @@ function crossgrade_debian() {
     [  -z "$amd64toinstall" ] && [  -z "$i386toremove" ] && break
     local ret=0   
     apt_get_install $amd64toinstall && apt_get_remove $i386toremove
-    [  $? -ne 0 ] && ret=$((ret+1))    
+    [  $? -ne 0 ] && ret=$(($ret+1))    
     echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages."
     local pkg=
     local i386toremove="$(dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//')"
@@ -1035,7 +1034,7 @@ function crossgrade_debian() {
       local lret=$?
       # fwiw apt-get install $alreadyinstalled returns 0
       [  $lret -eq 0 ] && apt_get_remove $pkg:i386 
-      [  $lret -ne 0 ] && ret=$((ret+1)) && apt_get_f_install
+      [  $lret -ne 0 ] && ret=$(($ret+1)) && apt_get_f_install
     done
     [  $ret -eq 0 ] && break
   done
@@ -2123,64 +2122,73 @@ elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
 elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
+  [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_squeeze_to_wheezy
-  ret=$?
+  [ $? -ne 0 ] && ret=$(($ret+1))
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
+  [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_squeeze_to_wheezy
+  [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_wheezy_to_jessie
-  ret=$?
+  [ $? -ne 0 ] && ret=$(($ret+1))
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
+  [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_squeeze_to_wheezy
+  [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_wheezy_to_jessie
+  [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_jessie_to_stretch
-  ret=$?
-  print_config_state_changes
-  
-  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_ubuntu_to_latest
-  ret=$?
-  ret=$?
-  print_config_state_changes
-  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
 elif [ "--to-next-ubuntu" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_ubuntu_to_latest 1
-  ret=$?
-  print_config_state_changes
-  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
 elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
-  ret=$?
-  print_config_state_changes
-  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
 elif [ "--source" = "${ACTION:-$1}" ] ; then 
   echo "dss: Loading distrorejuve functions"
 elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
   print_info
   packages_upgrade
-  ret=$?
-  print_config_state_changes
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
 elif [ "--dist-upgrade" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_to_latest
-  ret=$?
-  print_config_state_changes
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
 elif [ "--dist-update" = "${ACTION:-$1}" ] ; then
   print_info
   yum_upgrade
+  [ $? -ne 0 ] && ret=$(($ret+1))
   packages_update
+  [ $? -ne 0 ] && ret=$(($ret+1))
   apt_get_dist_upgrade
-  ret=$?
-  print_config_state_changes
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
 elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then 
   fix_vuln
   if ! is_fixed; then
@@ -2220,8 +2228,9 @@ elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
   fi
   has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && show_cruft_packages && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && exit 1
   crossgrade_debian
-  ret=$?
-  print_config_state_changes
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
   exit $ret   
 elif [ "--show-changes" = "${ACTION:-$1}" ] ; then
   print_config_state_changes

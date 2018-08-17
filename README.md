@@ -48,6 +48,8 @@ Run with --fix-vuln to try and fix your server (doing minimal change e.g. just a
 
 Run with --break-eggs will run a --dist-upgrade if the server is vulnerable.
 
+Run with --to-64bit to convert a 32 bit distro to 64 bit (beta)
+
 Use with --source if you just wish to have the distrorejuve functions available to you for testing
 
 Written by Peter Bryant at http://launchtimevps.com

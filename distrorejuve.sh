@@ -61,6 +61,8 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-update to update packages on the current distro version (no distro version change).
 
+Run with --show-changes to report the differences pre/post upgrading (packages, config files, ports, etc).
+
 Run with --show-cruft to see packages that do not belong to the current distro.  e.g. leftover packages from older distros.  And to see 32 bit packages installed on 64 bit distros.
 
 Run with --remove-cruft to remove old packages and 32 bit applications on 64 bit distros.
@@ -362,8 +364,8 @@ function upgrade_precondition_checks() {
     local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'libx11|libx11-data|x11-common|xauth|xfonts-encodings|xfonts-utils|msttcorefonts' | tr '\r\n' ' ')"
   fi
   if [  ! -z "$libx11" ]; then
-    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y"
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
+    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y"
     [ -z "$IGNOREX11" ] && ret=$(($ret+1))
   fi
    

@@ -1398,7 +1398,7 @@ echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_di
 
 apt-get $APT_GET_INSTALL_OPTIONS  autoremove
 if [ $ret -eq 0 ]; then
-	if lsb_release -a 2>/dev/null| egrep -qai '${new_distro}|${new_ver:-xxxxx}'; then
+	if lsb_release -a 2>/dev/null| egrep -qai "${new_distro}|${new_ver:-xxxxx}"; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
 	  echo "dss:info: dist-upgrade from ${old_distro} to ${new_distro} appears to have worked." 
 	  return 0; 

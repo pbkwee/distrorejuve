@@ -775,7 +775,13 @@ function apt_get_remove() {
   apt-get $APT_GET_INSTALL_OPTIONS remove $@ | tee $tmplog
   local ret=${PIPESTATUS[0]}
   [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
-  [  $ret -ne 0 ] && echo "$@" | egrep -qai 'gcc-6-base:i386' && egrep -qai 'systemd : Depends: libcap2-bin' && echo "dss:info: attempting to install libcap2-bin since gcc-6-base remove failed." && apt_get_install libcap2-bin:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $@ && ret=$? 
+  #if [  $ret -ne 0 ] && echo "$@" | egrep -qai 'gcc-6-base:i386'; then
+  #fi
+  if [  $ret -ne 0 ] && echo "$@" | egrep -qai 'gcc-6-base:i386'; then
+    if egrep -qai 'systemd : Depends: libcap2-bin' "$tmplog"; then
+      echo "dss:info: attempting to install libcap2-bin since gcc-6-base remove failed." && apt_get_install libcap2-bin:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
+    fi
+  fi 
   rm -rf "$tmplog"
   return $ret
 }

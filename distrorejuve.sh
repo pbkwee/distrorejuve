@@ -2306,25 +2306,25 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   dist_upgrade_jessie_to_stretch
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
+  [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes" 
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_ubuntu_to_latest
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
+  [ $ret -eq 0 ] && echo "dss:info: --to-latest-lts completed ok.  use $0 --show-changes to see changes"
 elif [ "--to-next-ubuntu" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_ubuntu_to_latest 1
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
+  [ $ret -eq 0 ] && echo "dss:info:  --to-next-ubuntu completed ok.  use $0 --show-changes to see changes" 
 elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
+  [ $ret -eq 0 ] && echo "dss:info:  --to-squeeze completed ok.  use $0 --show-changes to see changes" 
 elif [ "--source" = "${ACTION:-$1}" ] ; then 
   echo "dss: Loading distrorejuve functions"
 elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
@@ -2332,13 +2332,13 @@ elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
   packages_upgrade
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
+  [ $ret -eq 0 ] && echo "dss:info:  --upgrade completed ok.  use $0 --show-changes to see changes" 
 elif [ "--dist-upgrade" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_to_latest
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
+  [ $ret -eq 0 ] && echo "dss:info:  --dist-upgrade completed ok.  use $0 --show-changes to see changes" 
 elif [ "--dist-update" = "${ACTION:-$1}" ] ; then
   print_info
   yum_upgrade
@@ -2348,7 +2348,7 @@ elif [ "--dist-update" = "${ACTION:-$1}" ] ; then
   apt_get_dist_upgrade
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
+  [ $ret -eq 0 ] && echo "dss:info:  --dist-update completed ok.  use $0 --show-changes to see changes" 
 elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then 
   fix_vuln
   if ! is_fixed; then

@@ -361,12 +361,16 @@ function upgrade_precondition_checks() {
     # install ok installed utils zip
     # install ok installed vcs cvs
     # install ok installed vcs patch
-    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'libx11|libx11-data|x11-common|xauth|xfonts-encodings|xfonts-utils|msttcorefonts|gnome$|gnome-icon-theme|libsoup|gsettings-desktop|adwaita-icon-th|lib-xkd|mesa-util|xkb-data' | tr '\r\n' ' ')"
+    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'libx11|libx11-data|x11-common|xauth|xfonts-encodings|xfonts-utils|msttcorefonts|gnome$|gnome-icon-theme|libsoup|gsettings-desktop|adwaita-icon-th|lib-xkd|mesa-util|xkb-data|icon-the|ubuntu-mono|x11proto|xtrans-dev' | tr '\r\n' ' ')"
   fi
   if [  ! -z "$libx11" ]; then
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
-    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y"
-    [ -z "$IGNOREX11" ] && ret=$(($ret+1))
+    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y.  To automatically remove X11 libs use export REMOVEX11=Y"
+    if [ ! -z "$REMOVEX11" ]; then
+      apt-get -y remove x11-common $libx11; apt-get -y autoremove
+    else   
+      [ -z "$IGNOREX11" ] && ret=$(($ret+1))
+    fi
   fi
    
   # check that there is only a single package repo in use.  else mixing two distro versions is troublesome

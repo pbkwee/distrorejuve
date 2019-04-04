@@ -367,7 +367,7 @@ function upgrade_precondition_checks() {
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
     echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y.  To automatically remove X11 libs use export REMOVEX11=Y"
     if [ ! -z "$REMOVEX11" ]; then
-      apt-get -y remove x11-common $libx11; apt-get -y autoremove
+      apt-get -y remove x11-common $libx11 || ret=$(($ret+1)); apt-get -y autoremove
     else   
       [ -z "$IGNOREX11" ] && ret=$(($ret+1))
     fi

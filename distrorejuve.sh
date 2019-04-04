@@ -398,14 +398,16 @@ function upgrade_precondition_checks() {
       ret=$(($ret+1))
     fi
     local otherrepos=$(egrep -iv '^ *#|^ *$' /etc/apt/sources.list | grep backports | head -n 1)
-    if [ ! -z "$otherrepos" ]; then
-      echo "dss:warn:/etc/apt/sources.list looks like it contains a backports repository.  comment out before proceeding?: $otherrepos"
+    if [ ! -z "$otherrepos" ] && [ -z "$IGNOREBACKPORTS" ] ; then
+      echo "dss:warn:/etc/apt/sources.list looks like it contains a backports repository.  comment out before proceeding?: $otherrepos.  Else export IGNOREBACKPORTS=Y"
       ret=$(($ret+1))
     fi
     if [ -d /etc/apt/sources.list.d/ ]; then
       local othersources=$(find /etc/apt/sources.list.d/ -type f)
       for othersource in $othersources; do
         # e.g. othersource = /etc/apt/sources.list.d/wheezy-backports.list
+        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | grep backport | head -n 1)
+        if [ ! -z "$otherrepos" ] && [ ! -z "$IGNOREBACKPORTS" ] ; then continue; fi
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
         if [ ! -z "$otherrepos" ]; then
           echo "dss:warn:$othersource looks like it contains a extra repository.  disable file before proceeding?: $otherrepos"

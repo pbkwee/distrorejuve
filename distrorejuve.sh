@@ -2,6 +2,8 @@
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
 
+# https://superuser.com/questions/1456989/how-to-configure-apt-in-debian-buster-after-release buster InRelease' changed its 'Version' value from '' to '10.0'  Run 'apt list --upgradable' to see them. apt-get update --allow-releaseinfo-change
+
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
@@ -11,14 +13,14 @@ OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid 
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cuttle"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
-ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
+ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
 # in egrep code be aware of etch/stretch matching
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
 # no archive for wheezy
 DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" | sed 's/wheezy//')"
 
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
-DEBIAN_CURRENT="jessie stretch"
+DEBIAN_CURRENT="jessie stretch buster"
 IS_DEBUG=
 APT_GET_INSTALL_OPTIONS=' -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss '
 # export this variable, e.g. to DAYS_UPGRADE_ONGOING=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
@@ -75,7 +77,7 @@ Run with --to-wheezy to get from squeeze to wheezy
 
 Run with --to-jessie to get from an older distro to jessie
 
-Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie to stretch 9
+Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch to buster 10
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
@@ -354,9 +356,15 @@ function upgrade_precondition_checks() {
     echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp.  To skip this check run: export IGNOREKERNEL=Y"
     [ -z "$IGNOREKERNEL" ] && ret=$(($ret+1))
   fi
+  if [ -f /etc/debian_version ] && [ -f /etc/apt/sources.list ] && [ "0" == "$(cat /etc/apt/sources.list | egrep -v '^$|^#' | wc -l)" ]; then
+    echo "dss:warn:/etc/apt/sources.list is empty and does not have any valid lines it it."
+    ret=$(($ret+1))
+  fi
+  # e.g. set for --upgrade.  other repos probably fine.  Only an issue if dist-upgrading.
+  [ ! -z "$IGNOREOTHERREPOS" ] && return $ret
   # ii  dmidecode                       2.9-1.2build1                           Dump Desktop Management Interface data
   local libx11=
-  if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
+  which dpkg >/dev/null 2>&1 && if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
     # ignoring some packages since they are 'fine'.  and typically some of them (eg libx11) are required by things like imagemagick and php-gd
     # install ok installed utils zip
     # install ok installed vcs cvs
@@ -403,7 +411,7 @@ function upgrade_precondition_checks() {
       ret=$(($ret+1))
     fi
     if [ -d /etc/apt/sources.list.d/ ]; then
-      local othersources=$(find /etc/apt/sources.list.d/ -type f)
+      local othersources=$(find /etc/apt/sources.list.d/ -type f | grep -v save)
       for othersource in $othersources; do
         # e.g. othersource = /etc/apt/sources.list.d/wheezy-backports.list
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | grep backport | head -n 1)
@@ -420,10 +428,6 @@ function upgrade_precondition_checks() {
     
   fi
   
-  if [ -f /etc/debian_version ] && [ -f /etc/apt/sources.list ] && [ "0" == "$(cat /etc/apt/sources.list | egrep -v '^$|^#' | wc -l)" ]; then
-    echo "dss:warn:/etc/apt/sources.list is empty and does not have any valid lines it it."
-    ret=$(($ret+1))
-  fi
   return $ret
 }
 function convert_deb_6_stable_repo_to_squeeze() {
@@ -734,6 +738,16 @@ export old_distro=jessie
 export old_ver="inux 8"
 export new_distro=stretch
 export new_ver="inux 9"
+dist_upgrade_x_to_y
+ret=$?
+return $ret
+}
+
+function dist_upgrade_stretch_to_buster() {
+export old_distro=stretch
+export old_ver="inux 9"
+export new_distro=buster
+export new_ver="inux 10"
 dist_upgrade_x_to_y
 ret=$?
 return $ret
@@ -2260,6 +2274,7 @@ function dist_upgrade_to_latest() {
   dist_upgrade_squeeze_to_wheezy || return $?
   dist_upgrade_wheezy_to_jessie || return $?
   dist_upgrade_jessie_to_stretch || return $?
+  dist_upgrade_stretch_to_buster || return $?
   dist_upgrade_ubuntu_to_latest || return $?
   apt_get_dist_upgrade || return $?
 }
@@ -2312,6 +2327,8 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_jessie_to_stretch
   [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_stretch_to_buster
+  [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes" 
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
@@ -2336,6 +2353,7 @@ elif [ "--source" = "${ACTION:-$1}" ] ; then
   echo "dss: Loading distrorejuve functions"
 elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
   print_info
+  IGNOREOTHERREPOS=Y
   packages_upgrade
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"

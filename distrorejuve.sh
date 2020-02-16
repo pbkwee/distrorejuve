@@ -416,6 +416,10 @@ function upgrade_precondition_checks() {
         # e.g. othersource = /etc/apt/sources.list.d/wheezy-backports.list
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | grep backport | head -n 1)
         if [ ! -z "$otherrepos" ] && [ ! -z "$IGNOREBACKPORTS" ] ; then continue; fi
+        # this version is used even for newer debian versions
+        # deb http://download.webmin.com/download/repository sarge contrib
+        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | egrep 'download.webmin.com/download/repository.*sarge' | head -n 1)
+        [ ! -z "$otherrepos" ] && continue
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
         if [ ! -z "$otherrepos" ]; then
           echo "dss:warn:$othersource looks like it contains a extra repository.  disable file before proceeding?: $otherrepos"
@@ -792,7 +796,7 @@ function rm_overwrite_files() {
 }
 
 function apt_get_remove() {
-  local tmplog=$(mktemp "tmplog.aptgetremove.XXXXXX.log")
+  local tmplog=$(mktemp "tmplog.aptgetremove.log.XXXXXX")
   apt-get $APT_GET_INSTALL_OPTIONS remove $@ | tee $tmplog
   local ret=${PIPESTATUS[0]}
   [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
@@ -810,7 +814,7 @@ function apt_get_remove() {
 }
 
 function apt_get_install() {
-  local tmplog=$(mktemp "tmplog.aptgetinstall.XXXXXX.log")
+  local tmplog=$(mktemp "tmplog.aptgetinstall.log.XXXXXX")
   apt-get $APT_GET_INSTALL_OPTIONS install $@ | tee $tmplog
   local ret=${PIPESTATUS[0]}
   [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS install $@ && ret=$?
@@ -822,7 +826,7 @@ function apt_get_install() {
 }
 
 function apt_get_f_install() {
-  local tmplog=$(mktemp "tmplog.aptgetfinstall.XXXXXX.log")
+  local tmplog=$(mktemp "tmplog.aptgetfinstall.log.XXXXXX")
   apt-get $APT_GET_INSTALL_OPTIONS -f install | tee $tmplog
   local ret=${PIPESTATUS[0]}
   if [  $ret -ne 0 ]; then 
@@ -837,7 +841,7 @@ function apt_get_f_install() {
 
 function dpkg_install() {
   [  -z "$1" ] && return 0
-  local tmplog=$(mktemp "tmplog.dpkginstall.XXXXXX.log")
+  local tmplog=$(mktemp "tmplog.dpkginstall.log.XXXXXX")
   dpkg --force-confnew --force-confdef --force-confmiss --install $@ 2>&1 | tee "$tmplog"
   ret=${PIPESTATUS[0]}
   if [  $ret -eq 0 ]; then
@@ -902,7 +906,11 @@ function check_systemd_install_matches_init() {
   #systemd   1 root  rtd       DIR              202,1     4096          2 /
   #systemd   1 root  txt       REG              202,1  1141448     238139 /lib/systemd/systemd
 
-  ps auxf | egrep -qai '^root +1 +.*init' && lsof -p 1 | grep -qai systemd || psservicemanager="${psservicemanager}sysvinit"
+  if ps auxf | egrep -qai '^root +1 +.*init'; then 
+    if ! lsof -p 1 | grep -qai systemd; then
+      psservicemanager="${psservicemanager}sysvinit"
+    fi
+  fi
   ps auxf | egrep -qai '^root +1 +.*systemd' && psservicemanager="${psservicemanager}systemd"
   [ -z "$psservicemanager" ] && lsof -p 1 | grep -qai systemd && psservicemanager="${psservicemanager}systemd"
   
@@ -1327,7 +1335,7 @@ function remove_cruft_packages() {
 function cruft_packages0() {
   [  ! -f /etc/debian_version ] && return 0
   [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
-  local cruftlog=$(mktemp "cruftpackages.XXXXXX.log")
+  local cruftlog=$(mktemp "cruftpackages.log.XXXXXX")
   [ "$1" = "show" ] && local show="true"
   [ "$1" = "has" ] && local has="true" && local hasold="yes" && local has32bit="true"
   [ "$1" = "remove" ] || [  -z "$1" ]&& local remove="true"
@@ -1350,7 +1358,7 @@ function cruft_packages0() {
     has_cruft=$((has_cruft+1))
     [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
+      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | grep -v '^lib|webmin' | awk '{print $1}' | tr '\n' ' ')"
       # e.g. oldpkgstoremove has mysql-server-5.0:i386 mysql-server-core-5.0:i386
       [  $? -ne 0 ] && commandret=$((commandret+1))
       # /var/log/mysql/error.log:

@@ -954,7 +954,7 @@ function crossgrade_debian() {
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
   
-  lsb_release -a 2>/dev/null | egrep -qai '\setch|lenny|squeeze|wheezy|jessie' && echo "dss:error: Older (pre stretch) Debian distros have dependency issues preventing crossgrades.  $0 --dist-upgrade prior to cross grading." && return 1 
+  lsb_release -a 2>/dev/null | egrep -qai 'stretch|lenny|squeeze|wheezy|jessie' && echo "dss:error: Older (pre stretch) Debian distros have dependency issues preventing crossgrades.  $0 --dist-upgrade prior to cross grading." && return 1 
   
   if ! check_systemd_install_matches_init; then 
     echo "dss:error: system needs a reboot prior to cross grading to fully switch to systemd." 2>&1 
@@ -1359,7 +1359,7 @@ function cruft_packages0() {
     has_cruft=$((has_cruft+1))
     [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | grep -v '^lib|webmin' | awk '{print $1}' | tr '\n' ' ')"
+      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | egrep -v '^lib|webmin' | awk '{print $1}' | tr '\n' ' ')"
       # e.g. oldpkgstoremove has mysql-server-5.0:i386 mysql-server-core-5.0:i386
       [  $? -ne 0 ] && commandret=$((commandret+1))
       # /var/log/mysql/error.log:

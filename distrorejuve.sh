@@ -7,10 +7,10 @@ export APT_LISTCHANGES_FRONTEND=none
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
-LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic"
+LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal"
 #ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
-OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cuttle"
+OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco"
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
@@ -1497,7 +1497,12 @@ function tweak_broken_configs() {
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:pre:" $0}'
     
     apt_get_install mysql-server
-    if [ $? -ne 0 ]; then break; fi
+    if [ $? -ne 0 ]; then
+      apt_get_install default-mysql-server 
+    fi
+    if [ $? -ne 0 ]; then
+      break;
+    fi
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:post:" $0}'
     break
   done

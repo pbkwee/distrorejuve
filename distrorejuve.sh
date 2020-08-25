@@ -7,10 +7,10 @@ export APT_LISTCHANGES_FRONTEND=none
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
-LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic"
+LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal"
 #ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
-OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cuttle"
+OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco"
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
@@ -419,6 +419,7 @@ function upgrade_precondition_checks() {
         if [ ! -z "$otherrepos" ] && [ ! -z "$IGNOREBACKPORTS" ] ; then continue; fi
         # this version is used even for newer debian versions
         # deb http://download.webmin.com/download/repository sarge contrib
+        # note webmin repos name is sarge even on other debian/ubuntu versions
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | egrep 'download.webmin.com/download/repository.*sarge' | head -n 1)
         [ ! -z "$otherrepos" ] && continue
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
@@ -1496,10 +1497,31 @@ function tweak_broken_configs() {
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:pre:" $0}'
     
     apt_get_install mysql-server
-    if [ $? -ne 0 ]; then break; fi
+    if [ $? -ne 0 ]; then
+      apt_get_install default-mysql-server 
+    fi
+    if [ $? -ne 0 ]; then
+      break;
+    fi
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:post:" $0}'
     break
   done
+
+  #Failed because this line in /etc/mysql/my.cnf.migrated
+  #log_slow_queries      = /var/log/mysql/mysql-slow.log
+  #needed to change to:
+  #slow_query_log                  = 1
+  #slow_query_log_file             = /var/log/mysql/mysql-slow.log
+  #find /var/log -type f | xargs grep log_slow | grep ERROR
+  #/var/log/daemon.log:Apr  6 19:14:44 ititch mysqld_safe[13273]: 2020-04-06 19:14:44 3079187200 [ERROR] /usr/sbin/mysqld: unknown variable 'log_slow_queries=/var/log/mysql/mysql-slow.log'
+  if [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
+    echo "dss:info: Disabling log_slow settings, they are now slow_query_log"
+    [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs grep -l '^log_slow'); do
+      sed -i 's/^log_slow/#log_slow/' $file && echo "dss:info: disabled log_slow in $file"
+    done
+    [ -f /etc/init.d/mysql ] && ps auxf | grep -qai '[m]ysqld_safe' && /etc/init.d/mysql restart && "dss:info: issued a mysql restart" 
+  fi    
+
   for i in $(find /etc/cron.* -type f -name 000loaddelay); do
     #old style ifconfig
     ifconfig | grep -qai 'inet addr' && continue

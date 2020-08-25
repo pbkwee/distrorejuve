@@ -1637,7 +1637,7 @@ for modifiedconfigfile in $modifiedconfigfiles; do
   
   # pop a copy there so we can replace current file if desired
   [ -f "./${modifiedconfigfile}" ] && [ ! -f "${modifiedconfigfile}.dpkg-dist" ] && cp "./${modifiedconfigfile}" "${modifiedconfigfile}.dpkg-dist"
-  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:modifiedfilereplace:To replace edited file with dist file: mv $modifiedconfigfile $modifiedconfigfile.dpkg-old; mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
+  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:modifiedfilereplace:To replace edited file with dist file: [ ! -f $modifiedconfigfile.dpkg-old ] && [ -f /etc/nginx/nginx.conf.dpkg-dist] && mv $modifiedconfigfile $modifiedconfigfile.dpkg-old && mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
   # show a diff
   print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:configdiff:modifiedconfig:'$pkg':'$modifiedconfigfile':" $0}'
 done
@@ -1777,6 +1777,11 @@ if [ $ret -ne 0 ]; then
 fi
 apt-get clean
 return $ret
+}
+
+function plesk_upgrade() {
+  which plesk >/dev/null 2>&1 && return 0
+  plesk installer --select-release-current --reinstall-patch --upgrade-installed-components
 }
 
 function apt_get_dist_upgrade() {
@@ -2286,6 +2291,7 @@ function dist_upgrade_to_latest() {
   dist_upgrade_stretch_to_buster || return $?
   dist_upgrade_ubuntu_to_latest || return $?
   apt_get_dist_upgrade || return $?
+  plesk_upgrade || return $?
 }
 
 function print_php5_advice() {

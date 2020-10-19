@@ -1802,7 +1802,7 @@ return $ret
 }
 
 function plesk_upgrade() {
-  which plesk >/dev/null 2>&1 && return 0
+  which plesk >/dev/null 2>&1 || return 0
   plesk installer --select-release-current --reinstall-patch --upgrade-installed-components
 }
 

@@ -9,8 +9,8 @@ export APT_LISTCHANGES_FRONTEND=none
 # no leading/trailing spaces.  one space per word.
 LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal"
 #ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
-OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal"
+OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco eoan"
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
@@ -32,7 +32,7 @@ function print_usage() {
 
 distrorejuve is a utility that helps with upgrading distros. It works on a number of different distros (Ubuntu, 
 Debian, Centos). It uses apt, yum and repository corrections as appropriate. It can dist upgrade between 
-multiple versions for Ubuntu and Debian.
+multiple versions for Ubuntu and Debian.  It can convert (some) distros from 32bit to 64 bit (a cross grade).
 
 To get the latest version of this script:
 
@@ -93,8 +93,43 @@ Use with --source if you just wish to have the distrorejuve functions available 
 Written by Peter Bryant at http://launchtimevps.com
 
 Latest version (or thereabouts) will be available at https://github.com/pbkwee/distrorejuve
+
+
 "
 }
+
+# for debian or ubuntu names.  e.g. is_distro_name_newer jessie buster => 1 ; buster buster => 1; jessie buster =>0
+function is_distro_name_newer() {
+  local name="$1"
+  local newerthan="$2"
+  local t=
+  local is_name_found=N
+  local is_newer_found=N
+  for t in $ALL_DEBIAN $ALL_UBUNTU; do
+    [ "$t" == "$name" ] && is_name_found=Y
+    [ "$is_name_found" == "Y" ] && [ "$is_newer_found" == "Y" ] && return 0
+    [ "$is_name_found" == "Y" ] && return 1
+    [ "$t" == "$newerthan" ] && is_newer_found=Y
+  done
+  return 1
+}
+# for debian or ubuntu names.  e.g. is_distro_name_newer jessie buster => 1 ; buster buster => 1; jessie buster =>0
+function is_distro_name_older() {
+  local name="$1"
+  local newerthan="$2"
+  local t=
+  local is_name_found=N
+  local is_newer_found=N
+  for t in $ALL_DEBIAN $ALL_UBUNTU; do
+    [ "$t" == "$name" ] && is_name_found=Y
+    [ "$t" == "$newerthan" ] && is_newer_found=Y
+    [ "$is_name_found" == "Y" ] && [ "$is_newer_found" == "Y" ] && return 1
+    [ "$is_name_found" == "Y" ] && return 0
+    
+  done
+  return 1
+}
+
 
 function is_fixed() {
   # 0 = vulnerable, 1 = fixed, 2 = dunno
@@ -654,6 +689,14 @@ function enable_debian_archive() {
   return 0
 }
 
+function print_uninstall_fail2ban() {
+  [ ! -f /etc/apt/sources.list ] && return 0
+  ! dpkg -l | grep -qai '^i.*fail2ban' && return 0
+  echo "dss:info: Changes to the fail2ban configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
+  echo "dss:info: Please remove the fail2ban configs.  You may do that with the following commands:"
+  echo apt-get -y purge $(dpkg -l | grep fail2ban | egrep -i 'ii|iF|iU' | awk '{print $2}')
+}
+
 function print_uninstall_dovecot() {
   [ ! -f /etc/apt/sources.list ] && return 0
   ! dpkg -l | grep -qai '^i.*dovecot' && return 0
@@ -774,6 +817,10 @@ function rm_overwrite_files() {
     echo "dss:warn: issue with obsolete dovecot config.  $(egrep -i "doveconf: Fatal: " "$tmplog")"
     echo "dss:warn: May pay to remove dovecot per the instructions below."
     print_uninstall_dovecot
+  fi
+  if egrep -qi "dpkg: error processing package fail2ban (--configure):" "$tmplog" || egrep -qi 'See "systemctl status fail2ban.service"' "$tmplog" ; then
+    echo "dss:error: issue with fail2ban config.  Resolve (e.g. by removing dovecot for fixing the issue). $(egrep -i "fail2ban (--configure|status fail2ban.service" "$tmplog")"
+    print_uninstall_fail2ban
   fi
   
   #  trying to overwrite shared '/usr/share/doc/libkmod2/changelog.Debian.gz', which is different from other instances of package libkmod2:amd64
@@ -1473,6 +1520,8 @@ function tweak_broken_configs() {
   fi 
   # error of sshd[1762]: Missing privilege separation directory: /var/run/sshd
   # => mkdir /var/run/sshd
+  # FIXME: https://wiki.debian.org/ReleaseGoals/RunDirectory 
+  # => do we need to if -d /var/run; then mv -f /var/run/* /run/; rm -rf /var/run; ln -s /run /var/run; fi
   while true; do
     # not debian-ish
     if ! which dpkg >/dev/null 2>&1; then break; fi
@@ -1575,6 +1624,13 @@ if [ "$old_distro" == "lenny" ]; then
   fi
   add_missing_debian_keys
   [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
+fi
+
+if is_distro_name_older "$old_distro" "stretch"; then
+  if dpkg -l | grep -qai '^i.*fail2ban' && lsb_release -a | egrep -qai "jessie|Release.*8\."; then
+    print_uninstall_fail2ban
+    return 1
+  fi
 fi
   
 upgrade_precondition_checks || return $?

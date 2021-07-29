@@ -1512,11 +1512,11 @@ function tweak_broken_configs() {
   #needed to change to:
   #slow_query_log                  = 1
   #slow_query_log_file             = /var/log/mysql/mysql-slow.log
-  #find /var/log -type f | xargs grep log_slow | grep ERROR
+  #find /var/log -type f | xargs --no-run-if-empty grep log_slow | grep ERROR
   #/var/log/daemon.log:Apr  6 19:14:44 ititch mysqld_safe[13273]: 2020-04-06 19:14:44 3079187200 [ERROR] /usr/sbin/mysqld: unknown variable 'log_slow_queries=/var/log/mysql/mysql-slow.log'
   if [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
     echo "dss:info: Disabling log_slow settings, they are now slow_query_log"
-    [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs grep -l '^log_slow'); do
+    [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs --no-run-if-empty grep -l '^log_slow'); do
       sed -i 's/^log_slow/#log_slow/' $file && echo "dss:info: disabled log_slow in $file"
     done
     [ -f /etc/init.d/mysql ] && ps auxf | grep -qai '[m]ysqld_safe' && /etc/init.d/mysql restart && "dss:info: issued a mysql restart" 

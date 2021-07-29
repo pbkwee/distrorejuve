@@ -9,8 +9,8 @@ export APT_LISTCHANGES_FRONTEND=none
 # no leading/trailing spaces.  one space per word.
 LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal"
 #ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
-OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal"
+OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco eoan"
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
@@ -32,7 +32,7 @@ function print_usage() {
 
 distrorejuve is a utility that helps with upgrading distros. It works on a number of different distros (Ubuntu, 
 Debian, Centos). It uses apt, yum and repository corrections as appropriate. It can dist upgrade between 
-multiple versions for Ubuntu and Debian.
+multiple versions for Ubuntu and Debian.  It can convert (some) distros from 32bit to 64 bit (a cross grade).
 
 To get the latest version of this script:
 
@@ -93,8 +93,43 @@ Use with --source if you just wish to have the distrorejuve functions available 
 Written by Peter Bryant at http://launchtimevps.com
 
 Latest version (or thereabouts) will be available at https://github.com/pbkwee/distrorejuve
+
+
 "
 }
+
+# for debian or ubuntu names.  e.g. is_distro_name_newer jessie buster => 1 ; buster buster => 1; jessie buster =>0
+function is_distro_name_newer() {
+  local name="$1"
+  local newerthan="$2"
+  local t=
+  local is_name_found=N
+  local is_newer_found=N
+  for t in $ALL_DEBIAN $ALL_UBUNTU; do
+    [ "$t" == "$name" ] && is_name_found=Y
+    [ "$is_name_found" == "Y" ] && [ "$is_newer_found" == "Y" ] && return 0
+    [ "$is_name_found" == "Y" ] && return 1
+    [ "$t" == "$newerthan" ] && is_newer_found=Y
+  done
+  return 1
+}
+# for debian or ubuntu names.  e.g. is_distro_name_newer jessie buster => 1 ; buster buster => 1; jessie buster =>0
+function is_distro_name_older() {
+  local name="$1"
+  local newerthan="$2"
+  local t=
+  local is_name_found=N
+  local is_newer_found=N
+  for t in $ALL_DEBIAN $ALL_UBUNTU; do
+    [ "$t" == "$name" ] && is_name_found=Y
+    [ "$t" == "$newerthan" ] && is_newer_found=Y
+    [ "$is_name_found" == "Y" ] && [ "$is_newer_found" == "Y" ] && return 1
+    [ "$is_name_found" == "Y" ] && return 0
+    
+  done
+  return 1
+}
+
 
 function is_fixed() {
   # 0 = vulnerable, 1 = fixed, 2 = dunno
@@ -654,6 +689,14 @@ function enable_debian_archive() {
   return 0
 }
 
+function print_uninstall_fail2ban() {
+  [ ! -f /etc/apt/sources.list ] && return 0
+  ! dpkg -l | grep -qai '^i.*fail2ban' && return 0
+  echo "dss:info: Changes to the fail2ban configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
+  echo "dss:info: Please remove the fail2ban configs.  You may do that with the following commands:"
+  echo apt-get -y purge $(dpkg -l | grep fail2ban | egrep -i 'ii|iF|iU' | awk '{print $2}')
+}
+
 function print_uninstall_dovecot() {
   [ ! -f /etc/apt/sources.list ] && return 0
   ! dpkg -l | grep -qai '^i.*dovecot' && return 0
@@ -774,6 +817,10 @@ function rm_overwrite_files() {
     echo "dss:warn: issue with obsolete dovecot config.  $(egrep -i "doveconf: Fatal: " "$tmplog")"
     echo "dss:warn: May pay to remove dovecot per the instructions below."
     print_uninstall_dovecot
+  fi
+  if egrep -qi "dpkg: error processing package fail2ban (--configure):" "$tmplog" || egrep -qi 'See "systemctl status fail2ban.service"' "$tmplog" ; then
+    echo "dss:error: issue with fail2ban config.  Resolve (e.g. by removing dovecot for fixing the issue). $(egrep -i "fail2ban (--configure|status fail2ban.service" "$tmplog")"
+    print_uninstall_fail2ban
   fi
   
   #  trying to overwrite shared '/usr/share/doc/libkmod2/changelog.Debian.gz', which is different from other instances of package libkmod2:amd64
@@ -994,7 +1041,9 @@ function crossgrade_debian() {
   local vimpkg="$(dpkg -l | grep '^.*ii' | grep -qai vim && echo vim)"
   local apachepkg="$(dpkg -l | grep '^.*ii' | grep -qai apache2-bin && echo apache2-bin)"
   apt_get_update
-
+  apt_get_install apt-rdepends
+  [ $? -ne 0 ] && echo "dss:error: failed to install apt-rdpends.  Which we rely on to download necessary dependencies." && return 1
+   
   [  ! -x /usr/bin/apt-show-versions ] && apt_get_install apt-show-versions
   [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --show-cruft followed by bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
   
@@ -1020,6 +1069,11 @@ function crossgrade_debian() {
     [  $? -ne 0 ] && apt-get download perl-base:amd64
     apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl:amd64
     [  $? -ne 0 ] && apt-get download perl:amd64
+    requiredlist="$(apt-rdepends apt apt-listchanges| grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}')"
+    for i in $requiredlist; do echo $i==; apt-get --reinstall --download-only  $APT_GET_INSTALL_OPTIONS install $i; done
+    #E: Unable to locate package libbz2-1.0:amd64
+    #E: Couldn't find any package by glob 'libbz2-1.0'
+     
     
     echo "dss:trace: cross grading.  installing key amd64 deb packages: dpkg:amd64 tar:amd64 apt:amd64 perl-base:amd64"
     # something about this removes apache2.  figure out why...
@@ -1036,7 +1090,7 @@ function crossgrade_debian() {
       #util-linux pre-depends on libblkid1 (>= 2.20.1)
        
     
-      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed  -r  's/\([^)]+\)//g' | sort | uniq | awk '{print $1":amd64"}')"
+      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps
@@ -1121,6 +1175,8 @@ function crossgrade_debian() {
     [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
     [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
     echo "dss:info: cross grading essential packages to download: $essentialpackages and essentialdependencies: $essentialdeps"
+    essentialpackages="$(for i in $essentialpackages; do echo $i; done | sort | uniq)"
+    essentialdeps="$(for i in $essentialdeps; do echo $i; done | sort | uniq)"
     cd /root/distrorejuveinfo/$$
     [ ! -z "$essentialpackages" ] && apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages || apt-get download $essentialpackages
     [ ! -z "$essentialdeps" ] && apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialdeps || apt-get download $essentialdeps
@@ -1356,11 +1412,12 @@ function cruft_packages0() {
   
   #echo "dss:trace: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
   
-  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep -v '^lib' | wc -l) ]; then
+  ignorablecruft="^lib|webmin|virtualmin"
+  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | egrep -v "$ignorablecruft" | wc -l) ]; then
     has_cruft=$((has_cruft+1))
     [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | egrep -v '^lib|webmin' | awk '{print $1}' | tr '\n' ' ')"
+      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | egrep -v "$ignorablecruft" | awk '{print $1}' | tr '\n' ' ')"
       # e.g. oldpkgstoremove has mysql-server-5.0:i386 mysql-server-core-5.0:i386
       [  $? -ne 0 ] && commandret=$((commandret+1))
       # /var/log/mysql/error.log:
@@ -1473,6 +1530,8 @@ function tweak_broken_configs() {
   fi 
   # error of sshd[1762]: Missing privilege separation directory: /var/run/sshd
   # => mkdir /var/run/sshd
+  # FIXME: https://wiki.debian.org/ReleaseGoals/RunDirectory 
+  # => do we need to if -d /var/run; then mv -f /var/run/* /run/; rm -rf /var/run; ln -s /run /var/run; fi
   while true; do
     # not debian-ish
     if ! which dpkg >/dev/null 2>&1; then break; fi
@@ -1576,6 +1635,13 @@ if [ "$old_distro" == "lenny" ]; then
   add_missing_debian_keys
   [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
 fi
+
+if is_distro_name_older "$old_distro" "stretch"; then
+  if dpkg -l | grep -qai '^i.*fail2ban' && lsb_release -a | egrep -qai "jessie|Release.*8\."; then
+    print_uninstall_fail2ban
+    return 1
+  fi
+fi
   
 upgrade_precondition_checks || return $?
 
@@ -1659,7 +1725,7 @@ for modifiedconfigfile in $modifiedconfigfiles; do
   
   # pop a copy there so we can replace current file if desired
   [ -f "./${modifiedconfigfile}" ] && [ ! -f "${modifiedconfigfile}.dpkg-dist" ] && cp "./${modifiedconfigfile}" "${modifiedconfigfile}.dpkg-dist"
-  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:modifiedfilereplace:To replace edited file with dist file: mv $modifiedconfigfile $modifiedconfigfile.dpkg-old; mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
+  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:modifiedfilereplace:To replace edited file with dist file: [ ! -f $modifiedconfigfile.dpkg-old ] && [ -f /etc/nginx/nginx.conf.dpkg-dist] && mv $modifiedconfigfile $modifiedconfigfile.dpkg-old && mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
   # show a diff
   print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:configdiff:modifiedconfig:'$pkg':'$modifiedconfigfile':" $0}'
 done
@@ -1799,6 +1865,11 @@ if [ $ret -ne 0 ]; then
 fi
 apt-get clean
 return $ret
+}
+
+function plesk_upgrade() {
+  which plesk >/dev/null 2>&1 || return 0
+  plesk installer --select-release-current --reinstall-patch --upgrade-installed-components
 }
 
 function apt_get_dist_upgrade() {
@@ -2308,6 +2379,7 @@ function dist_upgrade_to_latest() {
   dist_upgrade_stretch_to_buster || return $?
   dist_upgrade_ubuntu_to_latest || return $?
   apt_get_dist_upgrade || return $?
+  plesk_upgrade || return $?
 }
 
 function print_php5_advice() {

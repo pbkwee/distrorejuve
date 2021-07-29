@@ -1041,7 +1041,9 @@ function crossgrade_debian() {
   local vimpkg="$(dpkg -l | grep '^.*ii' | grep -qai vim && echo vim)"
   local apachepkg="$(dpkg -l | grep '^.*ii' | grep -qai apache2-bin && echo apache2-bin)"
   apt_get_update
-
+  apt_get_install apt-rdepends
+  [ $? -ne 0 ] && echo "dss:error: failed to install apt-rdpends.  Which we rely on to download necessary dependencies." && return 1
+   
   [  ! -x /usr/bin/apt-show-versions ] && apt_get_install apt-show-versions
   [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --show-cruft followed by bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
   
@@ -1067,6 +1069,11 @@ function crossgrade_debian() {
     [  $? -ne 0 ] && apt-get download perl-base:amd64
     apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl:amd64
     [  $? -ne 0 ] && apt-get download perl:amd64
+    requiredlist="$(apt-rdepends apt apt-listchanges| grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}')"
+    for i in $requiredlist; do echo $i==; apt-get --reinstall --download-only  $APT_GET_INSTALL_OPTIONS install $i; done
+    #E: Unable to locate package libbz2-1.0:amd64
+    #E: Couldn't find any package by glob 'libbz2-1.0'
+     
     
     echo "dss:trace: cross grading.  installing key amd64 deb packages: dpkg:amd64 tar:amd64 apt:amd64 perl-base:amd64"
     # something about this removes apache2.  figure out why...
@@ -1083,7 +1090,7 @@ function crossgrade_debian() {
       #util-linux pre-depends on libblkid1 (>= 2.20.1)
        
     
-      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed  -r  's/\([^)]+\)//g' | sort | uniq | awk '{print $1":amd64"}')"
+      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps
@@ -1168,6 +1175,8 @@ function crossgrade_debian() {
     [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
     [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
     echo "dss:info: cross grading essential packages to download: $essentialpackages and essentialdependencies: $essentialdeps"
+    essentialpackages="$(for i in $essentialpackages; do echo $i; done | sort | uniq)"
+    essentialdeps="$(for i in $essentialdeps; do echo $i; done | sort | uniq)"
     cd /root/distrorejuveinfo/$$
     [ ! -z "$essentialpackages" ] && apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages || apt-get download $essentialpackages
     [ ! -z "$essentialdeps" ] && apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialdeps || apt-get download $essentialdeps
@@ -1403,11 +1412,12 @@ function cruft_packages0() {
   
   #echo "dss:trace: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
   
-  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep -v '^lib' | wc -l) ]; then
+  ignorablecruft="^lib|webmin|virtualmin"
+  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | egrep -v "$ignorablecruft" | wc -l) ]; then
     has_cruft=$((has_cruft+1))
     [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | egrep -v '^lib|webmin' | awk '{print $1}' | tr '\n' ' ')"
+      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | egrep -v "$ignorablecruft" | awk '{print $1}' | tr '\n' ' ')"
       # e.g. oldpkgstoremove has mysql-server-5.0:i386 mysql-server-core-5.0:i386
       [  $? -ne 0 ] && commandret=$((commandret+1))
       # /var/log/mysql/error.log:

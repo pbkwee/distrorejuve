@@ -633,7 +633,7 @@ function disable_debian_repos() {
   prep_ghost_output_dir
   cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: disable_debian_repos $name diff follows:"
-  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff: " $1}'
+  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff: " $0}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
   echo "$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:disable_debian_repos:post:" $0}'
   return 0
@@ -683,7 +683,7 @@ function enable_debian_archive() {
   prep_ghost_output_dir
   cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: enabling debian archive repos.  diff follows:"
-  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff:sources: " $1}'
+  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff:sources: " $0}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
   [ ! -z "$IS_DEBUG" ] && echo "apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:trace:sources:enable_debian_archive:post:" $0 }'
   return 0

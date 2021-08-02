@@ -881,6 +881,7 @@ function apt_get_f_install() {
   if [  $ret -ne 0 ]; then 
     rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS -f install && ret=$?
   fi
+  echo "dss:trace:apt_get_f_install:$1 results $(egrep 'upgraded' $tmplog)"
   local essentialissuepackages="$(cat $tmplog | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_f_install $@ essential package issues for: $essentialissuepackages"  
   
@@ -1079,7 +1080,7 @@ function crossgrade_debian() {
     # something about this removes apache2.  figure out why...
     [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
     cd /root/distrorejuveinfo/$$
-    local debs="$(find /var/cache/apt/archives -name '*_amd64.deb') $(find . -maxdepth 1 -name '*_amd64.deb')"
+    local debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$') $(find . -maxdepth 1 -type f  | egrep 'amd64.deb$|all.deb$')"
     while true; do
       #Preparing to replace libblkid1:amd64 2.20.1-5.3 (using libblkid1_2.20.1-5.3_amd64.deb) ...
       #Unpacking replacement libblkid1:amd64 ...
@@ -1094,7 +1095,7 @@ function crossgrade_debian() {
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps
-      debs="$(find /var/cache/apt/archives -name '*_amd64.deb') $(find . -maxdepth 1 -name '*_amd64.deb')"
+      debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$') $(find . -maxdepth 1 -type f  | egrep 'amd64.deb$|all.deb$')"
     done
     if [  ! -z "$debs" ]; then 
       dpkg_install $debs
@@ -1109,7 +1110,7 @@ function crossgrade_debian() {
   echo "dss:trace: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
   local i=0
   for i in 0 1; do
-    apt_get_f_install
+    apt_get_f_install crossgrade
     ret=$?
     [ $ret -eq 0 ] && break;
     # apt-get -f install=>
@@ -1166,15 +1167,37 @@ function crossgrade_debian() {
     for i386app in $i386apps; do
       local needsdeps= 
       apt-cache show $i386app | egrep -qai 'Essential: yes|Priority: required|Priority: important' && ! dpkg -l | egrep -qai '^ii.*${i386app}.*amd64' && essentialpackages="$essentialpackages ${i386app}:amd64" && needsdeps=true
-      [ ! -z "$needsdeps" ] && essentialdeps="$essentialdeps $(for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/,//g' | sed 's/.*://'); do echo $i:amd64; done)"
+      [ -z "$needsdeps" ] && continue
+      # pre-depends can include options (one of n).  e.g. init
+      # apt-cache show init | grep Pre-Depends 
+      # Pre-Depends: systemd-sysv | sysvinit-core | runit-init
+      # can also have versions
+      # Pre-Depends: libc6 (>= 2.15), libgmp10, libmpfr6 (>= 3.1.3), libreadline7 (>= 6.0), libsigsegv2 (>= 2.9)
+      local addep="" 
+      for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/,//g' | sed 's/.*://' | sed 's/ | /____/g'); do
+        if echo "$i" | grep -qai '____'; then
+          local j="$(echo "$i" | sed 's/____/ /g')"
+          for k in $j; do 
+            if dpkg -l | grep 'ii' | grep -qai " $k"; then
+              echo "dss:info:selecting $k as the pre-dependency for $i386app from options of '$j' since that is what is installed"
+              i="$k"
+            fi
+          done
+          [ -z "$i" ] && i="$(echo $j | awk '{print $0}')" &&  echo "dss:info:selecting $i as the pre-dependencies for $i386 from options of '$i' since it that is the first one listed and the others were not installed"
+        fi        
+        addep="$addep $i:amd64" 
+      done
+      essentialdeps="$essentialdeps $addep"
     done
     # => essentialpackages=base-files:amd64 base-passwd:amd64...
     
     [ -z "$essentialpackages" ] && break
-    local debs="$(find /var/cache/apt/archives -name '*_amd64.deb')"
+    local debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$')"
     [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
     [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
-    echo "dss:info: cross grading essential packages to download: $essentialpackages and essentialdependencies: $essentialdeps"
+    echo "dss:info: cross grading essential packages.  Downloading essentialpackages: $essentialpackages"
+    echo "dss:info: cross grading essential packages.  Downloading essentialdependencies: $essentialdeps"
+
     essentialpackages="$(for i in $essentialpackages; do echo $i; done | sort | uniq)"
     essentialdeps="$(for i in $essentialdeps; do echo $i; done | sort | uniq)"
     cd /root/distrorejuveinfo/$$
@@ -1184,10 +1207,9 @@ function crossgrade_debian() {
     #apt-get --reinstall --download-only -y install systemd-sysv:amd64
     apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install libc-bin:amd64
     echo "dss:trace: cross grading dpkg installing essential packages."
-    yyyy
     #apt-get download e2fsprogs:amd64 util-linux:amd64 sed:amd64
-    local debs="$(find /var/cache/apt/archives -name '*_amd64.deb')"
-    local debs2="$(find . -name '*_amd64.deb')"
+    local debs="$(find /var/cache/apt/archives -type f |  egrep 'amd64.deb$|all.deb$')"
+    local debs2="$(find . -type f  | egrep 'amd64.deb$|all.deb$')"
     [  ! -z "$debs" ] && dpkg_install $debs $debs2
     ret=$?
     [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
@@ -1206,7 +1228,7 @@ function crossgrade_debian() {
   
   local i=0
   for i in 0 1; do  
-    echo "dss:trace: cross grading and bulk replacing i386 apps with 64 bit versions"
+    echo "dss:trace: cross grading and bulk replacing i386 apps with 64 bit versions.  Round #$i"
     # for all i386 apps, install the amd64 and remove the i386.  some will fail, that's ok.
     # do
     #apt-get $APT_GET_INSTALL_OPTIONS autoremove
@@ -1219,17 +1241,28 @@ function crossgrade_debian() {
     local ret=0   
     apt_get_install $amd64toinstall && apt_get_remove $i386toremove
     [  $? -ne 0 ] && ret=$(($ret+1))    
-    echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages."
     local pkg=
     local i386toremove="$(dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//')"
+    echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages: $i386toremove"
     # => e.g. apache2-utils bc bind9-host
+    local i386toremove2=""
+    # install them all
     for pkg in $i386toremove ; do 
       apt_get_install $pkg:amd64
       local lret=$?
       # fwiw apt-get install $alreadyinstalled returns 0
-      [  $lret -eq 0 ] && apt_get_remove $pkg:i386 
-      [  $lret -ne 0 ] && ret=$(($ret+1)) && apt_get_f_install
+      [  $lret -eq 0 ] && echo $pkg | egrep -qai 'gcc.*base' && echo "dss:info: not apt-get remove-ing $pkg, as has tended to remove lots of necessary things.  e.g. ifupdown."
+      [  $lret -eq 0 ] && echo $pkg | egrep -qai 'gcc.*base' || i386toremove2="$i386toremove2 $pkg" 
     done
+    echo "dss:trace: removing 32 bit versions of packages where we were able to install the 64bit version: $i386toremove2"
+    # then remove the i386 version.  Used to this after installing each amd64 package, but that sometimes led to other things being removed that broke things
+    # fwiw when you install $pkg:amd4 it will typically remove the $pkg:i386, so hopefully not will actually happen in this section?
+    for pkg in $i386toremove2 ; do 
+      local lret=$?
+      [  $lret -eq 0 ] && echo $pkg | egrep -qai 'gcc.*base' || apt_get_remove $pkg:i386 
+      [  $lret -ne 0 ] && ret=$(($ret+1)) && apt_get_f_install "after-${pkg}-remove"
+    done
+    echo "dss:trace: completed individual install and removal of i386 packaged.  Ret code of $ret (0 means we are done, otherwise we go for another round)."
     [  $ret -eq 0 ] && break
   done
   
@@ -1240,14 +1273,14 @@ function crossgrade_debian() {
       for i in $amd64toinstall; do 
         dpkg -l | grep '^ii' | awk '{print $2}' | grep -qai $i || echo "dss:trace: downloading amd64 debian file for $i" && apt-get download $i
       done
-      local amdfilestoinstall=$(find . -type f -name '*amd64.deb')
+      local amdfilestoinstall="$(find . -type f  | egrep 'amd64.deb$|all.deb$')"
       if [ -z "$amdfilestoinstall" ]; then
         echo "dss:trace: not finding any extra amd64 files to install" 
         break; 
       fi
       cd -
       echo "dss:trace: attempting a dpkg install of non-lib packages: $(echo $amd64toinstall)"
-      dpkg_install $(find distrorejuveinfo/$$/extra64debs -type f -name '*amd64.deb')
+      dpkg_install $(find distrorejuveinfo/$$/extra64debs -type f  | egrep 'amd64.deb$|all.deb$')
       local lret=$?
       echo "dss:trace: dpkg install $( [ $lret -eq 0] && echo "succeeded" || echo "failed")"
       break
@@ -1266,13 +1299,13 @@ function crossgrade_debian() {
         apt-get download $i
       done
       cd -
-      local amdfilestoinstall=$(find distrorejuveinfo/$$/settheory -type f -name '*amd64.deb')
+      local amdfilestoinstall=$(find distrorejuveinfo/$$/settheory -type f  | egrep 'amd64.deb$|all.deb$')
       if [ -z "$amdfilestoinstall" ]; then
         echo "dss:trace: not finding any extra amd64 files to install per distrorejuveinfo/$$/settheory" 
         break; 
       fi
       echo "dss:trace: using set theory method for lib and non-lib packages: $(echo $amd64toinstall)"
-      dpkg_install $(find distrorejuveinfo/$$/settheory -type f -name '*amd64.deb')
+      dpkg_install $(find distrorejuveinfo/$$/settheory -type f  | egrep 'amd64.deb$|all.deb$')
       local lret=$?
       echo "dss:trace: set theory dpkg install $( [ $lret -eq 0] && echo "succeeded" || echo "failed")"
       break
@@ -1459,16 +1492,16 @@ function cruft_packages0() {
             local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | egrep -qai 'Essential: yes|Priority: required|Priority: important' && essentialpackages="$essentialpackages $i:amd64"; done
             echo "dss:trace: cross grading downloading essential packages via download and dpkg_install."
             [  ! -z "$essentialpackages" ] && if apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages; then
-              dpkg_install /var/cache/apt/archives/*_amd64.deb
+              dpkg_install $(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$')
               [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
-              mv /var/cache/apt/archives/*amd64.deb /root/distrorejuveinfo/$$
+              mv $(find /var/cache/apt/archives/ -type f | egrep 'amd64.deb$|all.deb$')  /root/distrorejuveinfo/$$
               dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
             else
               echo "dss:trace: cross grading downloading essential packages (after download+install failed) via download and separate install" 
               apt-get $APT_GET_INSTALL_OPTIONS download $essentialpackages
-              dpkg_install *_amd64.deb
+              dpkg_install $(find . -type f |  egrep 'amd64.deb$|all.deb$')
               [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
-              mv /var/cache/apt/archives/*amd64.deb /root/distrorejuveinfo/$$
+              mv $(find /var/cache/apt/archives/ -type f  | egrep 'amd64.deb$|all.deb$') /root/distrorejuveinfo/$$
               dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
             fi
           done
@@ -1571,11 +1604,11 @@ function tweak_broken_configs() {
   #needed to change to:
   #slow_query_log                  = 1
   #slow_query_log_file             = /var/log/mysql/mysql-slow.log
-  #find /var/log -type f | xargs grep log_slow | grep ERROR
+  #find /var/log -type f | xargs --no-run-if-empty grep log_slow | grep ERROR
   #/var/log/daemon.log:Apr  6 19:14:44 ititch mysqld_safe[13273]: 2020-04-06 19:14:44 3079187200 [ERROR] /usr/sbin/mysqld: unknown variable 'log_slow_queries=/var/log/mysql/mysql-slow.log'
   if [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
     echo "dss:info: Disabling log_slow settings, they are now slow_query_log"
-    [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs grep -l '^log_slow'); do
+    [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs --no-run-if-empty grep -l '^log_slow'); do
       sed -i 's/^log_slow/#log_slow/' $file && echo "dss:info: disabled log_slow in $file"
     done
     [ -f /etc/init.d/mysql ] && ps auxf | grep -qai '[m]ysqld_safe' && /etc/init.d/mysql restart && "dss:info: issued a mysql restart" 
@@ -1807,12 +1840,12 @@ function record_config_state() {
   > $file
   # conf files
   echo "Date: $(date)" >> $file
-  [ ! -z "$files" ] && ls -lrt $files > $file
+  [ ! -z "$files" ] && ls -lrt $files | awk '{print "configfiles:" $0}' > $file
   echo "Listening ports:" >> $file
   echo "" >> $file
   # listening ports
   # Listen ports: 0.0.0.0:995 dovecot
-  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 4 | uniq >> $file
+  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 3 | uniq >> $file
   echo "Apache vhosts:" >> $file
   echo "" >> $file
   # vhosts 
@@ -2453,7 +2486,7 @@ elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-squeeze completed ok.  use $0 --show-changes to see changes" 
 elif [ "--source" = "${ACTION:-$1}" ] ; then 
-  echo "dss: Loading distrorejuve functions"
+  echo "dss:info:Loaded distrorejuve functions"
 elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
   print_info
   IGNOREOTHERREPOS=Y

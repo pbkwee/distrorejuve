@@ -581,6 +581,14 @@ function add_missing_debian_keys() {
     gpg --recv-key AED4B06F473041FA
     gpg -a --export AED4B06F473041FA | apt-key add -
   fi
+  if ! apt-key list | egrep D97A3AE911F63C51; then
+    #webmin key
+    echo "dss:info: installing webmin key"
+    gpg --keyserver pgpkeys.mit.edu --recv-key D97A3AE911F63C51
+    gpg -a --export D97A3AE911F63C51 | apt-key add -
+  fi
+  
+  
   return 0
 }
 
@@ -703,10 +711,11 @@ function print_uninstall_dovecot() {
   # trusty 2.9, precise 2.0, lucid (=10.4) 1.29 per https://launchpad.net/ubuntu/+source/dovecot
   echo "dss:info: Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
   echo "dss:info: Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "dss:info: Saving the current dovecot config to /root/distrorejuveinfo/postconf.log.$$"
+  echo "dss:info: Saving the current dovecot config to /root/distrorejuveinfo/doveconf.log.$$"
   echo "dss:info: Please remove dovecot.  You may do that with the following commands:"
   prep_ghost_output_dir
   postconf -n > /root/distrorejuveinfo/postconf.log.$$
+  doveconf -n > /root/distrorejuveinfo/doveconf.log.$$
   echo apt-get -y remove $(dpkg -l | grep dovecot | egrep -i 'ii|iF|iU' | awk '{print $2}')
   # dovecot reinstall tips
   
@@ -1660,17 +1669,19 @@ if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
   return 0
 fi
 
-if [ "$old_distro" == "lenny" ]; then
-  if dpkg -l | grep -qai '^i.*dovecot' && lsb_release -a | egrep -qai "lenny|Release.*5\."; then
+if is_distro_name_older "$old_distro" "squeeze"; then  
+  if dpkg -l | grep -qai '^i.*dovecot'; then
     print_uninstall_dovecot
     return 1
   fi
+fi
+if [ "$old_distro" == "lenny" ]; then
   add_missing_debian_keys
   [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
 fi
 
 if is_distro_name_older "$old_distro" "stretch"; then
-  if dpkg -l | grep -qai '^i.*fail2ban' && lsb_release -a | egrep -qai "jessie|Release.*8\."; then
+  if dpkg -l | grep -qai '^i.*fail2ban'; then
     print_uninstall_fail2ban
     return 1
   fi
@@ -1954,9 +1965,18 @@ function dist_upgrade_ubuntu_to_latest() {
 [ ! -e /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
 
-if dpkg -l | grep -qai '^i.*dovecot'; then
-  print_uninstall_dovecot
-  return 1
+if is_distro_name_older "$old_distro" "trusty"; then
+  if dpkg -l | grep -qai '^i.*dovecot'; then
+    print_uninstall_dovecot
+    return 1
+  fi
+fi
+
+if is_distro_name_older "$old_distro" "bionic"; then
+  if dpkg -l | grep -qai '^i.*fail2ban'; then
+    print_uninstall_fail2ban
+    return 1
+  fi
 fi
 
 local NUM_TO_DIST_UPGRADE="${1:-1000}"

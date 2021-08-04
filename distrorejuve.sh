@@ -34,13 +34,13 @@ distrorejuve is a utility that helps with upgrading distros. It works on a numbe
 Debian, Centos). It uses apt, yum and repository corrections as appropriate. It can dist upgrade between 
 multiple versions for Ubuntu and Debian.  It can convert (some) distros from 32bit to 64 bit (a cross grade).
 
-To get the latest version of this script:
+If you are using the script to make changes, please take a full backup first.
+
+Example usage to download the latest version of the script, then dist upgrade to latest Debian or Ubuntu disto. 
 
 wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
-Example usage to dist upgrade to latest Debian or Ubuntu disto. First make a backup of your server. Then run:
-
-sudo bash distrorejuve.sh --dist-upgrade | tee -a distrorejuve.log
+sudo bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\+'
 
 Uses:
 - Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
@@ -405,7 +405,7 @@ function upgrade_precondition_checks() {
     # install ok installed utils zip
     # install ok installed vcs cvs
     # install ok installed vcs patch
-    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'libx11|libx11-data|x11-common|xauth|xfonts-encodings|xfonts-utils|msttcorefonts|gnome$|gnome-icon-theme|libsoup|gsettings-desktop|adwaita-icon-th|lib-xkd|mesa-util|xkb-data|icon-the|ubuntu-mono|x11proto|xtrans-dev' | tr '\r\n' ' ')"
+    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'libx11|libx11-data|x11-common|theme-ubuntu-text|xauth|xfonts-encodings|xfonts-utils|msttcorefonts|gnome$|gnome-icon-theme|libsoup|gsettings-desktop|adwaita-icon-th|lib-xkd|mesa-util|xkb-data|icon-the|ubuntu-mono|plymouth|x11proto|xtrans-dev' | tr '\r\n' ' ')"
   fi
   if [  ! -z "$libx11" ]; then
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
@@ -762,7 +762,7 @@ function print_failed_dist_upgrade_tips() {
 function dist_upgrade_lenny_to_squeeze() {
 export old_distro=lenny
 export old_ver="inux 5"
-export new_distro=wheezy
+export new_distro=squeeze
 export new_ver="inux 6"
 
 dist_upgrade_x_to_y
@@ -817,6 +817,40 @@ function rm_overwrite_files() {
    [  ! -f "$1" ] && return 1
    local tmplog="$1"
    
+  if egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $tmplog; then
+    echo "dss:warn: mysql error.  Trying a mysql_upgrade to resolve."
+    mysql_upgrade 
+  fi
+  local mysqlerrlogs="$([ -d /var/lib/mysql ] && [ -d /var/log/mysql ] && find /var/lib/mysql /var/log/mysql -type f -mmin -10 | egrep '\.err$|mysql/error.log')"
+  if [ -d /var/lib/mysql ] ; then
+    mysqlerrlogs="$mysqlerrlog $tmplog"
+  fi
+  if [ ! -z "$mysqlerrlogs" ] && grep -qai 'Thread stack overrun' $mysqlerrlogs; then
+    echo "dss:warn: mysql Thread stack overrun.  Attempting to tweak 128K stacks to be bigger."
+    find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep 'thread_stac' | awk '{print "dss:info:mysqlthreadstacks:before:" $0}'
+    find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep -l '^thread_stac' | xargs --no-run-if-empty  sed -i 's/128K/256K/'
+    find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep 'thread_stac' | awk '{print "dss:info:mysqlthreadstacks:after:" $0}'
+  fi
+  if [ ! -z "$mysqlerrlogs" ] && egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $tmplog; then
+    echo "dss:warn: mysql error.  Trying a mysql_upgrade to resolve."
+    mysql_upgrade 
+  fi
+  
+  # disable some settings that become deprecated (if they are causing errors).
+  if [ ! -z "$mysqlerrlogs" ] && egrep -qai 'e-rc.d: initscript mysql, action "start" fai' $mysqlerrlogs || 
+    egrep -qai 'pkg: error processing package mysq' $mysqlerrlogs ||
+    egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $mysqlerrlogs; then 
+    for i in query_cache_limit query_cache_size key_buffer myisam-recover; do
+      if egrep -qai "unknown variable '$i" $mysqlerrlogs; then   
+      #if egrep -aqi "unknown variable '$i" $tmplog; then
+        echo "dss:warn: trying to fix an issue re unknown variable $i."
+        find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep "$i" | awk '{print "dss:info:mysql:'$i':before:" $0}'
+        find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep -l "^$i" | xargs --no-run-if-empty  sed -i "s/^$i/#$i/"
+        find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep "$i" | awk '{print "dss:info:mysql:'$i':after:" $0}'
+      fi
+    done
+  fi
+  
    
   if egrep -qi "doveconf: Fatal: " "$tmplog"; then
     # e.g. doveconf: Fatal: Error in configuration file /etc/dovecot/dovecot.conf: ssl enabled, but ssl_cert not set
@@ -1007,7 +1041,7 @@ function check_systemd_install_matches_init() {
 }
 
 function crossgrade_debian() {
-  [  ! -f /etc/debian_version ] && echo "dss:info: Only debian and Ubuntu crossgrades are supported, but not $(print_distro_info)." && return 1
+  [  ! -f /etc/debian_version ] && echo "dss:info: Only debian and Ubuntu crossgrades are supported, but not $(print_distro_info)." && return 0
   
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
@@ -1237,7 +1271,6 @@ function crossgrade_debian() {
   
   local i=0
   for i in 0 1; do  
-    echo "dss:trace: cross grading and bulk replacing i386 apps with 64 bit versions.  Round #$i"
     # for all i386 apps, install the amd64 and remove the i386.  some will fail, that's ok.
     # do
     #apt-get $APT_GET_INSTALL_OPTIONS autoremove
@@ -1248,15 +1281,17 @@ function crossgrade_debian() {
     # e.g. => apache2-utils:amd64 bc:amd64 bind9-host:amd64
     [  -z "$amd64toinstall" ] && [  -z "$i386toremove" ] && break
     local ret=0   
-    apt_get_install $amd64toinstall && apt_get_remove $i386toremove
-    [  $? -ne 0 ] && ret=$(($ret+1))    
+    # tends to remove necessities.  like ifupdown
+    # echo "dss:trace: cross grading and bulk replacing i386 apps with 64 bit versions.  Round #$i"
+    # apt_get_install $amd64toinstall && apt_get_remove $i386toremove
+    #[  $? -ne 0 ] && ret=$(($ret+1))    
     local pkg=
     local i386toremove="$(dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//')"
     echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages: $i386toremove"
     # => e.g. apache2-utils bc bind9-host
     local i386toremove2=""
     # install them all
-    for pkg in $i386toremove ; do 
+    for pkg in $i386toremove ifupdown; do 
       apt_get_install $pkg:amd64
       local lret=$?
       # fwiw apt-get install $alreadyinstalled returns 0
@@ -1431,6 +1466,37 @@ function remove_cruft_packages() {
    return $?
 }
 
+function print_no_available_versions() {
+  [ ! /etc/apt/sources.list ] && return 0
+  [ ! -x /usr/bin/apt-show-versions ] && echo "dss:error:apt-show-versions is not installed." >&2 && return 1
+  local not_available="$(mktemp "not_available.log.XXXXXX")"
+  local amd64_available="$(mktemp "available.log.XXXXXX")"
+  apt-show-versions | grep 'No available version' | awk '{print $1}' | sed 's/:.*//' | sort > $not_available
+  dpkg --print-architecture | grep -qai amd64 && cat $not_available && rm -f $not_available && return 0
+  local remove_amd64=""
+  # add amd64 and update list if we need it
+  # dpkg --print-architecture 
+  #i386
+  # dpkg --print-foreign-architectures
+  #amd64
+  ! dpkg --print-foreign-architectures  | grep -qai amd64 && dpkg --add-architecture amd64 && remove_amd64="dpkg --remove-architecture amd64" && apt_get_update > /dev/null
+  apt-show-versions | grep -v 'No available version' | grep amd64 | awk '{print $1}' | sed 's/:.*//'| sort > $amd64_available
+  # on ubuntu (at least) we get, say, postfix 'No available version in archive' for the i386, but there exists an amd64 package
+  # /usr/bin/apt-show-versions | egrep 'subversion|postfix|iproute|multiarch-support|php5-json'
+  # iproute:all 1:4.3.0-1ubuntu3.16.04.5 installed: No available version in archive
+  # iproute2:amd64 not installed
+  # iproute2:i386/focal 5.5.0-1ubuntu1 uptodate
+  # multiarch-support:i386 2.27-3ubuntu1.4 installed: No available version in archive
+  # php5-json:i386 1.3.2-2build1 installed: No available version in archive
+  # postfix:amd64 not installed
+  # postfix:i386 3.3.0-1ubuntu0.3 installed: No available version in archive
+  # remove it if we added it
+  # suppress 2 (lines unique in amd64_available) and 3 (lines in both) leaving 1 (just lines that only exist in not_available) 
+  comm  -2 -3  $not_available $amd64_available 
+  rm -f $not_available $amd64_available
+  $remove_amd64
+}
+
 # e.g. cruft_packages0 show 32bit
 function cruft_packages0() {
   [  ! -f /etc/debian_version ] && return 0
@@ -1455,11 +1521,11 @@ function cruft_packages0() {
   #echo "dss:trace: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
   
   ignorablecruft="^lib|webmin|virtualmin"
-  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | egrep -v "$ignorablecruft" | wc -l) ]; then
+  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(print_no_available_versions | egrep -v "$ignorablecruft" | wc -l) ]; then
     has_cruft=$((has_cruft+1))
-    [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
+    [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(print_no_available_versions |egrep -v "$ignorablecruft" | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | egrep -v "$ignorablecruft" | awk '{print $1}' | tr '\n' ' ')"
+      local oldpkgstoremove="$(print_no_available_versions | egrep -v "$ignorablecruft" | awk '{print $1}' | tr '\n' ' ')"
       # e.g. oldpkgstoremove has mysql-server-5.0:i386 mysql-server-core-5.0:i386
       [  $? -ne 0 ] && commandret=$((commandret+1))
       # /var/log/mysql/error.log:
@@ -1473,11 +1539,11 @@ function cruft_packages0() {
       #apt-get $APT_GET_INSTALL_OPTIONS autoremove
     fi
   fi
-  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep '^lib' | wc -l) ]; then
+  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(print_no_available_versions | grep '^lib' | wc -l) ]; then
     has_cruft=$((has_cruft+1))
-    [  ! -z "$show" ] && echo "dss:warn: Libraries from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')"
+    [  ! -z "$show" ] && echo "dss:warn: Libraries from non-current distro versions installed: $(print_no_available_versions | grep '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      apt_get_remove $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')
+      apt_get_remove $(print_no_available_versions | grep '^lib' | awk '{print $1}' | tr '\n' ' ')
       [  $? -ne 0 ] && commandret=$((commandret+1))
       #apt-get $APT_GET_INSTALL_OPTIONS autoremove
     fi
@@ -1713,10 +1779,9 @@ enable_debian_archive
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 apt_get_dist_upgrade
 ret=$?
-echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
-
 apt-get $APT_GET_INSTALL_OPTIONS  autoremove
 if [ $ret -eq 0 ]; then
+  echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
 	if lsb_release -a 2>/dev/null| egrep -qai "${new_distro}|${new_ver:-xxxxx}"; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
 	  echo "dss:info: dist-upgrade from ${old_distro} to ${new_distro} appears to have worked." 
@@ -1726,6 +1791,8 @@ if [ $ret -eq 0 ]; then
 	  return 1
 	fi
 fi
+echo "dss:error:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
+
 return 1
 
 }
@@ -1903,7 +1970,7 @@ if [ $ret -ne 0 ]; then
     echo "dss:info: apt-get dist-upgrade succeeded when a upgrade failed."
     return 0
   else
-    echo "dss:info: apt-get upgrade/dist-upgrade failed."
+    echo "dss:warn: apt-get upgrade/dist-upgrade failed."
     return 1 
   fi
 fi
@@ -1955,7 +2022,7 @@ if [ $ret -ne 0 ] ; then
 fi
 # report -dist or -old file changes
 tweak_broken_configs
-echo "dss:trace:dist_upgrade completed $(print_distro_info).  ret=$ret"
+echo "dss:trace:apt_get_dist_upgrade completed $(print_distro_info).  ret=$ret"
 
 return $ret
 }
@@ -1965,7 +2032,9 @@ function dist_upgrade_ubuntu_to_latest() {
 [ ! -e /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
 
-if is_distro_name_older "$old_distro" "trusty"; then
+echo "dss:trace:dist_upgrade_ubuntu_to_latest $(print_distro_info)."
+
+if is_distro_name_older "$old_distro" "xenial"; then
   if dpkg -l | grep -qai '^i.*dovecot'; then
     print_uninstall_dovecot
     return 1
@@ -2046,15 +2115,17 @@ if [ $ret -eq 0 ]; then
 else
   echo "dss:warn: dist-upgrade from $current to $next appears to have failed." 
 fi
+echo "dss:trace:dist_upgrade_ubuntu_to_latest:completed $(print_distro_info).  ret=$ret"
 return $ret
 done
 }
 
 function convert_old_debian_repo() {
-echo "dss:trace:convert_old_debian_distro:"
 # no apt sources nothing to do
 [ ! -f /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu && return 0
+
+echo "dss:trace:convert_old_debian_distro"
 
 #deb http://http.us.debian.org/debian sarge main contrib non-free
 #deb http://non-us.debian.org/debian-non-US sarge/non-US main contrib non-free
@@ -2423,16 +2494,21 @@ return 0
 function dist_upgrade_to_latest() {
   echo "dss:trace:dist_upgrade_to_latest"
 
-  packages_upgrade || return $?
-  apt_get_dist_upgrade || return $?
-  dist_upgrade_lenny_to_squeeze || return $?
-  dist_upgrade_squeeze_to_wheezy || return $?
-  dist_upgrade_wheezy_to_jessie || return $?
-  dist_upgrade_jessie_to_stretch || return $?
-  dist_upgrade_stretch_to_buster || return $?
-  dist_upgrade_ubuntu_to_latest || return $?
-  apt_get_dist_upgrade || return $?
-  plesk_upgrade || return $?
+  if ! packages_upgrade; then echo "dss:error:dist_upgrade_to_latest:packages_upgrade:failed" && return 1; fi
+  if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
+  if [ -e /etc/apt/sources.list ] && lsb_release -a 2>/dev/null | grep -qai debian; then
+    if ! dist_upgrade_lenny_to_squeeze; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_lenny_to_squeeze:failed" && return 1; fi
+    if ! dist_upgrade_squeeze_to_wheezy; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_squeeze_to_wheezy:failed" && return 1; fi
+    if ! dist_upgrade_wheezy_to_jessie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_wheezy_to_jessie:failed" && return 1; fi
+    if ! dist_upgrade_jessie_to_stretch; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_jessie_to_stretch:failed" && return 1; fi
+    if ! dist_upgrade_stretch_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_stretch_to_buster:failed" && return 1; fi
+    if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
+  fi
+  if [ -e /etc/apt/sources.list ] && lsb_release -a 2>/dev/null | grep -qai ubuntu; then  
+    if ! dist_upgrade_ubuntu_to_latest; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_ubuntu_to_latest:failed" && return 1; fi
+    if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
+  fi
+  if ! plesk_upgrade; then echo "dss:error:dist_upgrade_to_latest:plesk_upgrade:failed" && return 1; fi
 }
 
 function print_php5_advice() {

@@ -4,13 +4,13 @@ distrorejuve is a utility that helps with upgrading distros. It works on a numbe
 Debian, Centos). It uses apt, yum and repository corrections as appropriate. It can dist upgrade between 
 multiple versions for Ubuntu and Debian.
 
-To get the latest version of this script:
+If you are using the script to make changes, please take a full backup first.
+
+Example usage to download the latest version of the script, then dist upgrade to latest Debian or Ubuntu disto. 
 
 wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
-Example usage to dist upgrade to latest Debian or Ubuntu disto. First make a backup of your server. Then run:
-
-sudo bash distrorejuve.sh --dist-upgrade | tee -a distrorejuve.log
+sudo bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\\+'
 
 Uses:
 - Enable archive repositories for older Debian distros

@@ -10,7 +10,7 @@ Example usage to download the latest version of the script, then dist upgrade to
 
 wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
-sudo bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\+'
+sudo bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\\+'
 
 Uses:
 - Enable archive repositories for older Debian distros

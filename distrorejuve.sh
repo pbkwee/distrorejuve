@@ -64,7 +64,7 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-update to update packages on the current distro version (no distro version change).
 
-Run with --show-changes to report the differences pre/post upgrading (packages, config files, ports, etc).
+Run with --show-changes to report the differences pre/post upgrading (packages installed, config files, ports, etc).
 
 Run with --show-cruft to see packages that do not belong to the current distro.  e.g. leftover packages from older distros.  And to see 32 bit packages installed on 64 bit distros.
 
@@ -369,6 +369,10 @@ function print_info() {
   df -m | awk '{print "dss:dfm:" $0}'
   which dpkg-query >/dev/null && dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
   [ -f /etc/apt/sources.list ] && cat /etc/apt/sources.list | egrep -v '^$|^#' | awk '{print "dss:aptsources:" $0}'
+  for i in /etc/apache2 /etc/httpd ; do 
+    [ ! -d "$i" ] && continue
+    find "$i" -type f | xargs --no-run-if-empty egrep -h '^ *ServerName' | sed 's/.*ServerName //' | sort | uniq | awk '{print "dss:apache:servernames:"$0}'
+  done
   return 0
 }
 
@@ -454,8 +458,10 @@ function upgrade_precondition_checks() {
         if [ ! -z "$otherrepos" ] && [ ! -z "$IGNOREBACKPORTS" ] ; then continue; fi
         # this version is used even for newer debian versions
         # deb http://download.webmin.com/download/repository sarge contrib
+        # deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin-stretch main
+        # deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin-universal main
         # note webmin repos name is sarge even on other debian/ubuntu versions
-        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | egrep 'download.webmin.com/download/repository.*sarge' | head -n 1)
+        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | egrep 'download.webmin.com/download/repository.*sarge|deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin' | head -n 1)
         [ ! -z "$otherrepos" ] && continue
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
         if [ ! -z "$otherrepos" ]; then
@@ -562,10 +568,13 @@ function add_missing_ubuntu_keys() {
   return 0
 }
 
+HAS_INSTALLED_KEYS=
 function add_missing_debian_keys() {
   [ ! -e /etc/apt/sources.list ] && return 0
   [ ! -x /usr/bin/apt-key ] && return 0
   print_distro_info | grep -qai debian || return 0
+  # only needs doing once
+  [ -n "$HAS_INSTALLED_KEYS" ] && return 0
   echo "dss:info: checking debian keys"
   # import the lts key
   # sometimes its like '...AD62 4692 5553' other times its like '...AD6246925553'
@@ -587,7 +596,7 @@ function add_missing_debian_keys() {
     gpg --keyserver pgpkeys.mit.edu --recv-key D97A3AE911F63C51
     gpg -a --export D97A3AE911F63C51 | apt-key add -
   fi
-  
+  HAS_INSTALLED_KEYS=Y  
   
   return 0
 }

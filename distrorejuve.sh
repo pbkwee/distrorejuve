@@ -13,7 +13,7 @@ OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid 
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
-ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
+ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye"
 # in egrep code be aware of etch/stretch matching
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
 # no archive for wheezy (update 2020-03, there is now)
@@ -21,7 +21,7 @@ UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
 DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" )"
 
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
-DEBIAN_CURRENT="jessie stretch buster"
+DEBIAN_CURRENT="jessie stretch buster bullseye"
 IS_DEBUG=
 APT_GET_INSTALL_OPTIONS=' -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss '
 # export this variable, e.g. to DAYS_UPGRADE_ONGOING=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
@@ -64,7 +64,7 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-update to update packages on the current distro version (no distro version change).
 
-Run with --show-changes to report the differences pre/post upgrading (packages, config files, ports, etc).
+Run with --show-changes to report the differences pre/post upgrading (packages installed, config files, ports, etc).
 
 Run with --show-cruft to see packages that do not belong to the current distro.  e.g. leftover packages from older distros.  And to see 32 bit packages installed on 64 bit distros.
 
@@ -78,7 +78,7 @@ Run with --to-wheezy to get from squeeze to wheezy
 
 Run with --to-jessie to get from an older distro to jessie
 
-Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch to buster 10
+Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch or buster to bullseye 11
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
@@ -116,14 +116,14 @@ function is_distro_name_newer() {
 # for debian or ubuntu names.  e.g. is_distro_name_newer jessie buster => 1 ; buster buster => 1; jessie buster =>0
 function is_distro_name_older() {
   local name="$1"
-  local newerthan="$2"
+  local olderthan="$2"
   local t=
   local is_name_found=N
-  local is_newer_found=N
+  local is_older_found=N
   for t in $ALL_DEBIAN $ALL_UBUNTU; do
     [ "$t" == "$name" ] && is_name_found=Y
-    [ "$t" == "$newerthan" ] && is_newer_found=Y
-    [ "$is_name_found" == "Y" ] && [ "$is_newer_found" == "Y" ] && return 1
+    [ "$t" == "$olderthan" ] && is_older_found=Y
+    [ "$is_name_found" == "Y" ] && [ "$is_older_found" == "Y" ] && return 1
     [ "$is_name_found" == "Y" ] && return 0
     
   done
@@ -369,6 +369,10 @@ function print_info() {
   df -m | awk '{print "dss:dfm:" $0}'
   which dpkg-query >/dev/null && dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
   [ -f /etc/apt/sources.list ] && cat /etc/apt/sources.list | egrep -v '^$|^#' | awk '{print "dss:aptsources:" $0}'
+  for i in /etc/apache2 /etc/httpd ; do 
+    [ ! -d "$i" ] && continue
+    find "$i" -type f | xargs --no-run-if-empty egrep -h '^ *ServerName' | sed 's/.*ServerName //' | sort | uniq | awk '{print "dss:apache:servernames:"$0}' | sort | uniq
+  done
   return 0
 }
 
@@ -454,8 +458,10 @@ function upgrade_precondition_checks() {
         if [ ! -z "$otherrepos" ] && [ ! -z "$IGNOREBACKPORTS" ] ; then continue; fi
         # this version is used even for newer debian versions
         # deb http://download.webmin.com/download/repository sarge contrib
+        # deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin-stretch main
+        # deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin-universal main
         # note webmin repos name is sarge even on other debian/ubuntu versions
-        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | egrep 'download.webmin.com/download/repository.*sarge' | head -n 1)
+        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | egrep 'download.webmin.com/download/repository.*sarge|deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin' | head -n 1)
         [ ! -z "$otherrepos" ] && continue
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
         if [ ! -z "$otherrepos" ]; then
@@ -562,10 +568,13 @@ function add_missing_ubuntu_keys() {
   return 0
 }
 
+HAS_INSTALLED_KEYS=
 function add_missing_debian_keys() {
   [ ! -e /etc/apt/sources.list ] && return 0
   [ ! -x /usr/bin/apt-key ] && return 0
   print_distro_info | grep -qai debian || return 0
+  # only needs doing once
+  [ -n "$HAS_INSTALLED_KEYS" ] && return 0
   echo "dss:info: checking debian keys"
   # import the lts key
   # sometimes its like '...AD62 4692 5553' other times its like '...AD6246925553'
@@ -587,7 +596,7 @@ function add_missing_debian_keys() {
     gpg --keyserver pgpkeys.mit.edu --recv-key D97A3AE911F63C51
     gpg -a --export D97A3AE911F63C51 | apt-key add -
   fi
-  
+  HAS_INSTALLED_KEYS=Y  
   
   return 0
 }
@@ -811,6 +820,17 @@ ret=$?
 return $ret
 }
 
+function dist_upgrade_buster_to_bullseye() {
+export old_distro=buster
+export old_ver="inux 10"
+export new_distro=bullseye
+export new_ver="inux 11"
+dist_upgrade_x_to_y
+ret=$?
+return $ret
+}
+
+
 # return 0 if a file or two was removed.  e.g. so you can to rm_overwrite_files $tmplog && retry
 function rm_overwrite_files() {
    [  -z "$1" ] && return 1
@@ -1015,7 +1035,7 @@ function check_systemd_install_matches_init() {
   dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | egrep -qai '^sysvinit(:|$)' && dpkgservicemanager="${dpkgservicemanager}sysvinit"
   dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | egrep -qai '^systemd(:|$)' && dpkgservicemanager="${dpkgservicemanager}systemd"
   
-  [ "$psservicemanager" != "$dpkgservicemanager" ] && echo "dss:warn:sysvinit / systemd conflict (between running init/systemd process, and installed packages).  Reboot (and rerun distrorejuve) required? controlling process is '$psservicemanager' (per lsof -p 1), packages are '$dpkgservicemanager'" 2>&1 && return 1
+  [ "$psservicemanager" != "$dpkgservicemanager" ] && echo "dss:warn:sysvinit / systemd conflict (between running init/systemd process, and installed packages).  Reboot (and rerun distrorejuve) required? controlling process is '$psservicemanager' (per lsof -p 1), packages are '$dpkgservicemanager'.  Sometimes running $0 --remove-cruft can remove older sysvinit packages to resolve this issue." 2>&1 && return 1
   return 0 
   
   # sysv wheezy
@@ -2226,10 +2246,17 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   fi
   for distro in $DEBIAN_CURRENT; do 
     if grep -qai "^ *deb.* ${distro}[ /-]" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.* ${distro}[ /-]" /etc/apt/sources.list; then
-       echo "dss:info: adding the $distro security repository to the sources.list"
-       cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
-       echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
-       apt_get_update
+      echo "dss:info: adding the $distro security repository to the sources.list"
+      cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
+      # https://wiki.debian.org/NewInBullseye
+      # The format of the /etc/apt/sources.list line for the security repository has changed. It should look something like this:
+      # deb http://security.debian.org/debian-security bullseye-security main
+      if is_distro_name_newer "${distro}" "buster"; then
+        echo "deb http://security.debian.org/debian-security ${distro}-security main" >> /etc/apt/sources.list
+      else
+        echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
+      fi
+      apt_get_update
     fi
   done
   POLICY=$(apt-cache policy libc6)
@@ -2516,6 +2543,7 @@ function dist_upgrade_to_latest() {
     if ! dist_upgrade_wheezy_to_jessie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_wheezy_to_jessie:failed" && return 1; fi
     if ! dist_upgrade_jessie_to_stretch; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_jessie_to_stretch:failed" && return 1; fi
     if ! dist_upgrade_stretch_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_stretch_to_buster:failed" && return 1; fi
+    if ! dist_upgrade_buster_to_bullseye; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_buster_to_bullseye:failed" && return 1; fi
     if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   fi
   if [ -e /etc/apt/sources.list ] && lsb_release -a 2>/dev/null | grep -qai ubuntu; then  
@@ -2574,6 +2602,8 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   dist_upgrade_jessie_to_stretch
   [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_stretch_to_buster
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_buster_to_bullseye
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes" 

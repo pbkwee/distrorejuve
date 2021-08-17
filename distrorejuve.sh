@@ -1007,10 +1007,15 @@ function check_systemd_install_matches_init() {
   ps auxf | egrep -qai '^root +1 +.*systemd' && psservicemanager="${psservicemanager}systemd"
   [ -z "$psservicemanager" ] && lsof -p 1 | grep -qai systemd && psservicemanager="${psservicemanager}systemd"
   
-  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | grep -qai '^sysvinit$' && dpkgservicemanager="${dpkgservicemanager}sysvinit"
-  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | grep -qai '^systemd$' && dpkgservicemanager="${dpkgservicemanager}systemd"
+  # packages will sometimes be
+  # systemd:i386
+  # or
+  # systemd
   
-  [ "$psservicemanager" != "$dpkgservicemanager" ] && echo "dss:warn:sysvinit / systemd conflict (between running init/systemd process, and installed packages).  Reboot (and rerun distrorejuve) required? controlling process is $psservicemanager, packages are $dpkgservicemanager" 2>&1 && return 1
+  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | egrep -qai '^sysvinit(:|$)' && dpkgservicemanager="${dpkgservicemanager}sysvinit"
+  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | egrep -qai '^systemd(:|$)' && dpkgservicemanager="${dpkgservicemanager}systemd"
+  
+  [ "$psservicemanager" != "$dpkgservicemanager" ] && echo "dss:warn:sysvinit / systemd conflict (between running init/systemd process, and installed packages).  Reboot (and rerun distrorejuve) required? controlling process is '$psservicemanager' (per lsof -p 1), packages are '$dpkgservicemanager'" 2>&1 && return 1
   return 0 
   
   # sysv wheezy
@@ -1132,9 +1137,13 @@ function crossgrade_debian() {
       #Unpacking replacement sysvinit ...
       #dpkg: regarding .../util-linux_2.20.1-5.3_amd64.deb containing util-linux, pre-dependency problem:
       #util-linux pre-depends on libblkid1 (>= 2.20.1)
+      #mime-support depends on mailcap; however:
+      #Package mailcap is not configured yet.
+      #mailcap depends on perl.
+
        
     
-      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
+      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed 's/;however.*//' | sed 's/.$//' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps
@@ -1388,9 +1397,10 @@ function crossgrade_debian() {
     # (excludes older packages that were uninstalled.  e.g. php5 on a newer ubuntu/debian)
     local i=
     local toreinstall=
+    local donotreinstallregex="linux-.*-686-pae|anotherpackagehere"
     for i in $uninstalled; do 
       # sometimes packages are removed, but due to being deprecated.  $available will contain only the packages on the current distro
-      echo "$available" | egrep -qai "^$i\$" && toreinstall="$toreinstall $i"
+      echo "$available" | egrep -v "$donotreinstallregex" | egrep -qai "^$i\$" && toreinstall="$toreinstall $i"
     done
     # => e.g. toreinstall=apache2 apache2-bin fontconfig-config fonts-dejavu-core 
     [ ! -z "$toreinstall" ] && echo "dss:info: Will reinstall some packages that have been removed during the crossgrade: $(echo $toreinstall)"
@@ -1769,9 +1779,13 @@ disable_debian_repos $old_distro
 
 if ! grep -qai "^ *deb.* ${new_distro}[ /-]" /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
+
+  #Err:3 http://security.debian.org bullseye/updates Release
+  #404  Not Found [IP: 199.232.10.132 80]
   echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
   echo "$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:dist_upgrade_x_to_y:" $0}'
 fi
+
 
 # redo to convert the above to archive where appropriate.  And add lts if appropriate.
 enable_debian_archive

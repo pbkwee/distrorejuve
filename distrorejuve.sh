@@ -1802,7 +1802,11 @@ if ! grep -qai "^ *deb.* ${new_distro}[ /-]" /etc/apt/sources.list; then
 
   #Err:3 http://security.debian.org bullseye/updates Release
   #404  Not Found [IP: 199.232.10.132 80]
-  echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
+  if is_distro_name_newer "${new_distro}" "buster"; then
+    echo "deb http://security.debian.org/debian-security ${new_distro}-security main" >> /etc/apt/sources.list
+  else
+    echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
+  fi
   echo "$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:dist_upgrade_x_to_y:" $0}'
 fi
 

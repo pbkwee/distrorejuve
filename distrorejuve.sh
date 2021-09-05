@@ -1170,7 +1170,7 @@ function crossgrade_debian() {
 
        
     
-      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed 's/;however.*//' | sed 's/.$//' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
+      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed 's/;however.*//' | sed 's/.$//' | sed  -r  's/\([^)]+\)//g' | sed 's/;//' | awk '{print $1":amd64"}' | sort | uniq)"
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps

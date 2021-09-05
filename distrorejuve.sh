@@ -1163,7 +1163,7 @@ function crossgrade_debian() {
 
        
     
-      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed 's/;however.*//' | sed 's/.$//' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
+      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed 's/;however.*//' | sed 's/;/ /g' | sed 's/.$//' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps
@@ -1246,7 +1246,7 @@ function crossgrade_debian() {
       # can also have versions
       # Pre-Depends: libc6 (>= 2.15), libgmp10, libmpfr6 (>= 3.1.3), libreadline7 (>= 6.0), libsigsegv2 (>= 2.9)
       local addep="" 
-      for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/,//g' | sed 's/.*://' | sed 's/ | /____/g'); do
+      for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/;/ /g' | sed 's/,//g' | sed 's/.*://' | sed 's/ | /____/g'); do
         if echo "$i" | grep -qai '____'; then
           local j="$(echo "$i" | sed 's/____/ /g')"
           for k in $j; do 

@@ -1036,7 +1036,7 @@ function crossgrade_debian() {
       #util-linux pre-depends on libblkid1 (>= 2.20.1)
        
     
-      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed  -r  's/\([^)]+\)//g' | sort | uniq | awk '{print $1":amd64"}')"
+      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed  -r  's/\([^)]+\)//g' | tr ';' ' ' | sort | uniq | awk '{print $1":amd64"}')"
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps
@@ -1068,7 +1068,7 @@ function crossgrade_debian() {
     # remove 'due to stuff' e.g.:
     #   dpkg:amd64 tar:amd64 (due to dpkg:amd64) perl-base:amd64
     
-    local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
+    local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g' | tr ';' ' ')"
     [  -z "$essentialtoinstall" ] && break  
     local i=;
     mkdir -p distrorejuveinfo/$$/essentialdebs
@@ -1112,7 +1112,7 @@ function crossgrade_debian() {
     for i386app in $i386apps; do
       local needsdeps= 
       apt-cache show $i386app | egrep -qai 'Essential: yes|Priority: required|Priority: important' && ! dpkg -l | egrep -qai '^ii.*${i386app}.*amd64' && essentialpackages="$essentialpackages ${i386app}:amd64" && needsdeps=true
-      [ ! -z "$needsdeps" ] && essentialdeps="$essentialdeps $(for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/,//g' | sed 's/.*://'); do echo $i:amd64; done)"
+      [ ! -z "$needsdeps" ] && essentialdeps="$essentialdeps $(for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/,//g' | sed 's/.*://' | tr ';' ' '); do echo $i:amd64; done)"
     done
     # => essentialpackages=base-files:amd64 base-passwd:amd64...
     
@@ -1512,11 +1512,11 @@ function tweak_broken_configs() {
   #needed to change to:
   #slow_query_log                  = 1
   #slow_query_log_file             = /var/log/mysql/mysql-slow.log
-  #find /var/log -type f | xargs grep log_slow | grep ERROR
+  #find /var/log -type f | xargs --no-run-if-empty grep log_slow | grep ERROR
   #/var/log/daemon.log:Apr  6 19:14:44 ititch mysqld_safe[13273]: 2020-04-06 19:14:44 3079187200 [ERROR] /usr/sbin/mysqld: unknown variable 'log_slow_queries=/var/log/mysql/mysql-slow.log'
   if [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
     echo "dss:info: Disabling log_slow settings, they are now slow_query_log"
-    [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs grep -l '^log_slow'); do
+    [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs --no-run-if-empty grep -l '^log_slow'); do
       sed -i 's/^log_slow/#log_slow/' $file && echo "dss:info: disabled log_slow in $file"
     done
     [ -f /etc/init.d/mysql ] && ps auxf | grep -qai '[m]ysqld_safe' && /etc/init.d/mysql restart && "dss:info: issued a mysql restart" 

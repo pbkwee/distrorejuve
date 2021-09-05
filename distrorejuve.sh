@@ -1111,7 +1111,14 @@ function crossgrade_debian() {
   local apachepkg="$(dpkg -l | grep '^.*ii' | grep -qai apache2-bin && echo apache2-bin)"
   apt_get_update
   apt_get_install apt-rdepends
-  [ $? -ne 0 ] && echo "dss:error: failed to install apt-rdpends.  Which we rely on to download necessary dependencies." && return 1
+  
+  if [ $? -ne 0 ]; then
+    if dpkg -l | egrep apt-rdepends | grep -qai ii; then 
+      echo "dss:warn: getting an error on apt-get install apt-rdpends.  However it is installed.  So let's proceed." 
+    else 
+      echo "dss:error: failed to install apt-rdpends.  Which we rely on to download necessary dependencies."
+    fi 
+  fi
    
   [  ! -x /usr/bin/apt-show-versions ] && apt_get_install apt-show-versions
   [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --show-cruft followed by bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
@@ -1163,7 +1170,7 @@ function crossgrade_debian() {
 
        
     
-      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed 's/;however.*//' | sed 's/;/ /g' | sed 's/.$//' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
+      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed 's/;however.*//' | sed 's/.$//' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps
@@ -1246,7 +1253,7 @@ function crossgrade_debian() {
       # can also have versions
       # Pre-Depends: libc6 (>= 2.15), libgmp10, libmpfr6 (>= 3.1.3), libreadline7 (>= 6.0), libsigsegv2 (>= 2.9)
       local addep="" 
-      for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/;/ /g' | sed 's/,//g' | sed 's/.*://' | sed 's/ | /____/g'); do
+      for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/,//g' | sed 's/.*://' | sed 's/ | /____/g'); do
         if echo "$i" | grep -qai '____'; then
           local j="$(echo "$i" | sed 's/____/ /g')"
           for k in $j; do 

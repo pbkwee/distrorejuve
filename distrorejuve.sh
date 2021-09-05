@@ -9,11 +9,11 @@ export APT_LISTCHANGES_FRONTEND=none
 # no leading/trailing spaces.  one space per word.
 LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal"
 #ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
-OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal"
+OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco eoan"
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
-ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
+ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye"
 # in egrep code be aware of etch/stretch matching
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
 # no archive for wheezy (update 2020-03, there is now)
@@ -21,7 +21,7 @@ UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
 DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" )"
 
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
-DEBIAN_CURRENT="jessie stretch buster"
+DEBIAN_CURRENT="jessie stretch buster bullseye"
 IS_DEBUG=
 APT_GET_INSTALL_OPTIONS=' -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss '
 # export this variable, e.g. to DAYS_UPGRADE_ONGOING=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
@@ -32,15 +32,15 @@ function print_usage() {
 
 distrorejuve is a utility that helps with upgrading distros. It works on a number of different distros (Ubuntu, 
 Debian, Centos). It uses apt, yum and repository corrections as appropriate. It can dist upgrade between 
-multiple versions for Ubuntu and Debian.
+multiple versions for Ubuntu and Debian.  It can convert (some) distros from 32bit to 64 bit (a cross grade).
 
-To get the latest version of this script:
+If you are using the script to make changes, please take a full backup first.
+
+Example usage to download the latest version of the script, then dist upgrade to latest Debian or Ubuntu disto. 
 
 wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
-Example usage to dist upgrade to latest Debian or Ubuntu disto. First make a backup of your server. Then run:
-
-sudo bash distrorejuve.sh --dist-upgrade | tee -a distrorejuve.log
+sudo bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\+'
 
 Uses:
 - Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
@@ -64,7 +64,7 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-update to update packages on the current distro version (no distro version change).
 
-Run with --show-changes to report the differences pre/post upgrading (packages, config files, ports, etc).
+Run with --show-changes to report the differences pre/post upgrading (packages installed, config files, ports, etc).
 
 Run with --show-cruft to see packages that do not belong to the current distro.  e.g. leftover packages from older distros.  And to see 32 bit packages installed on 64 bit distros.
 
@@ -78,7 +78,7 @@ Run with --to-wheezy to get from squeeze to wheezy
 
 Run with --to-jessie to get from an older distro to jessie
 
-Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch to buster 10
+Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch or buster to bullseye 11
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
@@ -93,8 +93,43 @@ Use with --source if you just wish to have the distrorejuve functions available 
 Written by Peter Bryant at http://launchtimevps.com
 
 Latest version (or thereabouts) will be available at https://github.com/pbkwee/distrorejuve
+
+
 "
 }
+
+# for debian or ubuntu names.  e.g. is_distro_name_newer jessie buster => 1 ; buster buster => 1; jessie buster =>0
+function is_distro_name_newer() {
+  local name="$1"
+  local newerthan="$2"
+  local t=
+  local is_name_found=N
+  local is_newer_found=N
+  for t in $ALL_DEBIAN $ALL_UBUNTU; do
+    [ "$t" == "$name" ] && is_name_found=Y
+    [ "$is_name_found" == "Y" ] && [ "$is_newer_found" == "Y" ] && return 0
+    [ "$is_name_found" == "Y" ] && return 1
+    [ "$t" == "$newerthan" ] && is_newer_found=Y
+  done
+  return 1
+}
+# for debian or ubuntu names.  e.g. is_distro_name_newer jessie buster => 1 ; buster buster => 1; jessie buster =>0
+function is_distro_name_older() {
+  local name="$1"
+  local olderthan="$2"
+  local t=
+  local is_name_found=N
+  local is_older_found=N
+  for t in $ALL_DEBIAN $ALL_UBUNTU; do
+    [ "$t" == "$name" ] && is_name_found=Y
+    [ "$t" == "$olderthan" ] && is_older_found=Y
+    [ "$is_name_found" == "Y" ] && [ "$is_older_found" == "Y" ] && return 1
+    [ "$is_name_found" == "Y" ] && return 0
+    
+  done
+  return 1
+}
+
 
 function is_fixed() {
   # 0 = vulnerable, 1 = fixed, 2 = dunno
@@ -334,6 +369,10 @@ function print_info() {
   df -m | awk '{print "dss:dfm:" $0}'
   which dpkg-query >/dev/null && dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
   [ -f /etc/apt/sources.list ] && cat /etc/apt/sources.list | egrep -v '^$|^#' | awk '{print "dss:aptsources:" $0}'
+  for i in /etc/apache2 /etc/httpd ; do 
+    [ ! -d "$i" ] && continue
+    find "$i" -type f | xargs --no-run-if-empty egrep -h '^ *ServerName' | sed 's/.*ServerName //' | sort | uniq | awk '{print "dss:apache:servernames:"$0}' | sort | uniq
+  done
   return 0
 }
 
@@ -370,7 +409,7 @@ function upgrade_precondition_checks() {
     # install ok installed utils zip
     # install ok installed vcs cvs
     # install ok installed vcs patch
-    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'libx11|libx11-data|x11-common|xauth|xfonts-encodings|xfonts-utils|msttcorefonts|gnome$|gnome-icon-theme|libsoup|gsettings-desktop|adwaita-icon-th|lib-xkd|mesa-util|xkb-data|icon-the|ubuntu-mono|x11proto|xtrans-dev' | tr '\r\n' ' ')"
+    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'libx11|libx11-data|x11-common|theme-ubuntu-text|xauth|xfonts-encodings|xfonts-utils|msttcorefonts|gnome$|gnome-icon-theme|libsoup|gsettings-desktop|adwaita-icon-th|lib-xkd|mesa-util|xkb-data|icon-the|ubuntu-mono|plymouth|x11proto|xtrans-dev' | tr '\r\n' ' ')"
   fi
   if [  ! -z "$libx11" ]; then
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
@@ -419,8 +458,10 @@ function upgrade_precondition_checks() {
         if [ ! -z "$otherrepos" ] && [ ! -z "$IGNOREBACKPORTS" ] ; then continue; fi
         # this version is used even for newer debian versions
         # deb http://download.webmin.com/download/repository sarge contrib
+        # deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin-stretch main
+        # deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin-universal main
         # note webmin repos name is sarge even on other debian/ubuntu versions
-        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | egrep 'download.webmin.com/download/repository.*sarge' | head -n 1)
+        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | egrep 'download.webmin.com/download/repository.*sarge|deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin' | head -n 1)
         [ ! -z "$otherrepos" ] && continue
         local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
         if [ ! -z "$otherrepos" ]; then
@@ -527,10 +568,13 @@ function add_missing_ubuntu_keys() {
   return 0
 }
 
+HAS_INSTALLED_KEYS=
 function add_missing_debian_keys() {
   [ ! -e /etc/apt/sources.list ] && return 0
   [ ! -x /usr/bin/apt-key ] && return 0
   print_distro_info | grep -qai debian || return 0
+  # only needs doing once
+  [ -n "$HAS_INSTALLED_KEYS" ] && return 0
   echo "dss:info: checking debian keys"
   # import the lts key
   # sometimes its like '...AD62 4692 5553' other times its like '...AD6246925553'
@@ -546,6 +590,14 @@ function add_missing_debian_keys() {
     gpg --recv-key AED4B06F473041FA
     gpg -a --export AED4B06F473041FA | apt-key add -
   fi
+  if ! apt-key list | egrep D97A3AE911F63C51; then
+    #webmin key
+    echo "dss:info: installing webmin key"
+    gpg --keyserver pgpkeys.mit.edu --recv-key D97A3AE911F63C51
+    gpg -a --export D97A3AE911F63C51 | apt-key add -
+  fi
+  HAS_INSTALLED_KEYS=Y  
+  
   return 0
 }
 
@@ -598,7 +650,7 @@ function disable_debian_repos() {
   prep_ghost_output_dir
   cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: disable_debian_repos $name diff follows:"
-  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff: " $1}'
+  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff: " $0}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
   echo "$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:disable_debian_repos:post:" $0}'
   return 0
@@ -648,10 +700,18 @@ function enable_debian_archive() {
   prep_ghost_output_dir
   cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
   echo "dss:info: enabling debian archive repos.  diff follows:"
-  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff:sources: " $1}'
+  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff:sources: " $0}'
   mv /etc/apt/sources.list.$$ /etc/apt/sources.list
   [ ! -z "$IS_DEBUG" ] && echo "apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:trace:sources:enable_debian_archive:post:" $0 }'
   return 0
+}
+
+function print_uninstall_fail2ban() {
+  [ ! -f /etc/apt/sources.list ] && return 0
+  ! dpkg -l | grep -qai '^i.*fail2ban' && return 0
+  echo "dss:info: Changes to the fail2ban configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
+  echo "dss:info: Please remove the fail2ban configs.  You may do that with the following commands:"
+  echo apt-get -y purge $(dpkg -l | grep fail2ban | egrep -i 'ii|iF|iU' | awk '{print $2}')
 }
 
 function print_uninstall_dovecot() {
@@ -660,10 +720,11 @@ function print_uninstall_dovecot() {
   # trusty 2.9, precise 2.0, lucid (=10.4) 1.29 per https://launchpad.net/ubuntu/+source/dovecot
   echo "dss:info: Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
   echo "dss:info: Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
-  echo "dss:info: Saving the current dovecot config to /root/distrorejuveinfo/postconf.log.$$"
+  echo "dss:info: Saving the current dovecot config to /root/distrorejuveinfo/doveconf.log.$$"
   echo "dss:info: Please remove dovecot.  You may do that with the following commands:"
   prep_ghost_output_dir
   postconf -n > /root/distrorejuveinfo/postconf.log.$$
+  doveconf -n > /root/distrorejuveinfo/doveconf.log.$$
   echo apt-get -y remove $(dpkg -l | grep dovecot | egrep -i 'ii|iF|iU' | awk '{print $2}')
   # dovecot reinstall tips
   
@@ -710,7 +771,7 @@ function print_failed_dist_upgrade_tips() {
 function dist_upgrade_lenny_to_squeeze() {
 export old_distro=lenny
 export old_ver="inux 5"
-export new_distro=wheezy
+export new_distro=squeeze
 export new_ver="inux 6"
 
 dist_upgrade_x_to_y
@@ -759,12 +820,57 @@ ret=$?
 return $ret
 }
 
+function dist_upgrade_buster_to_bullseye() {
+export old_distro=buster
+export old_ver="inux 10"
+export new_distro=bullseye
+export new_ver="inux 11"
+dist_upgrade_x_to_y
+ret=$?
+return $ret
+}
+
+
 # return 0 if a file or two was removed.  e.g. so you can to rm_overwrite_files $tmplog && retry
 function rm_overwrite_files() {
    [  -z "$1" ] && return 1
    [  ! -f "$1" ] && return 1
    local tmplog="$1"
    
+  if egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $tmplog; then
+    echo "dss:warn: mysql error.  Trying a mysql_upgrade to resolve."
+    mysql_upgrade 
+  fi
+  local mysqlerrlogs="$([ -d /var/lib/mysql ] && [ -d /var/log/mysql ] && find /var/lib/mysql /var/log/mysql -type f -mmin -10 | egrep '\.err$|mysql/error.log')"
+  if [ -d /var/lib/mysql ] ; then
+    mysqlerrlogs="$mysqlerrlog $tmplog"
+  fi
+  if [ ! -z "$mysqlerrlogs" ] && grep -qai 'Thread stack overrun' $mysqlerrlogs; then
+    echo "dss:warn: mysql Thread stack overrun.  Attempting to tweak 128K stacks to be bigger."
+    find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep 'thread_stac' | awk '{print "dss:info:mysqlthreadstacks:before:" $0}'
+    find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep -l '^thread_stac' | xargs --no-run-if-empty  sed -i 's/128K/256K/'
+    find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep 'thread_stac' | awk '{print "dss:info:mysqlthreadstacks:after:" $0}'
+  fi
+  if [ ! -z "$mysqlerrlogs" ] && egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $tmplog; then
+    echo "dss:warn: mysql error.  Trying a mysql_upgrade to resolve."
+    mysql_upgrade 
+  fi
+  
+  # disable some settings that become deprecated (if they are causing errors).
+  if [ ! -z "$mysqlerrlogs" ] && egrep -qai 'e-rc.d: initscript mysql, action "start" fai' $mysqlerrlogs || 
+    egrep -qai 'pkg: error processing package mysq' $mysqlerrlogs ||
+    egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $mysqlerrlogs; then 
+    for i in query_cache_limit query_cache_size key_buffer myisam-recover; do
+      if egrep -qai "unknown variable '$i" $mysqlerrlogs; then   
+      #if egrep -aqi "unknown variable '$i" $tmplog; then
+        echo "dss:warn: trying to fix an issue re unknown variable $i."
+        find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep "$i" | awk '{print "dss:info:mysql:'$i':before:" $0}'
+        find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep -l "^$i" | xargs --no-run-if-empty  sed -i "s/^$i/#$i/"
+        find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep "$i" | awk '{print "dss:info:mysql:'$i':after:" $0}'
+      fi
+    done
+  fi
+  
    
   if egrep -qi "doveconf: Fatal: " "$tmplog"; then
     # e.g. doveconf: Fatal: Error in configuration file /etc/dovecot/dovecot.conf: ssl enabled, but ssl_cert not set
@@ -774,6 +880,10 @@ function rm_overwrite_files() {
     echo "dss:warn: issue with obsolete dovecot config.  $(egrep -i "doveconf: Fatal: " "$tmplog")"
     echo "dss:warn: May pay to remove dovecot per the instructions below."
     print_uninstall_dovecot
+  fi
+  if egrep -qi "dpkg: error processing package fail2ban (--configure):" "$tmplog" || egrep -qi 'See "systemctl status fail2ban.service"' "$tmplog" ; then
+    echo "dss:error: issue with fail2ban config.  Resolve (e.g. by removing dovecot for fixing the issue). $(egrep -i "fail2ban (--configure|status fail2ban.service" "$tmplog")"
+    print_uninstall_fail2ban
   fi
   
   #  trying to overwrite shared '/usr/share/doc/libkmod2/changelog.Debian.gz', which is different from other instances of package libkmod2:amd64
@@ -834,6 +944,7 @@ function apt_get_f_install() {
   if [  $ret -ne 0 ]; then 
     rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS -f install && ret=$?
   fi
+  echo "dss:trace:apt_get_f_install:$1 results $(egrep 'upgraded' $tmplog)"
   local essentialissuepackages="$(cat $tmplog | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_f_install $@ essential package issues for: $essentialissuepackages"  
   
@@ -916,10 +1027,15 @@ function check_systemd_install_matches_init() {
   ps auxf | egrep -qai '^root +1 +.*systemd' && psservicemanager="${psservicemanager}systemd"
   [ -z "$psservicemanager" ] && lsof -p 1 | grep -qai systemd && psservicemanager="${psservicemanager}systemd"
   
-  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | grep -qai '^sysvinit$' && dpkgservicemanager="${dpkgservicemanager}sysvinit"
-  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | grep -qai '^systemd$' && dpkgservicemanager="${dpkgservicemanager}systemd"
+  # packages will sometimes be
+  # systemd:i386
+  # or
+  # systemd
   
-  [ "$psservicemanager" != "$dpkgservicemanager" ] && echo "dss:warn:sysvinit / systemd conflict (between running init/systemd process, and installed packages).  Reboot (and rerun distrorejuve) required? controlling process is $psservicemanager, packages are $dpkgservicemanager" 2>&1 && return 1
+  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | egrep -qai '^sysvinit(:|$)' && dpkgservicemanager="${dpkgservicemanager}sysvinit"
+  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | egrep -qai '^systemd(:|$)' && dpkgservicemanager="${dpkgservicemanager}systemd"
+  
+  [ "$psservicemanager" != "$dpkgservicemanager" ] && echo "dss:warn:sysvinit / systemd conflict (between running init/systemd process, and installed packages).  Reboot (and rerun distrorejuve) required? controlling process is '$psservicemanager' (per lsof -p 1), packages are '$dpkgservicemanager'.  Sometimes running $0 --remove-cruft can remove older sysvinit packages to resolve this issue." 2>&1 && return 1
   return 0 
   
   # sysv wheezy
@@ -950,7 +1066,7 @@ function check_systemd_install_matches_init() {
 }
 
 function crossgrade_debian() {
-  [  ! -f /etc/debian_version ] && echo "dss:info: Only debian and Ubuntu crossgrades are supported, but not $(print_distro_info)." && return 1
+  [  ! -f /etc/debian_version ] && echo "dss:info: Only debian and Ubuntu crossgrades are supported, but not $(print_distro_info)." && return 0
   
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
@@ -994,7 +1110,9 @@ function crossgrade_debian() {
   local vimpkg="$(dpkg -l | grep '^.*ii' | grep -qai vim && echo vim)"
   local apachepkg="$(dpkg -l | grep '^.*ii' | grep -qai apache2-bin && echo apache2-bin)"
   apt_get_update
-
+  apt_get_install apt-rdepends
+  [ $? -ne 0 ] && echo "dss:error: failed to install apt-rdpends.  Which we rely on to download necessary dependencies." && return 1
+   
   [  ! -x /usr/bin/apt-show-versions ] && apt_get_install apt-show-versions
   [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --show-cruft followed by bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
   
@@ -1020,12 +1138,17 @@ function crossgrade_debian() {
     [  $? -ne 0 ] && apt-get download perl-base:amd64
     apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl:amd64
     [  $? -ne 0 ] && apt-get download perl:amd64
+    requiredlist="$(apt-rdepends apt apt-listchanges| grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}')"
+    for i in $requiredlist; do echo $i==; apt-get --reinstall --download-only  $APT_GET_INSTALL_OPTIONS install $i; done
+    #E: Unable to locate package libbz2-1.0:amd64
+    #E: Couldn't find any package by glob 'libbz2-1.0'
+     
     
     echo "dss:trace: cross grading.  installing key amd64 deb packages: dpkg:amd64 tar:amd64 apt:amd64 perl-base:amd64"
     # something about this removes apache2.  figure out why...
     [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
     cd /root/distrorejuveinfo/$$
-    local debs="$(find /var/cache/apt/archives -name '*_amd64.deb') $(find . -maxdepth 1 -name '*_amd64.deb')"
+    local debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$') $(find . -maxdepth 1 -type f  | egrep 'amd64.deb$|all.deb$')"
     while true; do
       #Preparing to replace libblkid1:amd64 2.20.1-5.3 (using libblkid1_2.20.1-5.3_amd64.deb) ...
       #Unpacking replacement libblkid1:amd64 ...
@@ -1034,13 +1157,17 @@ function crossgrade_debian() {
       #Unpacking replacement sysvinit ...
       #dpkg: regarding .../util-linux_2.20.1-5.3_amd64.deb containing util-linux, pre-dependency problem:
       #util-linux pre-depends on libblkid1 (>= 2.20.1)
+      #mime-support depends on mailcap; however:
+      #Package mailcap is not configured yet.
+      #mailcap depends on perl.
+
        
     
-      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed  -r  's/\([^)]+\)//g' | tr ';' ' ' | sort | uniq | awk '{print $1":amd64"}')"
+      local predeps="$(dpkg_install $debs 2>&1 | grep 'depends on' | sed 's/.*depends on //' | sed 's/;however.*//' | sed 's/.$//' | sed  -r  's/\([^)]+\)//g' | awk '{print $1":amd64"}' | sort | uniq)"
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps
-      debs="$(find /var/cache/apt/archives -name '*_amd64.deb') $(find . -maxdepth 1 -name '*_amd64.deb')"
+      debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$') $(find . -maxdepth 1 -type f  | egrep 'amd64.deb$|all.deb$')"
     done
     if [  ! -z "$debs" ]; then 
       dpkg_install $debs
@@ -1055,7 +1182,7 @@ function crossgrade_debian() {
   echo "dss:trace: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
   local i=0
   for i in 0 1; do
-    apt_get_f_install
+    apt_get_f_install crossgrade
     ret=$?
     [ $ret -eq 0 ] && break;
     # apt-get -f install=>
@@ -1068,7 +1195,7 @@ function crossgrade_debian() {
     # remove 'due to stuff' e.g.:
     #   dpkg:amd64 tar:amd64 (due to dpkg:amd64) perl-base:amd64
     
-    local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g' | tr ';' ' ')"
+    local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
     [  -z "$essentialtoinstall" ] && break  
     local i=;
     mkdir -p distrorejuveinfo/$$/essentialdebs
@@ -1112,15 +1239,39 @@ function crossgrade_debian() {
     for i386app in $i386apps; do
       local needsdeps= 
       apt-cache show $i386app | egrep -qai 'Essential: yes|Priority: required|Priority: important' && ! dpkg -l | egrep -qai '^ii.*${i386app}.*amd64' && essentialpackages="$essentialpackages ${i386app}:amd64" && needsdeps=true
-      [ ! -z "$needsdeps" ] && essentialdeps="$essentialdeps $(for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/,//g' | sed 's/.*://' | tr ';' ' '); do echo $i:amd64; done)"
+      [ -z "$needsdeps" ] && continue
+      # pre-depends can include options (one of n).  e.g. init
+      # apt-cache show init | grep Pre-Depends 
+      # Pre-Depends: systemd-sysv | sysvinit-core | runit-init
+      # can also have versions
+      # Pre-Depends: libc6 (>= 2.15), libgmp10, libmpfr6 (>= 3.1.3), libreadline7 (>= 6.0), libsigsegv2 (>= 2.9)
+      local addep="" 
+      for i in $(apt-cache show $i386app | grep Pre-Depends  | sed  -r  's/\([^)]+\)//g' | sed 's/,//g' | sed 's/.*://' | sed 's/ | /____/g'); do
+        if echo "$i" | grep -qai '____'; then
+          local j="$(echo "$i" | sed 's/____/ /g')"
+          for k in $j; do 
+            if dpkg -l | grep 'ii' | grep -qai " $k"; then
+              echo "dss:info:selecting $k as the pre-dependency for $i386app from options of '$j' since that is what is installed"
+              i="$k"
+            fi
+          done
+          [ -z "$i" ] && i="$(echo $j | awk '{print $0}')" &&  echo "dss:info:selecting $i as the pre-dependencies for $i386 from options of '$i' since it that is the first one listed and the others were not installed"
+        fi        
+        addep="$addep $i:amd64" 
+      done
+      essentialdeps="$essentialdeps $addep"
     done
     # => essentialpackages=base-files:amd64 base-passwd:amd64...
     
     [ -z "$essentialpackages" ] && break
-    local debs="$(find /var/cache/apt/archives -name '*_amd64.deb')"
+    local debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$')"
     [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
     [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
-    echo "dss:info: cross grading essential packages to download: $essentialpackages and essentialdependencies: $essentialdeps"
+    echo "dss:info: cross grading essential packages.  Downloading essentialpackages: $essentialpackages"
+    echo "dss:info: cross grading essential packages.  Downloading essentialdependencies: $essentialdeps"
+
+    essentialpackages="$(for i in $essentialpackages; do echo $i; done | sort | uniq)"
+    essentialdeps="$(for i in $essentialdeps; do echo $i; done | sort | uniq)"
     cd /root/distrorejuveinfo/$$
     [ ! -z "$essentialpackages" ] && apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages || apt-get download $essentialpackages
     [ ! -z "$essentialdeps" ] && apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialdeps || apt-get download $essentialdeps
@@ -1128,10 +1279,9 @@ function crossgrade_debian() {
     #apt-get --reinstall --download-only -y install systemd-sysv:amd64
     apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install libc-bin:amd64
     echo "dss:trace: cross grading dpkg installing essential packages."
-    yyyy
     #apt-get download e2fsprogs:amd64 util-linux:amd64 sed:amd64
-    local debs="$(find /var/cache/apt/archives -name '*_amd64.deb')"
-    local debs2="$(find . -name '*_amd64.deb')"
+    local debs="$(find /var/cache/apt/archives -type f |  egrep 'amd64.deb$|all.deb$')"
+    local debs2="$(find . -type f  | egrep 'amd64.deb$|all.deb$')"
     [  ! -z "$debs" ] && dpkg_install $debs $debs2
     ret=$?
     [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
@@ -1150,7 +1300,6 @@ function crossgrade_debian() {
   
   local i=0
   for i in 0 1; do  
-    echo "dss:trace: cross grading and bulk replacing i386 apps with 64 bit versions"
     # for all i386 apps, install the amd64 and remove the i386.  some will fail, that's ok.
     # do
     #apt-get $APT_GET_INSTALL_OPTIONS autoremove
@@ -1161,19 +1310,32 @@ function crossgrade_debian() {
     # e.g. => apache2-utils:amd64 bc:amd64 bind9-host:amd64
     [  -z "$amd64toinstall" ] && [  -z "$i386toremove" ] && break
     local ret=0   
-    apt_get_install $amd64toinstall && apt_get_remove $i386toremove
-    [  $? -ne 0 ] && ret=$(($ret+1))    
-    echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages."
+    # tends to remove necessities.  like ifupdown
+    # echo "dss:trace: cross grading and bulk replacing i386 apps with 64 bit versions.  Round #$i"
+    # apt_get_install $amd64toinstall && apt_get_remove $i386toremove
+    #[  $? -ne 0 ] && ret=$(($ret+1))    
     local pkg=
     local i386toremove="$(dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//')"
+    echo "dss:trace: cross grading and individually installing 64 bit versions of all i386 packages: $i386toremove"
     # => e.g. apache2-utils bc bind9-host
-    for pkg in $i386toremove ; do 
+    local i386toremove2=""
+    # install them all
+    for pkg in $i386toremove ifupdown; do 
       apt_get_install $pkg:amd64
       local lret=$?
       # fwiw apt-get install $alreadyinstalled returns 0
-      [  $lret -eq 0 ] && apt_get_remove $pkg:i386 
-      [  $lret -ne 0 ] && ret=$(($ret+1)) && apt_get_f_install
+      [  $lret -eq 0 ] && echo $pkg | egrep -qai 'gcc.*base' && echo "dss:info: not apt-get remove-ing $pkg, as has tended to remove lots of necessary things.  e.g. ifupdown."
+      [  $lret -eq 0 ] && echo $pkg | egrep -qai 'gcc.*base' || i386toremove2="$i386toremove2 $pkg" 
     done
+    echo "dss:trace: removing 32 bit versions of packages where we were able to install the 64bit version: $i386toremove2"
+    # then remove the i386 version.  Used to this after installing each amd64 package, but that sometimes led to other things being removed that broke things
+    # fwiw when you install $pkg:amd4 it will typically remove the $pkg:i386, so hopefully not will actually happen in this section?
+    for pkg in $i386toremove2 ; do 
+      local lret=$?
+      [  $lret -eq 0 ] && echo $pkg | egrep -qai 'gcc.*base' || apt_get_remove $pkg:i386 
+      [  $lret -ne 0 ] && ret=$(($ret+1)) && apt_get_f_install "after-${pkg}-remove"
+    done
+    echo "dss:trace: completed individual install and removal of i386 packaged.  Ret code of $ret (0 means we are done, otherwise we go for another round)."
     [  $ret -eq 0 ] && break
   done
   
@@ -1184,14 +1346,14 @@ function crossgrade_debian() {
       for i in $amd64toinstall; do 
         dpkg -l | grep '^ii' | awk '{print $2}' | grep -qai $i || echo "dss:trace: downloading amd64 debian file for $i" && apt-get download $i
       done
-      local amdfilestoinstall=$(find . -type f -name '*amd64.deb')
+      local amdfilestoinstall="$(find . -type f  | egrep 'amd64.deb$|all.deb$')"
       if [ -z "$amdfilestoinstall" ]; then
         echo "dss:trace: not finding any extra amd64 files to install" 
         break; 
       fi
       cd -
       echo "dss:trace: attempting a dpkg install of non-lib packages: $(echo $amd64toinstall)"
-      dpkg_install $(find distrorejuveinfo/$$/extra64debs -type f -name '*amd64.deb')
+      dpkg_install $(find distrorejuveinfo/$$/extra64debs -type f  | egrep 'amd64.deb$|all.deb$')
       local lret=$?
       echo "dss:trace: dpkg install $( [ $lret -eq 0] && echo "succeeded" || echo "failed")"
       break
@@ -1210,13 +1372,13 @@ function crossgrade_debian() {
         apt-get download $i
       done
       cd -
-      local amdfilestoinstall=$(find distrorejuveinfo/$$/settheory -type f -name '*amd64.deb')
+      local amdfilestoinstall=$(find distrorejuveinfo/$$/settheory -type f  | egrep 'amd64.deb$|all.deb$')
       if [ -z "$amdfilestoinstall" ]; then
         echo "dss:trace: not finding any extra amd64 files to install per distrorejuveinfo/$$/settheory" 
         break; 
       fi
       echo "dss:trace: using set theory method for lib and non-lib packages: $(echo $amd64toinstall)"
-      dpkg_install $(find distrorejuveinfo/$$/settheory -type f -name '*amd64.deb')
+      dpkg_install $(find distrorejuveinfo/$$/settheory -type f  | egrep 'amd64.deb$|all.deb$')
       local lret=$?
       echo "dss:trace: set theory dpkg install $( [ $lret -eq 0] && echo "succeeded" || echo "failed")"
       break
@@ -1255,9 +1417,10 @@ function crossgrade_debian() {
     # (excludes older packages that were uninstalled.  e.g. php5 on a newer ubuntu/debian)
     local i=
     local toreinstall=
+    local donotreinstallregex="linux-.*-686-pae|anotherpackagehere"
     for i in $uninstalled; do 
       # sometimes packages are removed, but due to being deprecated.  $available will contain only the packages on the current distro
-      echo "$available" | egrep -qai "^$i\$" && toreinstall="$toreinstall $i"
+      echo "$available" | egrep -v "$donotreinstallregex" | egrep -qai "^$i\$" && toreinstall="$toreinstall $i"
     done
     # => e.g. toreinstall=apache2 apache2-bin fontconfig-config fonts-dejavu-core 
     [ ! -z "$toreinstall" ] && echo "dss:info: Will reinstall some packages that have been removed during the crossgrade: $(echo $toreinstall)"
@@ -1333,6 +1496,37 @@ function remove_cruft_packages() {
    return $?
 }
 
+function print_no_available_versions() {
+  [ ! /etc/apt/sources.list ] && return 0
+  [ ! -x /usr/bin/apt-show-versions ] && echo "dss:error:apt-show-versions is not installed." >&2 && return 1
+  local not_available="$(mktemp "not_available.log.XXXXXX")"
+  local amd64_available="$(mktemp "available.log.XXXXXX")"
+  apt-show-versions | grep 'No available version' | awk '{print $1}' | sed 's/:.*//' | sort > $not_available
+  dpkg --print-architecture | grep -qai amd64 && cat $not_available && rm -f $not_available && return 0
+  local remove_amd64=""
+  # add amd64 and update list if we need it
+  # dpkg --print-architecture 
+  #i386
+  # dpkg --print-foreign-architectures
+  #amd64
+  ! dpkg --print-foreign-architectures  | grep -qai amd64 && dpkg --add-architecture amd64 && remove_amd64="dpkg --remove-architecture amd64" && apt_get_update > /dev/null
+  apt-show-versions | grep -v 'No available version' | grep amd64 | awk '{print $1}' | sed 's/:.*//'| sort > $amd64_available
+  # on ubuntu (at least) we get, say, postfix 'No available version in archive' for the i386, but there exists an amd64 package
+  # /usr/bin/apt-show-versions | egrep 'subversion|postfix|iproute|multiarch-support|php5-json'
+  # iproute:all 1:4.3.0-1ubuntu3.16.04.5 installed: No available version in archive
+  # iproute2:amd64 not installed
+  # iproute2:i386/focal 5.5.0-1ubuntu1 uptodate
+  # multiarch-support:i386 2.27-3ubuntu1.4 installed: No available version in archive
+  # php5-json:i386 1.3.2-2build1 installed: No available version in archive
+  # postfix:amd64 not installed
+  # postfix:i386 3.3.0-1ubuntu0.3 installed: No available version in archive
+  # remove it if we added it
+  # suppress 2 (lines unique in amd64_available) and 3 (lines in both) leaving 1 (just lines that only exist in not_available) 
+  comm  -2 -3  $not_available $amd64_available 
+  rm -f $not_available $amd64_available
+  $remove_amd64
+}
+
 # e.g. cruft_packages0 show 32bit
 function cruft_packages0() {
   [  ! -f /etc/debian_version ] && return 0
@@ -1356,11 +1550,12 @@ function cruft_packages0() {
   
   #echo "dss:trace: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
   
-  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep -v '^lib' | wc -l) ]; then
+  ignorablecruft="^lib|webmin|virtualmin|usermin"
+  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(print_no_available_versions | egrep -v "$ignorablecruft" | wc -l) ]; then
     has_cruft=$((has_cruft+1))
-    [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
+    [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(print_no_available_versions |egrep -v "$ignorablecruft" | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      local oldpkgstoremove="$(apt-show-versions | grep 'No available version' | egrep -v '^lib|webmin' | awk '{print $1}' | tr '\n' ' ')"
+      local oldpkgstoremove="$(print_no_available_versions | egrep -v "$ignorablecruft" | awk '{print $1}' | tr '\n' ' ')"
       # e.g. oldpkgstoremove has mysql-server-5.0:i386 mysql-server-core-5.0:i386
       [  $? -ne 0 ] && commandret=$((commandret+1))
       # /var/log/mysql/error.log:
@@ -1374,11 +1569,11 @@ function cruft_packages0() {
       #apt-get $APT_GET_INSTALL_OPTIONS autoremove
     fi
   fi
-  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(apt-show-versions | grep 'No available version' | grep '^lib' | wc -l) ]; then
+  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(print_no_available_versions | grep '^lib' | wc -l) ]; then
     has_cruft=$((has_cruft+1))
-    [  ! -z "$show" ] && echo "dss:warn: Libraries from non-current distro versions installed: $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')"
+    [  ! -z "$show" ] && echo "dss:warn: Libraries from non-current distro versions installed: $(print_no_available_versions | grep '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
-      apt_get_remove $(apt-show-versions | grep 'No available version' | grep '^lib' | awk '{print $1}' | tr '\n' ' ')
+      apt_get_remove $(print_no_available_versions | grep '^lib' | awk '{print $1}' | tr '\n' ' ')
       [  $? -ne 0 ] && commandret=$((commandret+1))
       #apt-get $APT_GET_INSTALL_OPTIONS autoremove
     fi
@@ -1402,16 +1597,16 @@ function cruft_packages0() {
             local essentialpackages=; for i in $(dpkg -l | grep '^ii' | grep :i386 | awk '{print $2}' | sed 's/:i386$//' | grep -v '^lib' ); do apt-cache show $i | egrep -qai 'Essential: yes|Priority: required|Priority: important' && essentialpackages="$essentialpackages $i:amd64"; done
             echo "dss:trace: cross grading downloading essential packages via download and dpkg_install."
             [  ! -z "$essentialpackages" ] && if apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages; then
-              dpkg_install /var/cache/apt/archives/*_amd64.deb
+              dpkg_install $(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$')
               [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
-              mv /var/cache/apt/archives/*amd64.deb /root/distrorejuveinfo/$$
+              mv $(find /var/cache/apt/archives/ -type f | egrep 'amd64.deb$|all.deb$')  /root/distrorejuveinfo/$$
               dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
             else
               echo "dss:trace: cross grading downloading essential packages (after download+install failed) via download and separate install" 
               apt-get $APT_GET_INSTALL_OPTIONS download $essentialpackages
-              dpkg_install *_amd64.deb
+              dpkg_install $(find . -type f |  egrep 'amd64.deb$|all.deb$')
               [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
-              mv /var/cache/apt/archives/*amd64.deb /root/distrorejuveinfo/$$
+              mv $(find /var/cache/apt/archives/ -type f  | egrep 'amd64.deb$|all.deb$') /root/distrorejuveinfo/$$
               dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
             fi
           done
@@ -1473,6 +1668,8 @@ function tweak_broken_configs() {
   fi 
   # error of sshd[1762]: Missing privilege separation directory: /var/run/sshd
   # => mkdir /var/run/sshd
+  # FIXME: https://wiki.debian.org/ReleaseGoals/RunDirectory 
+  # => do we need to if -d /var/run; then mv -f /var/run/* /run/; rm -rf /var/run; ln -s /run /var/run; fi
   while true; do
     # not debian-ish
     if ! which dpkg >/dev/null 2>&1; then break; fi
@@ -1568,13 +1765,22 @@ if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
   return 0
 fi
 
-if [ "$old_distro" == "lenny" ]; then
-  if dpkg -l | grep -qai '^i.*dovecot' && lsb_release -a | egrep -qai "lenny|Release.*5\."; then
+if is_distro_name_older "$old_distro" "squeeze"; then  
+  if dpkg -l | grep -qai '^i.*dovecot'; then
     print_uninstall_dovecot
     return 1
   fi
+fi
+if [ "$old_distro" == "lenny" ]; then
   add_missing_debian_keys
   [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
+fi
+
+if is_distro_name_older "$old_distro" "stretch"; then
+  if dpkg -l | grep -qai '^i.*fail2ban'; then
+    print_uninstall_fail2ban
+    return 1
+  fi
 fi
   
 upgrade_precondition_checks || return $?
@@ -1593,9 +1799,17 @@ disable_debian_repos $old_distro
 
 if ! grep -qai "^ *deb.* ${new_distro}[ /-]" /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
-  echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
+
+  #Err:3 http://security.debian.org bullseye/updates Release
+  #404  Not Found [IP: 199.232.10.132 80]
+  if is_distro_name_newer "${new_distro}" "buster"; then
+    echo "deb http://security.debian.org/debian-security ${new_distro}-security main" >> /etc/apt/sources.list
+  else
+    echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
+  fi
   echo "$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:dist_upgrade_x_to_y:" $0}'
 fi
+
 
 # redo to convert the above to archive where appropriate.  And add lts if appropriate.
 enable_debian_archive
@@ -1603,10 +1817,9 @@ enable_debian_archive
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 apt_get_dist_upgrade
 ret=$?
-echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
-
 apt-get $APT_GET_INSTALL_OPTIONS  autoremove
 if [ $ret -eq 0 ]; then
+  echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
 	if lsb_release -a 2>/dev/null| egrep -qai "${new_distro}|${new_ver:-xxxxx}"; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
 	  echo "dss:info: dist-upgrade from ${old_distro} to ${new_distro} appears to have worked." 
@@ -1616,6 +1829,8 @@ if [ $ret -eq 0 ]; then
 	  return 1
 	fi
 fi
+echo "dss:error:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
+
 return 1
 
 }
@@ -1659,7 +1874,7 @@ for modifiedconfigfile in $modifiedconfigfiles; do
   
   # pop a copy there so we can replace current file if desired
   [ -f "./${modifiedconfigfile}" ] && [ ! -f "${modifiedconfigfile}.dpkg-dist" ] && cp "./${modifiedconfigfile}" "${modifiedconfigfile}.dpkg-dist"
-  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:modifiedfilereplace:To replace edited file with dist file: mv $modifiedconfigfile $modifiedconfigfile.dpkg-old; mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
+  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:modifiedfilereplace:To replace edited file with dist file: [ ! -f $modifiedconfigfile.dpkg-old ] && [ -f /etc/nginx/nginx.conf.dpkg-dist] && mv $modifiedconfigfile $modifiedconfigfile.dpkg-old && mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
   # show a diff
   print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:configdiff:modifiedconfig:'$pkg':'$modifiedconfigfile':" $0}'
 done
@@ -1741,12 +1956,12 @@ function record_config_state() {
   > $file
   # conf files
   echo "Date: $(date)" >> $file
-  [ ! -z "$files" ] && ls -lrt $files > $file
+  [ ! -z "$files" ] && ls -lrt $files | awk '{print "configfiles:" $0}' > $file
   echo "Listening ports:" >> $file
   echo "" >> $file
   # listening ports
   # Listen ports: 0.0.0.0:995 dovecot
-  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 4 | uniq >> $file
+  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 3 | uniq >> $file
   echo "Apache vhosts:" >> $file
   echo "" >> $file
   # vhosts 
@@ -1793,12 +2008,17 @@ if [ $ret -ne 0 ]; then
     echo "dss:info: apt-get dist-upgrade succeeded when a upgrade failed."
     return 0
   else
-    echo "dss:info: apt-get upgrade/dist-upgrade failed."
+    echo "dss:warn: apt-get upgrade/dist-upgrade failed."
     return 1 
   fi
 fi
 apt-get clean
 return $ret
+}
+
+function plesk_upgrade() {
+  which plesk >/dev/null 2>&1 || return 0
+  plesk installer --select-release-current --reinstall-patch --upgrade-installed-components
 }
 
 function apt_get_dist_upgrade() {
@@ -1840,7 +2060,7 @@ if [ $ret -ne 0 ] ; then
 fi
 # report -dist or -old file changes
 tweak_broken_configs
-echo "dss:trace:dist_upgrade completed $(print_distro_info).  ret=$ret"
+echo "dss:trace:apt_get_dist_upgrade completed $(print_distro_info).  ret=$ret"
 
 return $ret
 }
@@ -1850,9 +2070,20 @@ function dist_upgrade_ubuntu_to_latest() {
 [ ! -e /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
 
-if dpkg -l | grep -qai '^i.*dovecot'; then
-  print_uninstall_dovecot
-  return 1
+echo "dss:trace:dist_upgrade_ubuntu_to_latest $(print_distro_info)."
+
+if is_distro_name_older "$old_distro" "xenial"; then
+  if dpkg -l | grep -qai '^i.*dovecot'; then
+    print_uninstall_dovecot
+    return 1
+  fi
+fi
+
+if is_distro_name_older "$old_distro" "bionic"; then
+  if dpkg -l | grep -qai '^i.*fail2ban'; then
+    print_uninstall_fail2ban
+    return 1
+  fi
 fi
 
 local NUM_TO_DIST_UPGRADE="${1:-1000}"
@@ -1922,15 +2153,17 @@ if [ $ret -eq 0 ]; then
 else
   echo "dss:warn: dist-upgrade from $current to $next appears to have failed." 
 fi
+echo "dss:trace:dist_upgrade_ubuntu_to_latest:completed $(print_distro_info).  ret=$ret"
 return $ret
 done
 }
 
 function convert_old_debian_repo() {
-echo "dss:trace:convert_old_debian_distro:"
 # no apt sources nothing to do
 [ ! -f /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu && return 0
+
+echo "dss:trace:convert_old_debian_distro"
 
 #deb http://http.us.debian.org/debian sarge main contrib non-free
 #deb http://non-us.debian.org/debian-non-US sarge/non-US main contrib non-free
@@ -2017,10 +2250,17 @@ if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
   fi
   for distro in $DEBIAN_CURRENT; do 
     if grep -qai "^ *deb.* ${distro}[ /-]" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.* ${distro}[ /-]" /etc/apt/sources.list; then
-       echo "dss:info: adding the $distro security repository to the sources.list"
-       cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
-       echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
-       apt_get_update
+      echo "dss:info: adding the $distro security repository to the sources.list"
+      cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
+      # https://wiki.debian.org/NewInBullseye
+      # The format of the /etc/apt/sources.list line for the security repository has changed. It should look something like this:
+      # deb http://security.debian.org/debian-security bullseye-security main
+      if is_distro_name_newer "${distro}" "buster"; then
+        echo "deb http://security.debian.org/debian-security ${distro}-security main" >> /etc/apt/sources.list
+      else
+        echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
+      fi
+      apt_get_update
     fi
   done
   POLICY=$(apt-cache policy libc6)
@@ -2299,15 +2539,22 @@ return 0
 function dist_upgrade_to_latest() {
   echo "dss:trace:dist_upgrade_to_latest"
 
-  packages_upgrade || return $?
-  apt_get_dist_upgrade || return $?
-  dist_upgrade_lenny_to_squeeze || return $?
-  dist_upgrade_squeeze_to_wheezy || return $?
-  dist_upgrade_wheezy_to_jessie || return $?
-  dist_upgrade_jessie_to_stretch || return $?
-  dist_upgrade_stretch_to_buster || return $?
-  dist_upgrade_ubuntu_to_latest || return $?
-  apt_get_dist_upgrade || return $?
+  if ! packages_upgrade; then echo "dss:error:dist_upgrade_to_latest:packages_upgrade:failed" && return 1; fi
+  if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
+  if [ -e /etc/apt/sources.list ] && lsb_release -a 2>/dev/null | grep -qai debian; then
+    if ! dist_upgrade_lenny_to_squeeze; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_lenny_to_squeeze:failed" && return 1; fi
+    if ! dist_upgrade_squeeze_to_wheezy; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_squeeze_to_wheezy:failed" && return 1; fi
+    if ! dist_upgrade_wheezy_to_jessie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_wheezy_to_jessie:failed" && return 1; fi
+    if ! dist_upgrade_jessie_to_stretch; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_jessie_to_stretch:failed" && return 1; fi
+    if ! dist_upgrade_stretch_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_stretch_to_buster:failed" && return 1; fi
+    if ! dist_upgrade_buster_to_bullseye; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_buster_to_bullseye:failed" && return 1; fi
+    if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
+  fi
+  if [ -e /etc/apt/sources.list ] && lsb_release -a 2>/dev/null | grep -qai ubuntu; then  
+    if ! dist_upgrade_ubuntu_to_latest; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_ubuntu_to_latest:failed" && return 1; fi
+    if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
+  fi
+  if ! plesk_upgrade; then echo "dss:error:dist_upgrade_to_latest:plesk_upgrade:failed" && return 1; fi
 }
 
 function print_php5_advice() {
@@ -2360,6 +2607,8 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_stretch_to_buster
   [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_buster_to_bullseye
+  [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes" 
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
@@ -2381,7 +2630,7 @@ elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-squeeze completed ok.  use $0 --show-changes to see changes" 
 elif [ "--source" = "${ACTION:-$1}" ] ; then 
-  echo "dss: Loading distrorejuve functions"
+  echo "dss:info:Loaded distrorejuve functions"
 elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
   print_info
   IGNOREOTHERREPOS=Y

@@ -40,7 +40,7 @@ Example usage to download the latest version of the script, then dist upgrade to
 
 wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
-sudo bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\+'
+sudo nohup bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\+'
 
 Uses:
 - Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
@@ -949,6 +949,11 @@ function apt_get_f_install() {
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_f_install $@ essential package issues for: $essentialissuepackages"  
   
   rm -rf "$tmplog"
+  if [ $ret -ne 0 ]; then
+    echo "dss:warn: dpkg results showing packages with issues."
+    dpkg -l  | egrep -v '^ii|^rc' | awk '{print "dss:warn:apt_get_f_install: " $0}'
+    echo "dss:info: as a last resort you can move away the failed dpkg status files at /var/lib/dpkg/info/pkngname*"
+  fi
   return $ret
 }
 
@@ -1130,6 +1135,9 @@ function crossgrade_debian() {
   apt-get $APT_GET_INSTALL_OPTIONS update
   #apt-get $APT_GET_INSTALL_OPTIONS autoremove
   apt-get $APT_GET_INSTALL_OPTIONS upgrade
+  [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
+  debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$')"
+  [ ! -z "$debs" ] && echo "dss:info:moving 64bit packages out of the way" && mv $debs /root/distrorejuveinfo/$$/ 
   apt-get clean
 
   #if ! dpkg -l | egrep -qai '^ii.*dpkg.*amd64'; then
@@ -1146,14 +1154,14 @@ function crossgrade_debian() {
     apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl:amd64
     [  $? -ne 0 ] && apt-get download perl:amd64
     requiredlist="$(apt-rdepends apt apt-listchanges| grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}')"
-    for i in $requiredlist; do echo $i==; apt-get --reinstall --download-only  $APT_GET_INSTALL_OPTIONS install $i; done
+    echo "dss:trace: cross grading.  doing a 'download only' on $requiredlist."
+    for i in $requiredlist; do apt-get --reinstall --download-only  $APT_GET_INSTALL_OPTIONS install $i; done
     #E: Unable to locate package libbz2-1.0:amd64
     #E: Couldn't find any package by glob 'libbz2-1.0'
      
     
     echo "dss:trace: cross grading.  installing key amd64 deb packages: dpkg:amd64 tar:amd64 apt:amd64 perl-base:amd64"
     # something about this removes apache2.  figure out why...
-    [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
     cd /root/distrorejuveinfo/$$
     local debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$') $(find . -maxdepth 1 -type f  | egrep 'amd64.deb$|all.deb$')"
     while true; do
@@ -1203,7 +1211,7 @@ function crossgrade_debian() {
     #   dpkg:amd64 tar:amd64 (due to dpkg:amd64) perl-base:amd64
     
     local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
-    [  -z "$essentialtoinstall" ] && break  
+    [  -z "$essentialtoinstall" ] && echo "dss:info: all essential packages appear to be installed." && break  
     local i=;
     mkdir -p distrorejuveinfo/$$/essentialdebs
     cd distrorejuveinfo/$$/essentialdebs
@@ -1222,8 +1230,16 @@ function crossgrade_debian() {
   apt_get_f_install
   ret=$?
   if [  $ret -ne 0 ]; then
-    echo "dss:error: apt-get -f install failed.  we are stuck."
-    exit 1
+    if [ -z "$essentialtoinstall" ]; then
+      echo "dss:warn: apt-get -f install failed.  However it appears we have all essential 64 bit packages.  Trying to continue."
+      # dpkg --remove --force-remove-reinstreq python3-lxml:amd64
+      # dpkg-query: error: --listfiles needs a valid package name but 'python3-lxml' is not: ambiguous package name 'python3-lxml' with more than one installed instance
+      # mkdir /root/t
+      # mv /var/lib/dpkg/info/python3-lxml\:amd64.* .
+    else
+      echo "dss:error: apt-get -f install failed.  we are stuck."
+      return 1
+    fi
   fi
   #apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
@@ -1232,8 +1248,12 @@ function crossgrade_debian() {
   echo "dss:info: cross grading.  force installing of amd64 packages after dpkg --set-selections."
   apt_get_f_install
   if [  $? -ne 0 ]; then
-    echo "dss:error: cross grading failed after initial amd64 package installs.  See crossgrade_debian for a few suggestions to resolve manually."
-    return 1 
+    if [ -z "$essentialtoinstall" ]; then
+      echo "dss:warn: apt-get -f install failed.  However it appears we have all essential 64 bit packages.  Trying to continue."
+    else
+      echo "dss:error: cross grading failed after initial amd64 package installs.  See crossgrade_debian for a few suggestions to resolve manually."
+      return 1
+    fi 
   fi
   #apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
@@ -1270,7 +1290,7 @@ function crossgrade_debian() {
     done
     # => essentialpackages=base-files:amd64 base-passwd:amd64...
     
-    [ -z "$essentialpackages" ] && break
+    [ -z "$essentialpackages" ] && echo "dss:info: no essential packages missing.  moving to next step." && break
     local debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$')"
     [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
     [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
@@ -1338,9 +1358,18 @@ function crossgrade_debian() {
     # then remove the i386 version.  Used to this after installing each amd64 package, but that sometimes led to other things being removed that broke things
     # fwiw when you install $pkg:amd4 it will typically remove the $pkg:i386, so hopefully not will actually happen in this section?
     for pkg in $i386toremove2 ; do 
-      local lret=$?
-      [  $lret -eq 0 ] && echo $pkg | egrep -qai 'gcc.*base' || apt_get_remove $pkg:i386 
-      [  $lret -ne 0 ] && ret=$(($ret+1)) && apt_get_f_install "after-${pkg}-remove"
+      local lret=0
+      if echo $pkg | egrep -qai 'gcc.*base'; then 
+        true 
+      else 
+        apt_get_remove $pkg:i386
+        lret=$? 
+        if [  $lret -ne 0 ]; then
+          echo "dss:warn: apt-get remove $pkg:i386 failed.  Trying an apt-get -f install.  Will continue irregardless."  
+          ret=$(($ret+1))
+          apt_get_f_install "after-${pkg}-remove"
+        fi
+      fi
     done
     echo "dss:trace: completed individual install and removal of i386 packaged.  Ret code of $ret (0 means we are done, otherwise we go for another round)."
     [  $ret -eq 0 ] && break

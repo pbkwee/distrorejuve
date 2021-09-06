@@ -2,7 +2,7 @@
 
 distrorejuve is a utility that helps with upgrading distros. It works on a number of different distros (Ubuntu, 
 Debian, Centos). It uses apt, yum and repository corrections as appropriate. It can dist upgrade between 
-multiple versions for Ubuntu and Debian.
+multiple versions for Ubuntu and Debian.  It can convert (some) distros from 32bit to 64 bit (a cross grade).
 
 If you are using the script to make changes, please take a full backup first.
 
@@ -10,17 +10,17 @@ Example usage to download the latest version of the script, then dist upgrade to
 
 wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
-sudo bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\\+'
+sudo nohup bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\+'
 
 Uses:
-- Enable archive repositories for older Debian distros
 - Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
 - Dist upgrade Ubuntu distros to the next LTS version.  Then from LTS version to LTS version.
-- On completion provides information on config changes (modified config files, changed ports)
+- On completion provides information on config changes (modified config files, changed ports, changed packages, changed running processes)
 - Install missing Debian keys
 - Handles a few common Apache config issues after a distro upgrade.
 - Designed to run unattended without lots of prompting.
 - Burgeoning support to cross grade 32 bit distros to 64 bit
+- Show/remove cruft to permit tidy up of packages installed from non-current (old) repositories
 
 Arguments:
   
@@ -34,11 +34,21 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-update to update packages on the current distro version (no distro version change).
 
+Run with --show-changes to report the differences pre/post upgrading (packages installed, config files, ports, etc).
+
+Run with --show-cruft to see packages that do not belong to the current distro.  e.g. leftover packages from older distros.  And to see 32 bit packages installed on 64 bit distros.
+
+Run with --remove-cruft to remove old packages and 32 bit applications on 64 bit distros.
+
+Run with --remove-deprecated-packages to remove old packages
+
+Run with --to-64bit to convert a 32 bit distro to 64 bit.  NEW as at 2018-03/not so bullet-proof.  Only tested so far with Debian not Ubuntu.
+
 Run with --to-wheezy to get from squeeze to wheezy
 
 Run with --to-jessie to get from an older distro to jessie
 
-Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie to stretch 9
+Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch or buster to bullseye 11
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 

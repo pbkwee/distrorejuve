@@ -397,7 +397,7 @@ function upgrade_precondition_checks() {
     [ -z "$IGNOREKERNEL" ] && ret=$(($ret+1))
   fi
   if [ -f /etc/debian_version ] && [ -f /etc/apt/sources.list ] && [ "0" == "$(cat /etc/apt/sources.list | egrep -v '^$|^#' | wc -l)" ]; then
-    echo "dss:warn:/etc/apt/sources.list is empty and does not have any valid lines it it."
+    echo "dss:warn:/etc/apt/sources.list is empty and does not have any valid lines in it."
     ret=$(($ret+1))
   fi
   # e.g. set for --upgrade.  other repos probably fine.  Only an issue if dist-upgrading.
@@ -437,7 +437,10 @@ function upgrade_precondition_checks() {
     fi
   fi
   if [ -f /etc/apt/sources.list ]; then
-    local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net|software.virtualmin.co' /etc/apt/sources.list | egrep -v '^[[:space:]]*$' | head -n 1 )
+    # ^ *deb *[a-z.:/]+/debian[-a-z]*  matches: 
+    # deb http://mirrors.linode.com/xdebian stretch main
+    # deb http://mirrors.linode.com/debian stretch-updates main
+    local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net|software.virtualmin.co|^ *deb *[a-z.:/]+/debian[-a-z]* ' /etc/apt/sources.list | egrep -v '^[[:space:]]*$' | head -n 1 )
     if [ ! -z "$otherrepos" ]; then
       echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: '$otherrepos'"
       # to find what repositories are in play
@@ -617,6 +620,14 @@ function disable_debian_repos() {
       local line2=
       local line2=$(convertline $name $name debian.org "#" "$line")
       [ -z "$line2" ] && line2=$(convertline $name $name debian.net "#" "$line")
+      if [ -z "$line2" ]; then
+        # echo 'deb http://mirrors.linode.com/debian stretch-updates main' | egrep '^ *deb *http[s]{0,1}://[a-z.:/]+/debian[-a-z]* .*' | sed -re 's#^ *deb *http[s]{0,1}://([a-z.:/]+)/debian[-a-z]* .*#\1#'
+        # => mirrors.linode.com
+        local d2="$(echo $line | egrep '^ *deb *http[s]{0,1}://[a-z.:/]+/debian[-a-z]* .*' | sed -re 's#^ *deb *http[s]{0,1}://([a-z.:/]+)/debian[-a-z]* .*#\1#')"
+        if [ ! -z "$d2" ]; then
+          line2=$(convertline $name $name "$d2" "#" "$line")
+        fi 
+      fi  
       [ -z "$line2" ] && echo $line
       echo $line2
       # leave non-debian lines.  e.g. keep deb http://packages.prosody.im/debian wheezy main

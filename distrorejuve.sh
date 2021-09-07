@@ -88,6 +88,10 @@ Run with --fix-vuln to try and fix your server (doing minimal change e.g. just a
 
 Run with --break-eggs will run a --dist-upgrade if the server is vulnerable.
 
+Run with --pause to pause a distro rejuve running process (touch ~/distrorejuve.pause).  Triggers 30s sleeps at key points in the script.
+
+Run with --resume to resume a paused distro rejuve running process (rm -f ~/distrorejuve.pause)
+
 Use with --source if you just wish to have the distrorejuve functions available to you for testing
 
 Written by Peter Bryant at http://launchtimevps.com
@@ -130,6 +134,13 @@ function is_distro_name_older() {
   return 1
 }
 
+function pause_check() {
+  while true; do 
+    [ ! -f ~/distrorejuve.pause ] && return
+    echo "dss:info: pausing while ~/distrorejuve.pause is present"
+    sleep 30
+  done
+}
 
 function is_fixed() {
   # 0 = vulnerable, 1 = fixed, 2 = dunno
@@ -919,6 +930,7 @@ function rm_overwrite_files() {
 }
 
 function apt_get_remove() {
+  pause_check
   local tmplog=$(mktemp "tmplog.aptgetremove.log.XXXXXX")
   apt-get $APT_GET_INSTALL_OPTIONS remove $@ | tee $tmplog
   local ret=${PIPESTATUS[0]}
@@ -931,12 +943,14 @@ function apt_get_remove() {
     fi
   fi
   local essentialissuepackages="$(cat $tmplog | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
-  [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_remove $@ essential package issues for: $essentialissuepackages"  
+  [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_remove $@ essential package issues for: $essentialissuepackages"
+  echo "$essentialissuepackages" | egrep -qai 'libgcc-s1:i386' && echo "dss:warn: This issue may be related to this bug report: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=992317"
   rm -rf "$tmplog"
   return $ret
 }
 
 function apt_get_install() {
+  pause_check
   local tmplog=$(mktemp "tmplog.aptgetinstall.log.XXXXXX")
   apt-get $APT_GET_INSTALL_OPTIONS install $@ | tee $tmplog
   local ret=${PIPESTATUS[0]}
@@ -949,6 +963,7 @@ function apt_get_install() {
 }
 
 function apt_get_f_install() {
+  pause_check
   local tmplog=$(mktemp "tmplog.aptgetfinstall.log.XXXXXX")
   apt-get $APT_GET_INSTALL_OPTIONS -f install | tee $tmplog
   local ret=${PIPESTATUS[0]}
@@ -962,7 +977,7 @@ function apt_get_f_install() {
   rm -rf "$tmplog"
   if [ $ret -ne 0 ]; then
     echo "dss:warn: dpkg results showing packages with issues."
-    dpkg -l  | egrep -v '^ii|^rc' | awk '{print "dss:warn:apt_get_f_install: " $0}'
+    dpkg -l  | egrep -v '^ii|^rc|^iU' | awk '{print "dss:warn:apt_get_f_install: " $0}'
     echo "dss:info: as a last resort you can move away the failed dpkg status files at /var/lib/dpkg/info/pkngname*"
   fi
   return $ret
@@ -1176,6 +1191,7 @@ function crossgrade_debian() {
     cd /root/distrorejuveinfo/$$
     local debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$') $(find . -maxdepth 1 -type f  | egrep 'amd64.deb$|all.deb$')"
     while true; do
+      pause_check
       #Preparing to replace libblkid1:amd64 2.20.1-5.3 (using libblkid1_2.20.1-5.3_amd64.deb) ...
       #Unpacking replacement libblkid1:amd64 ...
       #dpkg: dependency problems prevent configuration of libblkid1:amd64:
@@ -1193,9 +1209,15 @@ function crossgrade_debian() {
       [ -z "$predeps" ] && break
       echo "dss:info: loading more pre-dependencies: $predeps"
       apt-get download $predeps
-      debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$') $(find . -maxdepth 1 -type f  | egrep 'amd64.deb$|all.deb$')"
+      local debs2="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$') $(find . -maxdepth 1 -type f  | egrep 'amd64.deb$|all.deb$')"
+      if [ "$debs" == "$debs2" ]; then
+        echo "dss:info: not making any progress with downloading pre-dependencies.  Going to try and install some."
+        break 
+      fi
+      debs="$debs2"
     done
-    if [  ! -z "$debs" ]; then 
+    if [  ! -z "$debs" ]; then
+      echo "dss:info: installing packages via dpkg -i including: $(echo "$debs" | head | tr '\n' ' ')..." 
       dpkg_install $debs
       if [ $? -ne 0 ]; then 
         [ $? -ne 0 ] && echo "dss:error: dpkg install amd64.deb files failed" 2>&1 && cd - && return 1
@@ -1208,6 +1230,7 @@ function crossgrade_debian() {
   echo "dss:trace: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
   local i=0
   for i in 0 1; do
+    pause_check
     apt_get_f_install crossgrade
     ret=$?
     [ $ret -eq 0 ] && break;
@@ -1247,6 +1270,7 @@ function crossgrade_debian() {
       # dpkg-query: error: --listfiles needs a valid package name but 'python3-lxml' is not: ambiguous package name 'python3-lxml' with more than one installed instance
       # mkdir /root/t
       # mv /var/lib/dpkg/info/python3-lxml\:amd64.* .
+      # apt-get install --reinstall python3-lxml
     else
       echo "dss:error: apt-get -f install failed.  we are stuck."
       return 1
@@ -1275,6 +1299,7 @@ function crossgrade_debian() {
     local i386app=
     local essentialdeps= 
     for i386app in $i386apps; do
+      pause_check
       local needsdeps= 
       apt-cache show $i386app | egrep -qai 'Essential: yes|Priority: required|Priority: important' && ! dpkg -l | egrep -qai '^ii.*${i386app}.*amd64' && essentialpackages="$essentialpackages ${i386app}:amd64" && needsdeps=true
       [ -z "$needsdeps" ] && continue
@@ -1390,7 +1415,8 @@ function crossgrade_debian() {
   while true; do
       mkdir -p distrorejuveinfo/$$/extra64debs
       cd distrorejuveinfo/$$/extra64debs
-      for i in $amd64toinstall; do 
+      for i in $amd64toinstall; do
+        pause_check 
         dpkg -l | grep '^ii' | awk '{print $2}' | grep -qai $i || echo "dss:trace: downloading amd64 debian file for $i" && apt-get download $i
       done
       local amdfilestoinstall="$(find . -type f  | egrep 'amd64.deb$|all.deb$')"
@@ -1414,7 +1440,8 @@ function crossgrade_debian() {
       dpkg -l | egrep '^ii.*amd64' | awk '{print $2}' | sed 's/:amd64//' | sort> pkgs.amd64.log
       amd64toinstall="$(for i in $(comm -3  --check-order pkgs.amd64.log pkgs.386.log | grep -v '^[a-z]'); do echo "$i:amd64 "; done)"
 
-      for i in $amd64toinstall; do 
+      for i in $amd64toinstall; do
+        pause_check 
         echo "dss:trace: downloading amd64 debian file for $i"
         apt-get download $i
       done
@@ -1739,13 +1766,20 @@ function tweak_broken_configs() {
     
     echo "dss:info: MySQL appears to have been installed, but no longer present.  This can happen between debian 8 and debian 9.  As mysql is replaced by mariadb.  Attempting to install mysql-server which would pull in mariadb."
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:pre:" $0}'
-    
-    apt_get_install mysql-server
-    if [ $? -ne 0 ]; then
-      apt_get_install default-mysql-server 
+    local dbpgk=
+    local dbpkgret=0
+    if dpkg -l | egrep ii | egrep -qai 'mariadb'; then
+      dbpkg=mariadb-server
+    elif dpkg -l | egrep ii | egrep -qai 'mysql.*server'; then
+      dbpkg=mysql-server
     fi
-    if [ $? -ne 0 ]; then
-      break;
+    if [ ! -z "$dbpkg" ]; then
+      apt_get_install $dbpkg
+      dbpkgret=$? 
+      if [ $dbpkgret -ne 0 ]; then
+        apt_get_install default-mysql-server
+        dbpkgret=$? 
+      fi
     fi
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:post:" $0}'
     break
@@ -1799,6 +1833,7 @@ exit 0' > $i
 }
 
 function dist_upgrade_x_to_y() {
+pause_check
 [ ! -e /etc/apt/sources.list ] && return 0
 echo "dss:trace:dist_upgrade_x_to_y:checking:olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 
@@ -2023,6 +2058,7 @@ function record_config_state() {
 }
 
 function apt_get_update() {
+pause_check
 apt-get update
 ret=$?
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
@@ -2031,6 +2067,7 @@ return $ret
 }
 
 function apt_get_upgrade() {
+pause_check
 [ ! -e /etc/apt/sources.list ] && return 0
 [ -e /etc/redhat-release ] && return 0
 upgrade_precondition_checks || return $?
@@ -2069,6 +2106,7 @@ function plesk_upgrade() {
 }
 
 function apt_get_dist_upgrade() {
+pause_check
 [ ! -e /etc/apt/sources.list ] && return 0
 upgrade_precondition_checks || return $?
 echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
@@ -2114,6 +2152,7 @@ return $ret
 
 # arg1 is the number of distros to upgrade.  default is all/1000.  else you can do 1 to just go up one distro.  lts to lts counts as 1.
 function dist_upgrade_ubuntu_to_latest() {
+pause_check
 [ ! -e /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
 
@@ -2206,6 +2245,7 @@ done
 }
 
 function convert_old_debian_repo() {
+pause_check
 # no apt sources nothing to do
 [ ! -f /etc/apt/sources.list ] && return 0
 lsb_release -a 2>/dev/null | grep -qai Ubuntu && return 0
@@ -2352,6 +2392,7 @@ return 0
 }
 
 function yum_upgrade() {
+  pause_check
   [ ! -f /etc/redhat-release ] && return 0
   yum_enable_rhel4 || return 0
   if ! which yum >/dev/null 2>&1; then echo "dss:info: yum not found."; return 1; fi
@@ -2584,6 +2625,7 @@ return 0
 }
 
 function dist_upgrade_to_latest() {
+  pause_check
   echo "dss:trace:dist_upgrade_to_latest"
 
   if ! packages_upgrade; then echo "dss:error:dist_upgrade_to_latest:packages_upgrade:failed" && return 1; fi
@@ -2748,6 +2790,14 @@ elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
 elif [ "--show-changes" = "${ACTION:-$1}" ] ; then
   print_config_state_changes
   exit $ret   
+elif [ "--pause" = "${ACTION:-$1}" ] ; then
+  touch ~/distrorejuve.pause
+  echo "dss:info: Touched the pause file at $(realpath ~/distrorejuve.pause)"
+  exit 0
+elif [ "--resume" = "${ACTION:-$1}" ] ; then
+  rm -f ~/distrorejuve.pause
+  echo "dss:info: Removed the pause file at $(realpath ~/distrorejuve.pause)"
+  exit 0
 else
   print_usage
 fi

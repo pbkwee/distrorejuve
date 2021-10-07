@@ -873,7 +873,7 @@ function rm_overwrite_files() {
     find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep -l '^thread_stac' | xargs --no-run-if-empty  sed -i 's/128K/256K/'
     find /etc/mysql/ -type f | xargs  --no-run-if-empty  egrep 'thread_stac' | awk '{print "dss:info:mysqlthreadstacks:after:" $0}'
   fi
-  if [ ! -z "$mysqlerrlogs" ] && egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $tmplog; then
+  if [ ! -z "$mysqlerrlogs" ] && egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $mysqlerrlogs; then
     echo "dss:warn: mysql error.  Trying a mysql_upgrade to resolve."
     mysql_upgrade 
   fi
@@ -881,7 +881,7 @@ function rm_overwrite_files() {
   # disable some settings that become deprecated (if they are causing errors).
   if [ ! -z "$mysqlerrlogs" ] && egrep -qai 'e-rc.d: initscript mysql, action "start" fai' $mysqlerrlogs; then 
     #egrep -qai 'pkg: error processing package mysq' $mysqlerrlogs ||
-    egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $mysqlerrlogs; then 
+    #if egrep -qai 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $mysqlerrlogs; then 
     for i in query_cache_limit query_cache_size key_buffer myisam-recover; do
       if egrep -qai "unknown variable '$i" $mysqlerrlogs; then   
       #if egrep -aqi "unknown variable '$i" $tmplog; then
@@ -1166,6 +1166,11 @@ function crossgrade_debian() {
   [ ! -z "$debs" ] && echo "dss:info:moving 64bit packages out of the way" && mv $debs /root/distrorejuveinfo/$$/ 
   apt-get clean
 
+  #WARNING: The following essential packages will be removed.
+  #This should NOT be done unless you know exactly what you are doing!
+  #perl-base:amd64
+  # => apt-get download perl-base:i386; dpkg -i perl-base*; apt-get -f install  
+  
   #if ! dpkg -l | egrep -qai '^ii.*dpkg.*amd64'; then
   if true; then
     echo "dss:trace: cross grading.  grabbing key amd64 deb packages."

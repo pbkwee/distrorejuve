@@ -972,7 +972,16 @@ function apt_get_f_install() {
   fi
   echo "dss:trace:apt_get_f_install:$1 results $(egrep 'upgraded' $tmplog)"
   local essentialissuepackages="$(cat $tmplog | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
-  [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_f_install $@ essential package issues for: $essentialissuepackages"  
+  [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_f_install $@ essential package issues for: $essentialissuepackages"
+  if [ ! -z "$essentialissuepackages" ] && echo "$essentialissuepackages" | grep -qai 'perl-base:amd64'; then
+    echo "dss:trying to dpkg -i perl-base:i386"
+    if dpkg -l | grep perl-base | grep i386 | grep -qai ii; then
+      echo "dss: perl-base:i386 already installed;
+    else 
+      apt-get download perl-base:i386
+      dpkg -i perl-base*i386*deb
+    fi
+  fi  
   
   rm -rf "$tmplog"
   if [ $ret -ne 0 ]; then
@@ -1179,10 +1188,10 @@ function crossgrade_debian() {
     # error if we append perl-base:amd64 to the line above...
     # and if we don't have perl-base then apt-get -f install has this error: E: Unmet dependencies
     echo "dss:trace: cross grading.  grabbing extra amd64 deb packages."
-    apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl-base:amd64
+    apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl-base:amd64 perl-base:i386
     # above will also fail due to dependency hell
     [  $? -ne 0 ] && apt-get download perl-base:amd64
-    apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl:amd64
+    apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl:amd64 perl:i386
     [  $? -ne 0 ] && apt-get download perl:amd64
     requiredlist="$(apt-rdepends apt apt-listchanges| grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}')"
     echo "dss:trace: cross grading.  doing a 'download only' on $requiredlist."

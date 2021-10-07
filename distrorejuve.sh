@@ -879,8 +879,8 @@ function rm_overwrite_files() {
   fi
   
   # disable some settings that become deprecated (if they are causing errors).
-  if [ ! -z "$mysqlerrlogs" ] && egrep -qai 'e-rc.d: initscript mysql, action "start" fai' $mysqlerrlogs || 
-    egrep -qai 'pkg: error processing package mysq' $mysqlerrlogs ||
+  if [ ! -z "$mysqlerrlogs" ] && egrep -qai 'e-rc.d: initscript mysql, action "start" fai' $mysqlerrlogs; then 
+    #egrep -qai 'pkg: error processing package mysq' $mysqlerrlogs ||
     egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $mysqlerrlogs; then 
     for i in query_cache_limit query_cache_size key_buffer myisam-recover; do
       if egrep -qai "unknown variable '$i" $mysqlerrlogs; then   
@@ -1151,7 +1151,7 @@ function crossgrade_debian() {
     fi 
   fi
    
-  [  ! -x /usr/bin/apt-show-versions ] && apt_get_install apt-show-versions
+  [  ! -x /usr/bin/apt-show-versions ] && echo "dss:info:installing apt-show-versions" && apt_get_install apt-show-versions
   [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --show-cruft followed by bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
   
   dpkg --add-architecture amd64
@@ -1629,6 +1629,7 @@ function cruft_packages0() {
     has_cruft=$((has_cruft+1))
     [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(print_no_available_versions |egrep -v "$ignorablecruft" | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then 
+      echo "dss:trace: Working out the old packages to resume." 
       local oldpkgstoremove="$(print_no_available_versions | egrep -v "$ignorablecruft" | awk '{print $1}' | tr '\n' ' ')"
       # e.g. oldpkgstoremove has mysql-server-5.0:i386 mysql-server-core-5.0:i386
       [  $? -ne 0 ] && commandret=$((commandret+1))
@@ -1639,6 +1640,7 @@ function cruft_packages0() {
       
       # may also need to add skip-grant-tables to /etc/mysql/my.cnf [mysqld] section
       echo "$oldpkgstoremove" | grep -qai mysql-ser && apt_get_install mysql-server
+      echo "$oldpkgstoremove" | grep -qai mariadb-server && apt_get_install mariadb-server
       apt_get_remove $oldpkgstoremove
       #apt-get $APT_GET_INSTALL_OPTIONS autoremove
     fi
@@ -1714,7 +1716,7 @@ function cruft_packages0() {
   
 function tweak_broken_configs() {
   echo "dss:trace:tweak_broken_configs: tweaking certain broken configs if they exist."
-  grep -qai 'Include conf.d'  /etc/apache2/apache2.conf && [ ! -d /etc/apache2/conf.d ] && mkdir /etc/apache2/conf.d
+  [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include conf.d'  /etc/apache2/apache2.conf && [ ! -d /etc/apache2/conf.d ] && mkdir /etc/apache2/conf.d
   if [ -x /usr/sbin/apache2ctl ] && [ -f /etc/apache2/apache2.conf ]; then
     if grep -qai '^Include /etc/apache2/conf.d/' /etc/apache2/apache2.conf && [ ! -d /etc/apache2/conf.d ]; then
       replace 'Include /etc/apache2/conf.d/' '#Include /etc/apache2/conf.d/' -- /etc/apache2/apache2.conf
@@ -1994,7 +1996,8 @@ function print_config_state_changes() {
   [ -z "$fromfile" ] && fromfile=/root/distrorejuveinfo/preupgrade.dpkg.$$
   # no prior changes just yet.
   [  ! -f  "$fromfile" ] && return 0
-  echo "dss:info: Config changes to check.  e.g. different processes after upgrade.  e.g. different ports.  e.g. different apache status output.  e.g. changes to dpkg-old/dpkg-dist files.  dpkg-old = your files that were not used.  dpk-dist = distro files that were not used."
+  # dpkg-new is used on unpack prior to choosing dpkg-dist or overwriting.
+  echo "dss:info: Config changes to check.  e.g. different processes after upgrade.  e.g. different ports.  e.g. different apache status output.  e.g. changes to dpkg-old/dpkg-dist files.  dpkg-old = your files that were not used.  dpkg-dist = distro files that were not used."
   print_minimal_config_diff $fromfile /root/distrorejuveinfo/postupgrade.dpkg.$now | awk '{print "dss:configdiff:statechanges:" $0}'
   
   local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)

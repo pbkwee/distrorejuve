@@ -976,10 +976,12 @@ function apt_get_f_install() {
   if [ ! -z "$essentialissuepackages" ] && echo "$essentialissuepackages" | grep -qai 'perl-base:amd64'; then
     echo "dss:trying to dpkg -i perl-base:i386"
     if dpkg -l | grep perl-base | grep i386 | grep -qai ii; then
-      echo "dss: perl-base:i386 already installed;
+      echo "dss: perl-base:i386 already installed"
     else 
       apt-get download perl-base:i386
       dpkg -i perl-base*i386*deb
+      apt-get $APT_GET_INSTALL_OPTIONS -f install | tee $tmplog
+      local ret=${PIPESTATUS[0]}
     fi
   fi  
   

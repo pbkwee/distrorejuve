@@ -15,6 +15,7 @@ NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || e
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye"
 # in egrep code be aware of etch/stretch matching
+# https://wiki.debian.org/LTS
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
 # no archive for wheezy (update 2020-03, there is now)
 #DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" | sed 's/wheezy//')"
@@ -80,6 +81,8 @@ Run with --to-jessie to get from an older distro to jessie
 
 Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch or buster to bullseye 11
 
+Run with --to-debian-release [6-11] to get from your current version to the specified version
+
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
 Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu version.  If the current ubuntu is an LTS version then this skips to the next LTS version.
@@ -137,7 +140,7 @@ function is_distro_name_older() {
 function pause_check() {
   while true; do 
     [ ! -f ~/distrorejuve.pause ] && return
-    echo "dss:info: pausing while ~/distrorejuve.pause is present"
+    echo "dss:info: pausing while ~/distrorejuve.pause is present.  When ready, run: $0 --resume to continue."
     sleep 30
   done
 }
@@ -1181,6 +1184,8 @@ function crossgrade_debian() {
   #This should NOT be done unless you know exactly what you are doing!
   #perl-base:amd64
   # => apt-get download perl-base:i386; dpkg -i perl-base*; apt-get -f install  
+  # download lots of amd64 packages if you get stuck, e.g. on ubuntu
+  # for i in $(dpkg -l | grep ii | grep i386  | awk '{print $2}' | sed 's/:i386//' | grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}'); do apt-get download $i; done
   
   #if ! dpkg -l | egrep -qai '^ii.*dpkg.*amd64'; then
   if true; then
@@ -1198,6 +1203,8 @@ function crossgrade_debian() {
     requiredlist="$(apt-rdepends apt apt-listchanges| grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}')"
     echo "dss:trace: cross grading.  doing a 'download only' on $requiredlist."
     for i in $requiredlist; do apt-get --reinstall --download-only  $APT_GET_INSTALL_OPTIONS install $i; done
+     dpkg -l | grep ii | grep -v lib | awk '{print $2}' | grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}'
+    
     #E: Unable to locate package libbz2-1.0:amd64
     #E: Couldn't find any package by glob 'libbz2-1.0'
      
@@ -1294,8 +1301,9 @@ function crossgrade_debian() {
   fi
   #apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
-  # doesn't seem to achieve much...
+  # doesn't seem to achieve much...  should result in apt-get install blah installing the amd64 (vs. i386) version
   dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
+  lsb_release -a 2>/dev/null | grep -qai Ubuntu && echo "dss:fiddle to try and have Ubuntu use amd64 packages by default." && 
   echo "dss:info: cross grading.  force installing of amd64 packages after dpkg --set-selections."
   apt_get_f_install
   if [  $? -ne 0 ]; then
@@ -1444,7 +1452,7 @@ function crossgrade_debian() {
       echo "dss:trace: attempting a dpkg install of non-lib packages: $(echo $amd64toinstall)"
       dpkg_install $(find distrorejuveinfo/$$/extra64debs -type f  | egrep 'amd64.deb$|all.deb$')
       local lret=$?
-      echo "dss:trace: dpkg install $( [ $lret -eq 0] && echo "succeeded" || echo "failed")"
+      echo "dss:trace: dpkg install $( [ $lret -eq 0 ] && echo "succeeded" || echo "failed")"
       break
   done  
 
@@ -1470,7 +1478,7 @@ function crossgrade_debian() {
       echo "dss:trace: using set theory method for lib and non-lib packages: $(echo $amd64toinstall)"
       dpkg_install $(find distrorejuveinfo/$$/settheory -type f  | egrep 'amd64.deb$|all.deb$')
       local lret=$?
-      echo "dss:trace: set theory dpkg install $( [ $lret -eq 0] && echo "succeeded" || echo "failed")"
+      echo "dss:trace: set theory dpkg install $( [ $lret -eq 0 ] && echo "succeeded" || echo "failed")"
       break
   done  
 
@@ -1704,19 +1712,22 @@ function cruft_packages0() {
           done
                
           # install 64 versions of the packages if we can.
-          echo "dss:trace: bulk installing 64bit versions of installed i386 apps"
-          apt_get_install $(grep -v '^lib' "$cruftlog" | sed 's/:i386/:amd64/g' | tr '\n' ' ')
+          local lib64="$(grep -v '^lib' "$cruftlog" | sed 's/:i386/:amd64/g' | tr '\n' ' ')"
+          echo "dss:trace: bulk installing 64bit versions of installed i386 apps: $lib64"
+          apt_get_install $lib64
           echo "dss:trace: force install check"
           apt_get_f_install
-          echo "dss:trace: individually installing 64bit versions of installed i386 apps"
-          for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//'); do apt_get_install $i:amd64 && apt_get_remove $i:i386; done
+          local lib32="$(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep -v '^lib' | sed 's/:i386//')"
+          echo "dss:trace: individually installing 64bit versions of installed i386 apps: $lib32"
+          for i in $lib32; do apt_get_install $i:amd64 && apt_get_remove $i:i386; done
           echo "dss:trace: force install check"
           apt_get_f_install
           # [  $? -ne 0 ] && commandret=$((commandret+1))
           echo "dss:trace: removing 32 bit libraries"
           apt_get_remove $(grep -v '^lib' "$cruftlog" | sed 's/:i386//' | sed 's/$/:i386/' | tr '\n' ' ' )
-          echo "dss:trace: individually removing i386 libraries."
-          for i in $(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep 'lib' ); do apt_get_remove $i; done
+          local lib32="$(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep 'lib' )"
+          echo "dss:trace: individually removing i386 libraries: $lib32"
+          for i in $lib32; do apt_get_remove $i; done
           #apt-get $APT_GET_INSTALL_OPTIONS autoremove
           [  $(dpkg -l | grep ':i386' | grep '^ii' | wc -l) -gt 0 ] && commandret=$((commandret+1)) 
         fi
@@ -2703,6 +2714,27 @@ elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
   dist_upgrade_wheezy_to_jessie
   [ $? -ne 0 ] && ret=$(($ret+1))
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
+elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
+  version="$2"
+  [ -z "$version" ] && echo "dss:error: Need a version e.g. 11 for --to-debian-release" && exit 1
+  case "$version" in
+      6|7|8|9|10|11)
+      true
+      ;;
+      *)
+      echo "dss:error: Expecting a --to-debian-release versoin of 6 to 11" && exit 1
+      ;;
+  esac
+  print_info
+  if [ $version -gt 5 ]; then dist_upgrade_lenny_to_squeeze; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 6 ]; then dist_upgrade_squeeze_to_wheezy; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 7 ]; then dist_upgrade_wheezy_to_jessie; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 8 ]; then dist_upgrade_jessie_to_stretch; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 9 ]; then dist_upgrade_stretch_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  
+  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes" 
 elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   print_info
   dist_upgrade_lenny_to_squeeze

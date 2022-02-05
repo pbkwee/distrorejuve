@@ -582,6 +582,13 @@ function add_missing_ubuntu_keys() {
   [ ! -x /usr/bin/apt-key ] && return 0
   print_distro_info | grep -qai ubuntu || return 0
   # import the lts key
+
+  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 112695A0E562B32A
+  
+  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 648ACFD622F3D138
+  
+  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 0E98404D386FA1D9
+  
   return 0
 }
 
@@ -2801,7 +2808,7 @@ elif [ "--dist-update" = "${ACTION:-$1}" ] ; then
   print_info
   yum_upgrade
   [ $? -ne 0 ] && ret=$(($ret+1))
-  packages_update
+  packages_upgrade
   [ $? -ne 0 ] && ret=$(($ret+1))
   apt_get_dist_upgrade
   [ $? -ne 0 ] && ret=$(($ret+1))

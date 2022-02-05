@@ -929,6 +929,15 @@ function rm_overwrite_files() {
     rmed=$((rmed+1)) 
   done
   if egrep -aqi 'ERROR: Your kernel version indicates a revision number' $tmplog; then
+    #Preparing to unpack .../libc6_2.27-3ubuntu1.4_amd64.deb ...
+    #ERROR: Your kernel version indicates a revision number
+    #of 255 or greater.  Glibc has a number of built in
+    #assumptions that this revision number is less than 255.
+    #If you\'ve built your own kernel, please make sure that any
+    #custom version numbers are appended to the upstream
+    #kernel number with a dash or some other delimiter.
+    # uname -a
+    # Linux example.com 4.14.256-rh294-20211127025231.xenU.x86_64 #1 SMP Sat Nov 27 02:58:28 UTC 2021 x86_64 x86_64 x86_64 GNU/Linux  
     echo "dss:error: old glibc error.  This glibc cannot handle kernels with minor versions > 255.  e.g. $(uname -a).  Try restarting the server with a kernel with a lower minor version.  e.g. a 5.10.96 kernel would be OK, but 4.14.264 is not OK.  For RimuHosting customers use https://rimuhosting.com/cp/vps/kernel.jsp to do this."
     return 1
   fi

@@ -928,6 +928,10 @@ function rm_overwrite_files() {
     echo "dss:info: removed a shared overwrite file.  sometimes required when cross grading: $i"
     rmed=$((rmed+1)) 
   done
+  if egrep -aqi 'ERROR: Your kernel version indicates a revision number' $tmplog; then
+    echo "dss:error: old glibc error.  This glibc cannot handle kernels with minor versions > 255.  e.g. $(uname -a).  Try restarting the server with a kernel with a lower minor version.  e.g. a 5.10.96 kernel would be OK, but 4.14.264 is not OK.  For RimuHosting customers use https://rimuhosting.com/cp/vps/kernel.jsp to do this."
+    return 1
+  fi
   [  $rmed -eq 0 ] && return 1
   return 0
 }

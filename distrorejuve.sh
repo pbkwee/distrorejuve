@@ -7,16 +7,16 @@ export APT_LISTCHANGES_FRONTEND=none
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
-LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal"
+LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal jammy"
 #ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
 OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco eoan"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute"
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute impish jammy"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye"
 # in egrep code be aware of etch/stretch matching
 # https://wiki.debian.org/LTS
-UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
+UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie"
 # no archive for wheezy (update 2020-03, there is now)
 #DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" | sed 's/wheezy//')"
 DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" )"
@@ -410,6 +410,12 @@ function upgrade_precondition_checks() {
     echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp.  To skip this check run: export IGNOREKERNEL=Y"
     [ -z "$IGNOREKERNEL" ] && ret=$(($ret+1))
   fi
+  # cat /proc/sys/kernel/osrelease => 4.14.264-rh305-20220204224046.xenU.x86_64
+  # ERROR: Your kernel version indicates a revision number
+  # of 255 or greater.  Glibc has a number of built in
+  # assumptions that this revision number is less than 255.
+  ver="$([ -f /proc/sys/kernel/osrelease ] && cat /proc/sys/kernel/osrelease | sed 's/[.-]/ /g' | awk '{print $3}')"
+  [ ! -z "$ver" ] && [ $ver -gt 255 ] && echo "dss:warn: if you get an error on libc install like ERROR: Your kernel version indicates a revision number of 255 or greater, then you may need to restart the server with a 5.10 kernel, or a kernel with a version smaller than 255.  You are currently on $(uname -r)" >&2
   if [ -f /etc/debian_version ] && [ -f /etc/apt/sources.list ] && [ "0" == "$(cat /etc/apt/sources.list | egrep -v '^$|^#' | wc -l)" ]; then
     echo "dss:warn:/etc/apt/sources.list is empty and does not have any valid lines in it."
     ret=$(($ret+1))
@@ -794,10 +800,11 @@ function print_uninstall_dovecot() {
 }
 
 function print_failed_dist_upgrade_tips() {
-  echo "dss:warn: In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
-  echo "dss:warn: In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
-  echo "dss:warn: May be worth trying: aptitude -vv full-upgrade" 
-  echo "dss:warn: after attempting a fix manually, rerun the bash distrorejuve.sh  command"
+  #echo "dss:warn: In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
+  #echo "dss:warn: In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
+  #echo "dss:warn: May be worth trying: aptitude -vv full-upgrade" 
+  #echo "dss:warn: after attempting a fix manually, rerun the bash distrorejuve.sh  command"
+  return 0
 }
 
 function dist_upgrade_lenny_to_squeeze() {
@@ -1131,13 +1138,15 @@ function check_systemd_install_matches_init() {
 }
 
 function crossgrade_debian() {
-  [  ! -f /etc/debian_version ] && echo "dss:info: Only debian and Ubuntu crossgrades are supported, but not $(print_distro_info)." && return 0
+  [  ! -f /etc/debian_version ] && echo "dss:info: Only debian crossgrades are supported, but not $(print_distro_info)." && return 0
   
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
   
-  lsb_release -a 2>/dev/null | egrep -qai 'stretch|lenny|squeeze|wheezy|jessie' && echo "dss:error: Older (pre stretch) Debian distros have dependency issues preventing crossgrades.  $0 --dist-upgrade prior to cross grading." && return 1 
+  lsb_release -a 2>/dev/null | egrep -qai 'stretch|lenny|squeeze|wheezy|jessie' && echo "dss:error: Older (pre stretch) Debian distros have dependency issues preventing crossgrades.  $0 --dist-upgrade prior to cross grading." 2>&1 && return 1 
   
+  [ -z "$ENABLE_UBUNTU_CROSSGRADE" ] && lsb_release -a 2>/dev/null | egrep -qai 'ubuntu' && echo "dss:error: Ubuntu cross grades have not been successful.  To ignore this warning and attempt one at your own peril: export ENABLE_UBUNTU_CROSSGRADE=Y" 2>&1 && return 1 
+
   if ! check_systemd_install_matches_init; then 
     echo "dss:error: system needs a reboot prior to cross grading to fully switch to systemd." 2>&1 
     return 1
@@ -2096,6 +2105,7 @@ function record_config_state() {
   netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 3 | uniq >> $file
   echo "Apache vhosts:" >> $file
   echo "" >> $file
+  print_distro_info >> $file
   # vhosts 
   [ -x /usr/sbin/apache2ctl ] && /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> $file
   echo "" >> $file

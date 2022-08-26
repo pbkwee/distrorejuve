@@ -24,8 +24,6 @@ Uses:
 
 Arguments:
   
-Run with --usage to get this message
-
 Run with --check (or no argument) makes no changes.  Reports information like disk space free, kernel, distro version, config files modified from package defaults.
 
 Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to latest debian.
@@ -50,6 +48,8 @@ Run with --to-jessie to get from an older distro to jessie
 
 Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch or buster to bullseye 11
 
+Run with --to-debian-release [6-11] to get from your current version to the specified version
+
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
 Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu version.  If the current ubuntu is an LTS version then this skips to the next LTS version.
@@ -57,6 +57,10 @@ Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu versio
 Run with --fix-vuln to try and fix your server (doing minimal change e.g. just an apt-get install of the affected package).
 
 Run with --break-eggs will run a --dist-upgrade if the server is vulnerable.
+
+Run with --pause to pause a distro rejuve running process (touch ~/distrorejuve.pause).  Triggers 30s sleeps at key points in the script.
+
+Run with --resume to resume a paused distro rejuve running process (rm -f ~/distrorejuve.pause)
 
 Use with --source if you just wish to have the distrorejuve functions available to you for testing
 

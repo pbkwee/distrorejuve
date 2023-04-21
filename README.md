@@ -10,9 +10,9 @@ If you are using the script to make changes, please take a full backup first.
 Example usage to download the latest version of the script, then dist upgrade to latest Debian or Ubuntu disto. 
 
 ```bash
-wget -O distrorejuve.sh --no-check-certificate` https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
+wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
-sudo nohup bash -x distrorejuve.sh --dist-upgrade` 2>&1 | tee -a distrorejuve.log | egrep -v '^\\+'
+sudo nohup bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\\+'
 ````
 
 ## Use Cases

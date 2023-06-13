@@ -16,14 +16,15 @@ NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || e
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye"
 # in egrep code be aware of etch/stretch matching
 # https://wiki.debian.org/LTS
-UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy"
+UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
 # no archive for wheezy (update 2020-03, there is now)
 #DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" | sed 's/wheezy//')"
 DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" )"
 
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
-DEBIAN_CURRENT="jessie stretch buster bullseye"
+DEBIAN_CURRENT="buster bullseye bookworm"
 IS_DEBUG=
+# also DEBIAN_FRONTEND=noninteractive ?
 APT_GET_INSTALL_OPTIONS=' -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss '
 # export this variable, e.g. to DAYS_UPGRADE_ONGOING=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
 DAYS_UPGRADE_ONGOING="${DAYS_UPGRADE_ONGOING:-7}"
@@ -73,7 +74,7 @@ Run with --remove-cruft to remove old packages and 32 bit applications on 64 bit
 
 Run with --remove-deprecated-packages to remove old packages
 
-Run with --to-64bit to convert a 32 bit distro to 64 bit.  NEW as at 2018-03/not so bullet-proof.  Only tested so far with Debian not Ubuntu.
+Run with --to-64bit to convert a 32 bit distro to 64 bit.  Works OK with Debian.  May work for Ubuntu < 18.04.
 
 Run with --to-wheezy to get from squeeze to wheezy
 

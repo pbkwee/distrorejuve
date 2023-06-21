@@ -82,7 +82,7 @@ Run with --to-jessie to get from an older distro to jessie
 
 Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch or buster to bullseye 11
 
-Run with --to-debian-release [6-11] to get from your current version to the specified version
+Run with --to-debian-release [6-12] to get from your current version to the specified version
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
@@ -1204,7 +1204,8 @@ function crossgrade_debian() {
   # needed to load amd package info.  e.g. on debian.
   apt-get $APT_GET_INSTALL_OPTIONS update
   #apt-get $APT_GET_INSTALL_OPTIONS autoremove
-  apt-get $APT_GET_INSTALL_OPTIONS upgrade
+  
+  apt-get $APT_GET_INSTALL_OPTIONS --allow-downgrades upgrade
   [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
   debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$')"
   [ ! -z "$debs" ] && echo "dss:info:moving 64bit packages out of the way" && mv $debs /root/distrorejuveinfo/$$/ 
@@ -2142,7 +2143,7 @@ dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get $APT_GET_INSTALL_OPTIONS autoremove
 apt_get_f_install
 echo "dss:info: running an apt-get upgrade"
-apt-get $APT_GET_INSTALL_OPTIONS upgrade
+apt-get $APT_GET_INSTALL_OPTIONS --allow-downgrades upgrade
 ret=$?
 apt-get $APT_GET_INSTALL_OPTIONS autoremove
 apt_get_f_install

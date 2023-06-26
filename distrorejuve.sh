@@ -870,6 +870,16 @@ ret=$?
 return $ret
 }
 
+function dist_upgrade_bullseye_to_buster() {
+export old_distro=bullseye
+export old_ver="inux 11"
+export new_distro=buster
+export new_ver="inux 12"
+dist_upgrade_x_to_y
+ret=$?
+return $ret
+}
+
 
 # return 0 if a file or two was removed.  e.g. so you can to rm_overwrite_files $tmplog && retry
 function rm_overwrite_files() {
@@ -2700,6 +2710,8 @@ function dist_upgrade_to_latest() {
     if ! dist_upgrade_jessie_to_stretch; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_jessie_to_stretch:failed" && return 1; fi
     if ! dist_upgrade_stretch_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_stretch_to_buster:failed" && return 1; fi
     if ! dist_upgrade_buster_to_bullseye; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_buster_to_bullseye:failed" && return 1; fi
+    if ! dist_upgrade_bullseye_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bullseye_to_buster:failed" && return 1; fi
+    
     if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   fi
   if [ -e /etc/apt/sources.list ] && lsb_release -a 2>/dev/null | grep -qai ubuntu; then  
@@ -2765,6 +2777,8 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   if [ $version -gt 8 ]; then dist_upgrade_jessie_to_stretch; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 9 ]; then dist_upgrade_stretch_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  
   
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes" 
@@ -2782,6 +2796,9 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_buster_to_bullseye
   [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_bullseye_to_buster
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes" 
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then

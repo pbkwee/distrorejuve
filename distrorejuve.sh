@@ -870,10 +870,10 @@ ret=$?
 return $ret
 }
 
-function dist_upgrade_bullseye_to_buster() {
+function dist_upgrade_bullseye_to_bookworm() {
 export old_distro=bullseye
 export old_ver="inux 11"
-export new_distro=buster
+export new_distro=bookworm
 export new_ver="inux 12"
 dist_upgrade_x_to_y
 ret=$?
@@ -2710,7 +2710,7 @@ function dist_upgrade_to_latest() {
     if ! dist_upgrade_jessie_to_stretch; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_jessie_to_stretch:failed" && return 1; fi
     if ! dist_upgrade_stretch_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_stretch_to_buster:failed" && return 1; fi
     if ! dist_upgrade_buster_to_bullseye; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_buster_to_bullseye:failed" && return 1; fi
-    if ! dist_upgrade_bullseye_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bullseye_to_buster:failed" && return 1; fi
+    if ! dist_upgrade_bullseye_to_bookworm; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bullseye_to_bookworm:failed" && return 1; fi
     
     if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   fi
@@ -2777,7 +2777,7 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   if [ $version -gt 8 ]; then dist_upgrade_jessie_to_stretch; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 9 ]; then dist_upgrade_stretch_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye; [ $? -ne 0 ] && ret=$(($ret+1)); fi
-  if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_bookworm; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   
   
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
@@ -2796,7 +2796,7 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_buster_to_bullseye
   [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_bullseye_to_buster
+  dist_upgrade_bullseye_to_bookworm
   [ $? -ne 0 ] && ret=$(($ret+1))
   
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"

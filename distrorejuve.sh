@@ -1953,6 +1953,7 @@ if ! grep -qai "^ *deb.* ${new_distro}[ /-]" /etc/apt/sources.list; then
   echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
 
   #Err:3 http://security.debian.org bullseye/updates Release
+  #FIXME wrong for bookworm.  See also https://www.debian.org/releases/stable/errata
   #404  Not Found [IP: 199.232.10.132 80]
   if is_distro_name_newer "${new_distro}" "buster"; then
     echo "deb http://security.debian.org/debian-security ${new_distro}-security main" >> /etc/apt/sources.list

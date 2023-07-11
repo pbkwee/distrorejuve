@@ -870,10 +870,10 @@ ret=$?
 return $ret
 }
 
-function dist_upgrade_bullseye_to_buster() {
+function dist_upgrade_bullseye_to_bookworm() {
 export old_distro=bullseye
 export old_ver="inux 11"
-export new_distro=buster
+export new_distro=bookworm
 export new_ver="inux 12"
 dist_upgrade_x_to_y
 ret=$?
@@ -2710,7 +2710,7 @@ function dist_upgrade_to_latest() {
     if ! dist_upgrade_jessie_to_stretch; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_jessie_to_stretch:failed" && return 1; fi
     if ! dist_upgrade_stretch_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_stretch_to_buster:failed" && return 1; fi
     if ! dist_upgrade_buster_to_bullseye; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_buster_to_bullseye:failed" && return 1; fi
-    if ! dist_upgrade_bullseye_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bullseye_to_buster:failed" && return 1; fi
+    if ! dist_upgrade_bullseye_to_bookworm; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bullseye_to_bookworm:failed" && return 1; fi
     
     if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   fi
@@ -2737,6 +2737,7 @@ echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:
 if [ "--usage" = "${ACTION:-$1}" ] ; then
   print_usage
 elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_vulnerability_status beforefix
   print_info
   upgrade_precondition_checks
@@ -2744,6 +2745,7 @@ elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
   # set return code
   true
 elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_info
   dist_upgrade_lenny_to_squeeze
   [ $? -ne 0 ] && ret=$(($ret+1))
@@ -2751,6 +2753,7 @@ elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   [ $? -ne 0 ] && ret=$(($ret+1))
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_info
   dist_upgrade_lenny_to_squeeze
   [ $? -ne 0 ] && ret=$(($ret+1))
@@ -2762,12 +2765,13 @@ elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
 elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   version="$2"
   [ -z "$version" ] && echo "dss:error: Need a version e.g. 11 for --to-debian-release" && exit 1
+  [ ! -z "$3" ] && print_usage && exit 1
   case "$version" in
-      6|7|8|9|10|11)
+      6|7|8|9|10|11|12)
       true
       ;;
       *)
-      echo "dss:error: Expecting a --to-debian-release versoin of 6 to 11" && exit 1
+      echo "dss:error: Expecting a --to-debian-release versoin of 6 to 12" && exit 1
       ;;
   esac
   print_info
@@ -2777,12 +2781,13 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   if [ $version -gt 8 ]; then dist_upgrade_jessie_to_stretch; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 9 ]; then dist_upgrade_stretch_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye; [ $? -ne 0 ] && ret=$(($ret+1)); fi
-  if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_bookwork=m; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   
   
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes" 
 elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_info
   dist_upgrade_lenny_to_squeeze
   [ $? -ne 0 ] && ret=$(($ret+1))
@@ -2796,24 +2801,27 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_buster_to_bullseye
   [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_bullseye_to_buster
+  dist_upgrade_bullseye_to_bookworm
   [ $? -ne 0 ] && ret=$(($ret+1))
   
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes" 
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_info
   dist_upgrade_ubuntu_to_latest
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info: --to-latest-lts completed ok.  use $0 --show-changes to see changes"
 elif [ "--to-next-ubuntu" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_info
   dist_upgrade_ubuntu_to_latest 1
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-next-ubuntu completed ok.  use $0 --show-changes to see changes" 
 elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_info
   dist_upgrade_lenny_to_squeeze
   [ $? -ne 0 ] && ret=$(($ret+1))
@@ -2822,6 +2830,7 @@ elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
 elif [ "--source" = "${ACTION:-$1}" ] ; then 
   echo "dss:info:Loaded distrorejuve functions"
 elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_info
   IGNOREOTHERREPOS=Y
   packages_upgrade
@@ -2829,12 +2838,14 @@ elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --upgrade completed ok.  use $0 --show-changes to see changes" 
 elif [ "--dist-upgrade" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_info
   dist_upgrade_to_latest
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --dist-upgrade completed ok.  use $0 --show-changes to see changes" 
 elif [ "--dist-update" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   print_info
   yum_upgrade
   [ $? -ne 0 ] && ret=$(($ret+1))
@@ -2845,6 +2856,7 @@ elif [ "--dist-update" = "${ACTION:-$1}" ] ; then
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --dist-update completed ok.  use $0 --show-changes to see changes" 
 elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then 
+  [ ! -z "$1" ] && print_usage && exit 1
   fix_vuln
   if ! is_fixed; then
     dist_upgrade_to_latest
@@ -2854,25 +2866,30 @@ elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then
   print_vulnerability_status afterfix
   if [ $ret -eq 0 ] ; then true ; else false; fi
 elif [ "--fix-vuln" = "${ACTION:-$1}" ] ; then 
+  [ ! -z "$1" ] && print_usage && exit 1
   fix_vuln
   ret=$?
   print_libc_versions afterfix
   print_vulnerability_status afterfix
   if [ $ret -eq 0 ] ; then true ; else false; fi
 elif [ "--show-cruft" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install)." && exit 0
   show_cruft_packages
   echo "To remove those packages, re-run with bash $0 --remove-cruft"
   exit 0   
 elif [ "--remove-cruft" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install).  Nothing to do.  All good." && exit 0
   remove_cruft_packages
   exit $?   
 elif [ "--remove-deprecated-packages" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   ! has_cruft_packages oldpkg && echo "No cruft packages (all installed packages from the current distro).  Nothing to do.  All good." && exit 0
   remove_cruft_packages oldpkg
   exit $?   
 elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   if [  64 -eq $(getconf LONG_BIT) ]; then
     if has_cruft_packages 32bit; then 
       echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-running crossgrade."
@@ -2892,10 +2909,12 @@ elif [ "--show-changes" = "${ACTION:-$1}" ] ; then
   print_config_state_changes
   exit $ret   
 elif [ "--pause" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   touch ~/distrorejuve.pause
   echo "dss:info: Touched the pause file at $(realpath ~/distrorejuve.pause)"
   exit 0
 elif [ "--resume" = "${ACTION:-$1}" ] ; then
+  [ ! -z "$1" ] && print_usage && exit 1
   rm -f ~/distrorejuve.pause
   echo "dss:info: Removed the pause file at $(realpath ~/distrorejuve.pause)"
   exit 0

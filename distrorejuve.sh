@@ -7,10 +7,11 @@ export APT_LISTCHANGES_FRONTEND=none
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
-LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal jammy"
-#ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety" 
-OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco eoan"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute impish jammy"
+LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal jammy noble"
+#ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety"
+# https://old-releases.ubuntu.com/releases/ 
+OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco eoan groovy hirsute impish kinetic lunar"
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute impish jammy kinetic lunar mantic noble oracular"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye bookworm"
@@ -2922,3 +2923,6 @@ elif [ "--resume" = "${ACTION:-$1}" ] ; then
 else
   print_usage
 fi
+
+
+

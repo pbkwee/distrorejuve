@@ -1,8 +1,7 @@
 #!/bin/bash
-export DEBIAN_FRONTEND=noninteractive
-export APT_LISTCHANGES_FRONTEND=none
 
 # https://superuser.com/questions/1456989/how-to-configure-apt-in-debian-buster-after-release buster InRelease' changed its 'Version' value from '' to '10.0'  Run 'apt list --upgradable' to see them. apt-get update --allow-releaseinfo-change
+# https://www.debian.org/releases/bookworm/amd64/release-notes/ch-upgrading.html
 
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
@@ -16,15 +15,17 @@ NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || e
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye bookworm"
 # in egrep code be aware of etch/stretch matching
 # https://wiki.debian.org/LTS
-UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch"
+UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
 # no archive for wheezy (update 2020-03, there is now)
 #DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" | sed 's/wheezy//')"
 DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" )"
 
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
-DEBIAN_CURRENT="buster bullseye bookworm"
+DEBIAN_CURRENT="bullseye bookworm"
 IS_DEBUG=
 # also DEBIAN_FRONTEND=noninteractive ?
+export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=none
 APT_GET_INSTALL_OPTIONS=' -y -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss '
 # export this variable, e.g. to DAYS_UPGRADE_ONGOING=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
 DAYS_UPGRADE_ONGOING="${DAYS_UPGRADE_ONGOING:-7}"
@@ -80,7 +81,7 @@ Run with --to-wheezy to get from squeeze to wheezy
 
 Run with --to-jessie to get from an older distro to jessie
 
-Run with --to-latest-debian to get from squeeze or lenny or wheezy or jessie or stretch or buster to bullseye 11
+Run with --to-latest-debian to get from an older debian distro to the latest stable distro
 
 Run with --to-debian-release [6-12] to get from your current version to the specified version
 

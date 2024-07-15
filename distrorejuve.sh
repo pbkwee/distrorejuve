@@ -886,7 +886,7 @@ return $ret
 function retain_etc_networking_naming_re_enX0() {
   # test we're a debian system currently using eth0
   [ ! -f /etc/network/interfaces ] && return 0
-  ! egrep -i '^ *iface.*eth0.*static' && return 0
+  ! egrep -i '^ *iface.*eth0.*static' /etc/network/interfaces && return 0
   [ -e /etc/systemd/network/99-default.link ] && return 0
   ! ifconfig eth0 2>/dev/null && return 0
   

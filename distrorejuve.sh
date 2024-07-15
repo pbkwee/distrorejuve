@@ -877,9 +877,27 @@ export old_distro=bullseye
 export old_ver="inux 11"
 export new_distro=bookworm
 export new_ver="inux 12"
+retain_etc_networking_naming_re_enX0
 dist_upgrade_x_to_y
 ret=$?
 return $ret
+}
+
+function retain_etc_networking_naming_re_enX0() {
+  # test we're a debian system currently using eth0
+  [ ! -f /etc/network/interfaces ] && return 0
+  ! egrep -i '^ *iface.*eth0.*static' && return 0
+  [ -e /etc/systemd/network/99-default.link ] && return 0
+  ! ifconfig eth0 2>/dev/null && return 0
+  
+  ln -sf /dev/null /etc/systemd/network/99-default.link && echo "Disabling /etc/systemd/network/99-default.link re enX0'
+  # dev null approach described: 
+  #   https://www.linuxfromscratch.org/lfs/view/9.1-systemd/chapter07/network.html
+  #   https://bbs.archlinux.org/viewtopic.php?id=259086&p=2 the dev null symlink approach
+  # another option: kernel parameter: net.ifnames=0
+  # description of change going into bookworm (deb 12):
+  #   https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.en.html#xen-network
+  #   https://wiki.debian.org/NetworkInterfaceNames#bookworm-xen
 }
 
 

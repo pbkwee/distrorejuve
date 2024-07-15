@@ -890,7 +890,7 @@ function retain_etc_networking_naming_re_enX0() {
   [ -e /etc/systemd/network/99-default.link ] && return 0
   ! ifconfig eth0 2>/dev/null && return 0
   
-  ln -sf /dev/null /etc/systemd/network/99-default.link && echo "Disabling /etc/systemd/network/99-default.link re enX0'
+  ln -sf /dev/null /etc/systemd/network/99-default.link && echo "Disabling /etc/systemd/network/99-default.link re enX0"
   # dev null approach described: 
   #   https://www.linuxfromscratch.org/lfs/view/9.1-systemd/chapter07/network.html
   #   https://bbs.archlinux.org/viewtopic.php?id=259086&p=2 the dev null symlink approach

@@ -1232,7 +1232,7 @@ function crossgrade_debian() {
   [ $? -ne 0 ] && echo "dss:error: Failed adding amd64 architecture." 2>&1 && return 1
 
   # needed to load amd package info.  e.g. on debian.
-  apt-get $APT_GET_INSTALL_OPTIONS update
+  apt_get_update
   #apt-get $APT_GET_INSTALL_OPTIONS autoremove
   
   apt-get $APT_GET_INSTALL_OPTIONS --allow-downgrades upgrade
@@ -2153,10 +2153,19 @@ function record_config_state() {
 
 function apt_get_update() {
 pause_check
-apt-get update
-ret=$?
+local tmplog=$(mktemp "tmplog.aptgetupdate.log.XXXXXX")
+apt-get $APT_GET_INSTALL_OPTIONS update 2>&1 | tee $tmplog
+ret=${PIPESTATUS[0]}
+
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
 if [ $ret -ne 0 ]; then apt-get -o Acquire::ForceIPv4=true  -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false  update; ret=$?; fi
+
+# https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.html#non-free-split
+if egrep -qai "Repository 'Debian bookworm' changed its 'non-free component' value from 'non-free' to 'non-free non-free-firmware'" "$tmplog" && [ -d /etc/apt/apt.conf.d/ ]; then
+  echo "dss:info: disabling the warning around non-free/non-free-firmware per /etc/apt/apt.conf.d/no-bookworm-firmware.conf and https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.html#non-free-split" && echo 'APT::Get::Update::SourceListWarnings::NonFreeFirmware "false";' > /etc/apt/apt.conf.d/no-bookworm-firmware.conf
+fi
+
+rm -rf "$tmplog"
 return $ret
 }
 

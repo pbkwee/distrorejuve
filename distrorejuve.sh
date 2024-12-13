@@ -884,7 +884,7 @@ return $ret
 }
 
 function retain_etc_networking_naming_re_enX0() {
-  # test we're a debian system currently using eth0
+  # test we're a debian/ubuntu system currently using eth0
   [ ! -f /etc/network/interfaces ] && return 0
   ! egrep -i '^ *iface.*eth0.*static' /etc/network/interfaces && return 0
   [ -e /etc/systemd/network/99-default.link ] && return 0
@@ -2281,6 +2281,8 @@ upgrade_precondition_checks || return $?
 echo "dss:trace:dist_upgrade_ubuntu_to_latest:pre_apt_get_upgrade:"
 apt_get_upgrade
 local candidates="$ALL_UBUNTU"
+# add a symlink
+retain_etc_networking_naming_re_enX0
 for start in $ALL_UBUNTU; do
   [ $NUM_TO_DIST_UPGRADE -lt 1 ] && echo "Stopping after $1 distro version updates as requested" && return 0
   #No LSB modules are available.
@@ -2292,6 +2294,7 @@ for start in $ALL_UBUNTU; do
   # remove distros prior to us
   candidates="$(echo $candidates | sed "s/$start//")"
   candidates="$(echo $candidates | sed "s/$current//")"
+  [ "32" == "$(getconf LONG_BIT)" ] && lsb_release -a 2>/dev/null | grep -qai 18.04 && echo "dss:error: You cannot dist-upgrade a 32 bit Ubuntu install past Ubuntu 18.04" >&2 && return 1
   # keep looping till we find our current distro
   if [ "$current" != "$start" ]; then continue; fi
   # all done

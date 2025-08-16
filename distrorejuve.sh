@@ -13,7 +13,7 @@ OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid 
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute impish jammy kinetic lunar mantic noble oracular"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
-ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye bookworm"
+ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye bookworm trixie"
 # in egrep code be aware of etch/stretch matching
 # https://wiki.debian.org/LTS
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
@@ -22,7 +22,7 @@ UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jess
 DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" )"
 
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
-DEBIAN_CURRENT="bullseye bookworm"
+DEBIAN_CURRENT="bullseye bookworm trixie"
 IS_DEBUG=
 # also DEBIAN_FRONTEND=noninteractive ?
 export DEBIAN_FRONTEND=noninteractive
@@ -883,6 +883,19 @@ ret=$?
 return $ret
 }
 
+function dist_upgrade_bookworm_to_trixie() {
+export old_distro=bookworm
+export old_ver="inux 12"
+export new_distro=trixie
+export new_ver="inux 13"
+retain_etc_networking_naming_re_enX0
+dist_upgrade_x_to_y
+ret=$?
+return $ret
+}
+
+  
+
 function retain_etc_networking_naming_re_enX0() {
   # test we're a debian/ubuntu system currently using eth0
   [ ! -f /etc/network/interfaces ] && return 0
@@ -1169,8 +1182,7 @@ function check_systemd_install_matches_init() {
 }
 
 function crossgrade_debian() {
-  [  ! -f /etc/debian_version ] && echo "dss:info: Only debian crossgrades are supported, but not $(print_distro_info)." && return 0
-
+  [  ! -f /etc/debian_version ] && echo "dss:info: Only debian derived distro crossgrades are supported, but not $(print_distro_info)." && return 0
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
 
@@ -1948,6 +1960,20 @@ if is_distro_name_older "$old_distro" "stretch"; then
     return 1
   fi
 fi
+
+if is_distro_name_older "$old_distro" "bookwrom"; then
+  local bittedness="$(getconf LONG_BIT)"
+  if [ ! -z "$bittedness" ] && [ 32 -eq $bittedness ]; then
+    echo "dss:warn: You are running a 32 bit distro.  Debian 13/trixie has reduced 32 bit support.  So you may wish to use this script to crossgrade the distro to 64 bits before proceeding." >&2
+    [ -z "$IGNORE_BITTEDNESS_ERROR" ] && return 1
+  fi
+  if dpkg -l | grep -qai '^i.*dovecot'; then
+    echo "dss:warn: Dovecot configs work differently.  See https://doc.dovecot.org/main/installation/upgrade/2.3-to-2.4.html.  export IGNORE_DOVECOT_ERROR=Y to continue." >&2
+    [ -z "$IGNORE_DOVECOT_ERROR" ] && return 1
+    return 1
+  fi
+fi
+
 
 upgrade_precondition_checks || return $?
 
@@ -2738,6 +2764,7 @@ function dist_upgrade_to_latest() {
     if ! dist_upgrade_stretch_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_stretch_to_buster:failed" && return 1; fi
     if ! dist_upgrade_buster_to_bullseye; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_buster_to_bullseye:failed" && return 1; fi
     if ! dist_upgrade_bullseye_to_bookworm; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bullseye_to_bookworm:failed" && return 1; fi
+    if ! dist_upgrade_bookworm_to_trixie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bookworm_to_trixie:failed" && return 1; fi
 
     if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   fi

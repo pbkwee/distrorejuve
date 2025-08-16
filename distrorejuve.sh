@@ -84,7 +84,7 @@ Run with --to-jessie to get from an older distro to jessie
 
 Run with --to-latest-debian to get from an older debian distro to the latest stable distro
 
-Run with --to-debian-release [6-12] to get from your current version to the specified version
+Run with --to-debian-release [6-13] to get from your current version to the specified version
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 
@@ -889,12 +889,19 @@ export old_ver="inux 12"
 export new_distro=trixie
 export new_ver="inux 13"
 retain_etc_networking_naming_re_enX0
+check_usrmerge
 dist_upgrade_x_to_y
 ret=$?
 return $ret
 }
 
   
+function check_usrmerge() {
+  [ -L /lib ] && return 0
+  echo "dss:warn: /usr not merged.  Trying to install usrmerge to resolve."
+  [ -e /etc/unsupported-skip-usrmerge-conversion ] && rm /etc/unsupported-skip-usrmerge-conversion
+  apt_get_install usrmerge
+}
 
 function retain_etc_networking_naming_re_enX0() {
   # test we're a debian/ubuntu system currently using eth0
@@ -1905,7 +1912,7 @@ function tweak_broken_configs() {
 # This is to delay cron jobs by up to 10 minutes to relieve host server load.
 # needs to parse inet 174.136.11.74  B174.136.11.79  M255.255.255.248 and
 # inet addr:174.136.11.74  Bcast:174.136.11.79  Mask:255.255.255.248
-declare -i random=$(expr $(ifconfig eth0 | grep -v inet6  | grep  "inet" | head -n 1 | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
+declare -i random=$(expr $(ifconfig | grep -v inet6  | grep  "inet" | head -n 1 | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
 sleep ${random}
 exit 0' > $i
     echo "dss:info: updating load delay script: $i"
@@ -2821,11 +2828,11 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   [ -z "$version" ] && echo "dss:error: Need a version e.g. 11 for --to-debian-release" && exit 1
   [ ! -z "$3" ] && print_usage && exit 1
   case "$version" in
-      6|7|8|9|10|11|12)
+      6|7|8|9|10|11|12|13)
       true
       ;;
       *)
-      echo "dss:error: Expecting a --to-debian-release versoin of 6 to 12" && exit 1
+      echo "dss:error: Expecting a --to-debian-release versoin of 6 to 13" && exit 1
       ;;
   esac
   print_info
@@ -2836,6 +2843,7 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   if [ $version -gt 9 ]; then dist_upgrade_stretch_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_bookworm; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 12 ]; then dist_upgrade_bookworm_to_trixie; [ $? -ne 0 ] && ret=$(($ret+1)); fi
 
 
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
@@ -2856,6 +2864,8 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   dist_upgrade_buster_to_bullseye
   [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_bullseye_to_bookworm
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_bookworm_to_trixie
   [ $? -ne 0 ] && ret=$(($ret+1))
 
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"

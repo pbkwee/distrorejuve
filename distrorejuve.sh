@@ -13,7 +13,7 @@ OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid 
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute impish jammy kinetic lunar mantic noble oracular"
 NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
 
-ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye bookworm"
+ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye bookworm trixie"
 # in egrep code be aware of etch/stretch matching
 # https://wiki.debian.org/LTS
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
@@ -22,7 +22,7 @@ UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jess
 DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" )"
 
 # wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
-DEBIAN_CURRENT="bullseye bookworm"
+DEBIAN_CURRENT="bullseye bookworm trixie"
 IS_DEBUG=
 # also DEBIAN_FRONTEND=noninteractive ?
 export DEBIAN_FRONTEND=noninteractive
@@ -881,6 +881,24 @@ retain_etc_networking_naming_re_enX0
 dist_upgrade_x_to_y
 ret=$?
 return $ret
+}
+
+function dist_upgrade_bookworm_to_trixie() {
+export old_distro=bookworm
+export old_ver="inux 12"
+export new_distro=trixie
+export new_ver="inux 13"
+check_usermerge
+dist_upgrade_x_to_y
+ret=$?
+return $ret
+}
+
+function check_usermerge() {
+  [ -L /lib ] && return 0
+  echo "dss:warn: /usr not merged.  Trying to install usrmerge to resolve."
+  [ -e /etc/unsupported-skip-usrmerge-conversion ] && rm /etc/unsupported-skip-usrmerge-conversion
+  apt_get_install usrmerge
 }
 
 function retain_etc_networking_naming_re_enX0() {
@@ -2738,6 +2756,7 @@ function dist_upgrade_to_latest() {
     if ! dist_upgrade_stretch_to_buster; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_stretch_to_buster:failed" && return 1; fi
     if ! dist_upgrade_buster_to_bullseye; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_buster_to_bullseye:failed" && return 1; fi
     if ! dist_upgrade_bullseye_to_bookworm; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bullseye_to_bookworm:failed" && return 1; fi
+    #if ! dist_upgrade_bookworm_to_trixie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bookworm_to_trixie:failed" && return 1; fi
 
     if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   fi
@@ -2794,11 +2813,11 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   [ -z "$version" ] && echo "dss:error: Need a version e.g. 11 for --to-debian-release" && exit 1
   [ ! -z "$3" ] && print_usage && exit 1
   case "$version" in
-      6|7|8|9|10|11|12)
+      6|7|8|9|10|11|12|13)
       true
       ;;
       *)
-      echo "dss:error: Expecting a --to-debian-release versoin of 6 to 12" && exit 1
+      echo "dss:error: Expecting a --to-debian-release versoin of 6 to 13" && exit 1
       ;;
   esac
   print_info
@@ -2809,6 +2828,7 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   if [ $version -gt 9 ]; then dist_upgrade_stretch_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye; [ $? -ne 0 ] && ret=$(($ret+1)); fi
   if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_bookworm; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 12 ]; then dist_upgrade_bookworm_to_trixie; [ $? -ne 0 ] && ret=$(($ret+1)); fi
 
 
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
@@ -2829,6 +2849,8 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   dist_upgrade_buster_to_bullseye
   [ $? -ne 0 ] && ret=$(($ret+1))
   dist_upgrade_bullseye_to_bookworm
+  [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_bookworm_to_trixie
   [ $? -ne 0 ] && ret=$(($ret+1))
 
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"

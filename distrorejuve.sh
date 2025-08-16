@@ -84,7 +84,7 @@ Run with --to-jessie to get from an older distro to jessie
 
 Run with --to-latest-debian to get from an older debian distro to the latest stable distro
 
-Run with --to-debian-release [6-12] to get from your current version to the specified version
+Run with --to-debian-release [6-13] to get from your current version to the specified version
 
 Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
 

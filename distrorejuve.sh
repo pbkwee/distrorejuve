@@ -1516,7 +1516,7 @@ function crossgrade_debian() {
       cd distrorejuveinfo/$$/extra64debs
       for pkg in ${amd64toinstall}; do
         pause_check
-        dpkg -l | grep '^ii' | awk '{print $2}' | grep -qai "${pkg}" || echo "dss:trace: downloading amd64 debian file for ${pkg}" && apt-get download "${pkg}"
+        ! dpkg -l | grep '^ii' | awk '{print $2}' | grep -qai "${pkg}" && echo "dss:trace: downloading amd64 debian file for ${pkg}" && apt-get download "${pkg}"
       done
       local amdfilestoinstall="$(find . -type f  | egrep 'amd64.deb$|all.deb$')"
       if [ -z "$amdfilestoinstall" ]; then

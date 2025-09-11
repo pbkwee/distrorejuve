@@ -401,7 +401,7 @@ function fix_dns() {
   #if ! host google.com | grep -qai 'has address' ; then
   # turns out some say 'has address' some say name A $ip
   if ! host google.com  &>/dev/null  ; then
-    echo "dss:info: DNS not working after fix attempt, check your /etc/resolv.conf and set, say, nameserver 8.8.8.8"
+    echo "dss:error: DNS not working after fix attempt, check your /etc/resolv.conf and set, say, nameserver 8.8.8.8" >&2
   fi
   return 0
 }
@@ -500,6 +500,8 @@ function upgrade_precondition_checks() {
     fi
 
   fi
+  [ $ret ] && echo "dss:trace:upgrade_precondition_checks completed."
+  [ ! $ret ] && echo "dss:error:upgrade precondition checks failed." >&2
 
   return $ret
 }
@@ -901,6 +903,10 @@ function check_usrmerge() {
   echo "dss:warn: /usr not merged.  Trying to install usrmerge to resolve."
   [ -e /etc/unsupported-skip-usrmerge-conversion ] && rm /etc/unsupported-skip-usrmerge-conversion
   apt_get_install usrmerge
+  local ret=$?
+  [ $ret ] && echo "dss:trace:check_usrmerge completed."
+  [ ! $ret ] && echo "dss:error:check usrmerge failed." >&2
+  return  $ret
 }
 
 function retain_etc_networking_naming_re_enX0() {
@@ -1506,7 +1512,8 @@ function crossgrade_debian() {
         fi
       fi
     done
-    echo "dss:trace: completed individual install and removal of i386 packaged.  Ret code of $ret (0 means we are done, otherwise we go for another round)."
+    
+    echo "dss:trace: completed individual install and removal of i386 packages.  Ret code of $ret (0 means we are done, otherwise we go for another round)."
     [  $ret -eq 0 ] && break
   done
 
@@ -1603,9 +1610,16 @@ function crossgrade_debian() {
 
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
 
-  has_cruft_packages 32bit && show_cruft_packages
+  if has_cruft_packages 32bit; then 
+    show_cruft_packages
+    echo "dss:error:after cross grade, 32 bit packages remain." >&2
+    return 1
+  else 
+    echo "dss:info:no 32 bit packages remain (good)"
+  fi
 
-  echo "dss:info: Cross grade has complete.  $(has_cruft_packages 32bit && echo 'has some 32 bit packages still (see above)' || echo 'no 32 bit packages remain (good)')"
+  echo "dss:info: Cross grade has completed."
+  return 0
 
   # sample cleanup/finish up/suggestions:
 
@@ -1649,7 +1663,7 @@ function crossgrade_debian() {
 
   # check 64 bit versions here?
   # dpkg -l | grep libc-bin
-  return 0
+  # return 0
 }
 
 # e.g. has_cruft_packages && show_cruft_packages && reduce_cruft_packages
@@ -1665,7 +1679,10 @@ function show_cruft_packages() {
 
 function remove_cruft_packages() {
    cruft_packages0 remove  $1
-   return $?
+   local ret=$?
+   [ $ret ] && echo "dss:trace:removed_cruft_packages completed."
+   [ ! $ret ] && echo "dss:error:remove cruft packages failed." >&2
+   return $ret
 }
 
 function print_no_available_versions() {
@@ -1900,7 +1917,7 @@ function tweak_broken_configs() {
     [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs --no-run-if-empty grep -l '^log_slow'); do
       sed -i 's/^log_slow/#log_slow/' $file && echo "dss:info: disabled log_slow in $file"
     done
-    [ -f /etc/init.d/mysql ] && ps auxf | grep -qai '[m]ysqld_safe' && /etc/init.d/mysql restart && "dss:info: issued a mysql restart"
+    [ -f /etc/init.d/mysql ] && ps auxf | grep -qai '[m]ysqld_safe' && /etc/init.d/mysql restart && echo "dss:info: issued a mysql restart"
   fi
 
   for i in $(find /etc/cron.* -type f -name 000loaddelay); do
@@ -2193,6 +2210,7 @@ if egrep -qai "Repository 'Debian bookworm' changed its 'non-free component' val
 fi
 
 rm -rf "$tmplog"
+[ ! $ret ] && echo "dss:error:apt_get_update failed." >&2
 return $ret
 }
 
@@ -2227,12 +2245,17 @@ if [ $ret -ne 0 ]; then
   fi
 fi
 apt-get clean
+[ ! $ret ] && echo "dss:error:apt_get_upgrade failed." >&2
 return $ret
 }
 
 function plesk_upgrade() {
   which plesk >/dev/null 2>&1 || return 0
   plesk installer --select-release-current --reinstall-patch --upgrade-installed-components
+  local ret=$?
+  [ ! $ret ] && echo "dss:error:plesk upgrade failed." >&2
+  [ $ret ] && echo "dss:info:plesk upgrade completed." >&2
+  return $ret
 }
 
 function apt_get_dist_upgrade() {
@@ -2541,6 +2564,8 @@ function yum_upgrade() {
   echo "dss:info: running yum upgrade"
   yum $QOPT -y upgrade
   ret=$?
+  [ ! $ret ] && echo "dss:error:yum_upgrade failed." >&2
+  [ $ret ] && echo "dss:info:yum_upgrade completed."
   return $ret
 }
 

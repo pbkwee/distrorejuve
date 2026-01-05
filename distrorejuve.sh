@@ -1973,6 +1973,13 @@ if is_distro_name_older "$old_distro" "squeeze"; then
     return 1
   fi
 fi
+# https://www.debian.org/releases/trixie/release-notes/issues.en.html#things-to-be-aware-of-while-upgrading-to-releasename
+if is_distro_name_older "$old_distro" "trixie"; then
+  if dpkg -l | grep -qai '^i.*dovecot'; then
+    print_uninstall_dovecot
+    return 1
+  fi
+fi
 if [ "$old_distro" == "lenny" ]; then
   add_missing_debian_keys
   [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"

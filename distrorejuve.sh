@@ -902,6 +902,11 @@ function check_usrmerge() {
   [ -L /lib ] && return 0
   echo "dss:warn: /usr not merged.  Trying to install usrmerge to resolve."
   [ -e /etc/unsupported-skip-usrmerge-conversion ] && rm /etc/unsupported-skip-usrmerge-conversion
+  local duplicatefiles="$(comm -12 \
+  <(find /bin -maxdepth 1 -type f -printf '%f\n' | sort) \
+  <(find /usr/bin -maxdepth 1 -type f -printf '%f\n' | sort))"
+  local info="$(for file in $duplicatefiles; do dpkg -S /bin/$file ; dpkg -S /usr/bin/$file 2>&1 ; done | grep 'no path' | sed 's/.*matching pattern /rm /')"
+  [ ! -z "$info" ] && echo "dss:warn:usrmerge will fail due to file collisions.  You may wish to remove the following: $info"
   apt_get_install usrmerge
   local ret=$?
   [ $ret ] && echo "dss:trace:check_usrmerge completed."
@@ -1992,7 +1997,7 @@ if is_distro_name_older "$old_distro" "stretch"; then
   fi
 fi
 
-if is_distro_name_older "$old_distro" "bookwrom"; then
+if is_distro_name_older "$old_distro" "bookworm"; then
   local bittedness="$(getconf LONG_BIT)"
   if [ ! -z "$bittedness" ] && [ 32 -eq $bittedness ]; then
     echo "dss:warn: You are running a 32 bit distro.  Debian 13/trixie has reduced 32 bit support.  So you may wish to use this script to crossgrade the distro to 64 bits before proceeding." >&2

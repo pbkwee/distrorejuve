@@ -2000,7 +2000,7 @@ fi
 if is_distro_name_older "$old_distro" "bookworm"; then
   local bittedness="$(getconf LONG_BIT)"
   if [ ! -z "$bittedness" ] && [ 32 -eq $bittedness ]; then
-    echo "dss:warn: You are running a 32 bit distro.  Debian 13/trixie has reduced 32 bit support.  So you may wish to use this script to crossgrade the distro to 64 bits before proceeding." >&2
+    echo "dss:warn: You are running a 32 bit distro.  Debian 13/trixie has reduced 32 bit support.  So you may wish to use this script to crossgrade the distro to 64 bits before proceeding.  e.g. $0  --to-debian-release 12; $0 --to-64bit " >&2
     [ -z "$IGNORE_BITTEDNESS_ERROR" ] && return 1
   fi
   if dpkg -l | grep -qai '^i.*dovecot'; then

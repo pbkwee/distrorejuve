@@ -500,8 +500,8 @@ function upgrade_precondition_checks() {
     fi
 
   fi
-  [ $ret ] && echo "dss:trace:upgrade_precondition_checks completed."
-  [ ! $ret ] && echo "dss:error:upgrade precondition checks failed." >&2
+  [ "$ret" -eq 0 ] && echo "dss:trace:upgrade_precondition_checks completed."
+  [ "$ret" -ne 0 ] && echo "dss:error:upgrade precondition checks failed." >&2
 
   return $ret
 }
@@ -909,8 +909,8 @@ function check_usrmerge() {
   [ ! -z "$info" ] && echo "dss:warn:usrmerge will fail due to file collisions.  You may wish to remove the following: $info"
   apt_get_install usrmerge
   local ret=$?
-  [ $ret ] && echo "dss:trace:check_usrmerge completed."
-  [ ! $ret ] && echo "dss:error:check usrmerge failed." >&2
+  [ "$ret" -eq 0 ] && echo "dss:trace:check_usrmerge completed."
+  [ "$ret" -ne 0 ] && echo "dss:error:check usrmerge failed." >&2
   return  $ret
 }
 
@@ -1023,8 +1023,9 @@ function rm_overwrite_files() {
 
 function apt_get_remove() {
   pause_check
-  local tmplog=$(mktemp "tmplog.aptgetremove.log.XXXXXX")
-  apt-get $APT_GET_INSTALL_OPTIONS remove $@ | tee $tmplog
+  local tmplog
+  tmplog=$(mktemp "tmplog.aptgetremove.log.XXXXXX") || return 1
+  apt-get $APT_GET_INSTALL_OPTIONS remove $@ | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
   [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
   #if [  $ret -ne 0 ] && echo "$@" | egrep -qai 'gcc-6-base:i386'; then
@@ -1034,36 +1035,38 @@ function apt_get_remove() {
       echo "dss:info: attempting to install libcap2-bin since gcc-6-base remove failed." && apt_get_install libcap2-bin:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
     fi
   fi
-  local essentialissuepackages="$(cat $tmplog | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
+  local essentialissuepackages="$(grep --after-context 50 'WARNING: The following essential packages will be removed.' "$tmplog" | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_remove $@ essential package issues for: $essentialissuepackages"
   echo "$essentialissuepackages" | egrep -qai 'libgcc-s1:i386' && echo "dss:warn: This issue may be related to this bug report: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=992317"
-  rm -rf "$tmplog"
+  rm -f "$tmplog"
   return $ret
 }
 
 function apt_get_install() {
   pause_check
-  local tmplog=$(mktemp "tmplog.aptgetinstall.log.XXXXXX")
-  apt-get $APT_GET_INSTALL_OPTIONS install $@ | tee $tmplog
+  local tmplog
+  tmplog=$(mktemp "tmplog.aptgetinstall.log.XXXXXX") || return 1
+  apt-get $APT_GET_INSTALL_OPTIONS install $@ | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
   [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS install $@ && ret=$?
-  local essentialissuepackages="$(cat $tmplog | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
+  local essentialissuepackages="$(grep --after-context 50 'WARNING: The following essential packages will be removed.' "$tmplog" | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_install $@ essential package issues for: $essentialissuepackages"
 
-  rm -rf "$tmplog"
+  rm -f "$tmplog"
   return $ret
 }
 
 function apt_get_f_install() {
   pause_check
-  local tmplog=$(mktemp "tmplog.aptgetfinstall.log.XXXXXX")
-  apt-get $APT_GET_INSTALL_OPTIONS -f install | tee $tmplog
+  local tmplog
+  tmplog=$(mktemp "tmplog.aptgetfinstall.log.XXXXXX") || return 1
+  apt-get $APT_GET_INSTALL_OPTIONS -f install | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
   if [  $ret -ne 0 ]; then
     rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS -f install && ret=$?
   fi
-  echo "dss:trace:apt_get_f_install:$1 results $(egrep 'upgraded' $tmplog)"
-  local essentialissuepackages="$(cat $tmplog | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
+  echo "dss:trace:apt_get_f_install:$1 results $(egrep 'upgraded' "$tmplog")"
+  local essentialissuepackages="$(grep --after-context 50 'WARNING: The following essential packages will be removed.' "$tmplog" | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_f_install $@ essential package issues for: $essentialissuepackages"
   if [ ! -z "$essentialissuepackages" ] && echo "$essentialissuepackages" | grep -qai 'perl-base:amd64'; then
     echo "dss:trying to dpkg -i perl-base:i386"
@@ -1072,12 +1075,12 @@ function apt_get_f_install() {
     else
       apt-get download perl-base:i386
       dpkg -i perl-base*i386*deb
-      apt-get $APT_GET_INSTALL_OPTIONS -f install | tee $tmplog
+      apt-get $APT_GET_INSTALL_OPTIONS -f install | tee "$tmplog"
       local ret=${PIPESTATUS[0]}
     fi
   fi
 
-  rm -rf "$tmplog"
+  rm -f "$tmplog"
   if [ $ret -ne 0 ]; then
     echo "dss:warn: dpkg results showing packages with issues."
     dpkg -l  | egrep -v '^ii|^rc|^iU' | awk '{print "dss:warn:apt_get_f_install: " $0}'
@@ -1088,7 +1091,8 @@ function apt_get_f_install() {
 
 function dpkg_install() {
   [  -z "$1" ] && return 0
-  local tmplog=$(mktemp "tmplog.dpkginstall.log.XXXXXX")
+  local tmplog
+  tmplog=$(mktemp "tmplog.dpkginstall.log.XXXXXX") || return 1
   dpkg --force-confnew --force-confdef --force-confmiss --install $@ 2>&1 | tee "$tmplog"
   ret=${PIPESTATUS[0]}
   if [  $ret -eq 0 ]; then
@@ -1128,7 +1132,7 @@ function dpkg_install() {
   if [ $ret -ne 0 ]; then
     echo "dss:trace:dpkg_install: some .deb packages had issues.  retrying to install all packages."
     dpkg --force-confnew --force-confdef --force-confmiss --install $@  2>&1 | tee "$tmplog"
-    ret=$?
+    ret=${PIPESTATUS[0]}
     if [  $ret -eq 0 ]; then
       egrep -qai 'Errors |pre-dependency problem|dpkg: error' "$tmplog" && ret=1 && echo "dss:warn: dpkg install lied about the return code(#2).  will need to retry the install."
     fi
@@ -1302,7 +1306,7 @@ function crossgrade_debian() {
 
     echo "dss:trace: cross grading.  installing key amd64 deb packages: dpkg:amd64 tar:amd64 apt:amd64 perl-base:amd64"
     # something about this removes apache2.  figure out why...
-    cd /root/distrorejuveinfo/$$
+    cd /root/distrorejuveinfo/$$ || return 1
     local debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$') $(find . -maxdepth 1 -type f  | egrep 'amd64.deb$|all.deb$')"
     while true; do
       pause_check
@@ -1330,13 +1334,14 @@ function crossgrade_debian() {
     done
     if [  ! -z "$debs" ]; then
       echo "dss:info: installing packages via dpkg -i including: $(echo "$debs" | head | tr '\n' ' ')..."
-      dpkg_install $debs
-      if [ $? -ne 0 ]; then
-        [ $? -ne 0 ] && echo "dss:error: dpkg install amd64.deb files failed" 2>&1 && cd - && return 1
+      if ! dpkg_install $debs; then
+        echo "dss:error: dpkg install amd64.deb files failed" >&2
+        cd - || return 1
+        return 1
       fi
       mv $debs /root/distrorejuveinfo/$$
     fi
-    cd -
+    cd - || return 1
   fi
   #apt-get $APT_GET_INSTALL_OPTIONS autoremove
   echo "dss:trace: cross grading.  force installing to see what amd64 packages need to be installed/fixed."
@@ -1359,7 +1364,7 @@ function crossgrade_debian() {
     local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
     [  -z "$essentialtoinstall" ] && echo "dss:info: all essential packages appear to be installed." && break
     mkdir -p distrorejuveinfo/$$/essentialdebs
-    cd distrorejuveinfo/$$/essentialdebs
+    cd distrorejuveinfo/$$/essentialdebs || return 1
     echo "dss:trace: apt-get -f install had errors.  there may be some essential packages not installed.  trying to install 32 and 64 bit versions of: $essentialtoinstall"
     for pkg in ${essentialtoinstall}; do
       pkg=$(echo "${pkg}" | sed 's/:i386//')
@@ -1370,7 +1375,7 @@ function crossgrade_debian() {
       apt-get download "${pkg}:amd64"
     done
     dpkg_install $(find . -name '*.deb')
-    cd -
+    cd - || return 1
   done
   apt_get_f_install
   ret=$?
@@ -1447,7 +1452,7 @@ function crossgrade_debian() {
 
     essentialpackages="$(for i in $essentialpackages; do echo $i; done | sort | uniq)"
     essentialdeps="$(for i in $essentialdeps; do echo $i; done | sort | uniq)"
-    cd /root/distrorejuveinfo/$$
+    cd /root/distrorejuveinfo/$$ || return 1
     [ ! -z "$essentialpackages" ] && apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialpackages || apt-get download $essentialpackages
     [ ! -z "$essentialdeps" ] && apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install $essentialdeps || apt-get download $essentialdeps
     apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install init:amd64
@@ -1461,7 +1466,7 @@ function crossgrade_debian() {
     ret=$?
     [  ! -z "$debs" ] && mv $debs /root/distrorejuveinfo/$$
     [ $ret -ne 0 ] && echo "dss:error: dpkg install essential amd64.deb files failed" 2>&1
-    cd -
+    cd - || return 1
   done
 
   # getting a dependency issue on apt-get remove a few things: libpam-modules : PreDepends: libpam-modules-bin (= 1.1.8-3.6)
@@ -1498,7 +1503,9 @@ function crossgrade_debian() {
       local lret=$?
       # fwiw apt-get install $alreadyinstalled returns 0
       [  $lret -eq 0 ] && echo $pkg | egrep -qai 'gcc.*base' && echo "dss:info: not apt-get remove-ing $pkg, as has tended to remove lots of necessary things.  e.g. ifupdown."
-      [  $lret -eq 0 ] && echo $pkg | egrep -qai 'gcc.*base' || i386toremove2="$i386toremove2 $pkg"
+      if [ "$lret" -eq 0 ] && ! echo "$pkg" | egrep -qai 'gcc.*base'; then
+        i386toremove2="$i386toremove2 $pkg"
+      fi
     done
     echo "dss:trace: removing 32 bit versions of packages where we were able to install the 64bit version: $i386toremove2"
     # then remove the i386 version.  Used to this after installing each amd64 package, but that sometimes led to other things being removed that broke things
@@ -1525,7 +1532,7 @@ function crossgrade_debian() {
   # try to install
   while true; do
       mkdir -p distrorejuveinfo/$$/extra64debs
-      cd distrorejuveinfo/$$/extra64debs
+      cd distrorejuveinfo/$$/extra64debs || return 1
       for pkg in ${amd64toinstall}; do
         pause_check
         ! dpkg -l | grep '^ii' | awk '{print $2}' | grep -qai "${pkg}" && echo "dss:trace: downloading amd64 debian file for ${pkg}" && apt-get download "${pkg}"
@@ -1533,9 +1540,10 @@ function crossgrade_debian() {
       local amdfilestoinstall="$(find . -type f  | egrep 'amd64.deb$|all.deb$')"
       if [ -z "$amdfilestoinstall" ]; then
         echo "dss:trace: not finding any extra amd64 files to install"
+        cd - || return 1
         break;
       fi
-      cd -
+      cd - || return 1
       echo "dss:trace: attempting a dpkg install of non-lib packages: $(echo $amd64toinstall)"
       dpkg_install $(find distrorejuveinfo/$$/extra64debs -type f  | egrep 'amd64.deb$|all.deb$')
       local lret=$?
@@ -1545,7 +1553,7 @@ function crossgrade_debian() {
 
   while true; do
       mkdir -p distrorejuveinfo/$$/settheory
-      cd distrorejuveinfo/$$/settheory
+      cd distrorejuveinfo/$$/settheory || return 1
       #[ir] e.g. to find desired = install or remove where status = installed
       dpkg -l | egrep '^[ir]i.*i386' | awk '{print $2}' | sed 's/:i386//' | sort > pkgs.386.log
       dpkg -l | egrep '^ii.*amd64' | awk '{print $2}' | sed 's/:amd64//' | sort> pkgs.amd64.log
@@ -1556,7 +1564,7 @@ function crossgrade_debian() {
         echo "dss:trace: downloading amd64 debian file for ${pkg}"
         apt-get download "${pkg}"
       done
-      cd -
+      cd - || return 1
       local amdfilestoinstall=$(find distrorejuveinfo/$$/settheory -type f  | egrep 'amd64.deb$|all.deb$')
       if [ -z "$amdfilestoinstall" ]; then
         echo "dss:trace: not finding any extra amd64 files to install per distrorejuveinfo/$$/settheory"
@@ -1685,8 +1693,8 @@ function show_cruft_packages() {
 function remove_cruft_packages() {
    cruft_packages0 remove  $1
    local ret=$?
-   [ $ret ] && echo "dss:trace:removed_cruft_packages completed."
-   [ ! $ret ] && echo "dss:error:remove cruft packages failed." >&2
+   [ "$ret" -eq 0 ] && echo "dss:trace:removed_cruft_packages completed."
+   [ "$ret" -ne 0 ] && echo "dss:error:remove cruft packages failed." >&2
    return $ret
 }
 
@@ -2066,9 +2074,8 @@ return 1
 
 function print_minimal_config() {
   local a=$1
-  local b=$2
-  [ ! -f $a ] && return 1
-  egrep -v '^\s*#|^$' $a
+  [ ! -f "$a" ] && return 1
+  egrep -v '^\s*#|^$' "$a"
   return 0
 }
 function print_pkg_to_modified_diff() {
@@ -2076,7 +2083,7 @@ function print_pkg_to_modified_diff() {
 # get a list of config files in packages that have been changed by the user
 local modifiedconfigfiles=$(dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort)
 local modifiedconfigfile
-cd /root/pkgdiff.$$
+cd /root/pkgdiff.$$ || return 1
 for modifiedconfigfile in $modifiedconfigfiles; do
   # figure out the package name
   # dpkg -S /etc/apache2/mods-available/ssl.conf
@@ -2109,7 +2116,7 @@ for modifiedconfigfile in $modifiedconfigfiles; do
 done
 
 # cleanup
-cd - >/dev/null
+cd - >/dev/null || return 1
 rm -rf /root/pkgdiff.$$
 return 0
 }
@@ -2117,15 +2124,18 @@ return 0
 function print_minimal_config_diff() {
   local a=$1
   local b=$2
-  [ ! -f $a ] && return 1
-  [ ! -f $b ] && return 1
-  ta=$(mktemp "$(basename "${a}").XXXXXX")
-  tb=$(mktemp "$(basename "${b}").XXXXXX")
-  print_minimal_config $a > $ta
-  print_minimal_config $b > $tb
-  diff --ignore-all-space -u $ta $tb
+  [ ! -f "$a" ] && return 1
+  [ ! -f "$b" ] && return 1
+  ta=$(mktemp "$(basename "${a}").XXXXXX") || return 1
+  if ! tb=$(mktemp "$(basename "${b}").XXXXXX"); then
+    rm -f "$ta"
+    return 1
+  fi
+  print_minimal_config "$a" > "$ta"
+  print_minimal_config "$b" > "$tb"
+  diff --ignore-all-space -u "$ta" "$tb"
   ret=$?
-  rm -f $ta $tb
+  rm -f "$ta" "$tb"
   return $ret
 }
 function print_config_state_changes() {
@@ -2209,8 +2219,9 @@ function record_config_state() {
 
 function apt_get_update() {
 pause_check
-local tmplog=$(mktemp "tmplog.aptgetupdate.log.XXXXXX")
-apt-get $APT_GET_INSTALL_OPTIONS update 2>&1 | tee $tmplog
+local tmplog
+tmplog=$(mktemp "tmplog.aptgetupdate.log.XXXXXX") || return 1
+apt-get $APT_GET_INSTALL_OPTIONS update 2>&1 | tee "$tmplog"
 ret=${PIPESTATUS[0]}
 
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
@@ -2221,8 +2232,8 @@ if egrep -qai "Repository 'Debian bookworm' changed its 'non-free component' val
   echo "dss:info: disabling the warning around non-free/non-free-firmware per /etc/apt/apt.conf.d/no-bookworm-firmware.conf and https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.html#non-free-split" && echo 'APT::Get::Update::SourceListWarnings::NonFreeFirmware "false";' > /etc/apt/apt.conf.d/no-bookworm-firmware.conf
 fi
 
-rm -rf "$tmplog"
-[ ! $ret ] && echo "dss:error:apt_get_update failed." >&2
+rm -f "$tmplog"
+[ "$ret" -ne 0 ] && echo "dss:error:apt_get_update failed." >&2
 return $ret
 }
 
@@ -2257,7 +2268,7 @@ if [ $ret -ne 0 ]; then
   fi
 fi
 apt-get clean
-[ ! $ret ] && echo "dss:error:apt_get_upgrade failed." >&2
+[ "$ret" -ne 0 ] && echo "dss:error:apt_get_upgrade failed." >&2
 return $ret
 }
 
@@ -2265,8 +2276,8 @@ function plesk_upgrade() {
   which plesk >/dev/null 2>&1 || return 0
   plesk installer --select-release-current --reinstall-patch --upgrade-installed-components
   local ret=$?
-  [ ! $ret ] && echo "dss:error:plesk upgrade failed." >&2
-  [ $ret ] && echo "dss:info:plesk upgrade completed." >&2
+  [ "$ret" -ne 0 ] && echo "dss:error:plesk upgrade failed." >&2
+  [ "$ret" -eq 0 ] && echo "dss:info:plesk upgrade completed." >&2
   return $ret
 }
 
@@ -2576,8 +2587,8 @@ function yum_upgrade() {
   echo "dss:info: running yum upgrade"
   yum $QOPT -y upgrade
   ret=$?
-  [ ! $ret ] && echo "dss:error:yum_upgrade failed." >&2
-  [ $ret ] && echo "dss:info:yum_upgrade completed."
+  [ "$ret" -ne 0 ] && echo "dss:error:yum_upgrade failed." >&2
+  [ "$ret" -eq 0 ] && echo "dss:info:yum_upgrade completed."
   return $ret
 }
 

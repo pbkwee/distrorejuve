@@ -1,3 +1,4 @@
+#!/bin/bash
 # a script to test processing/handling of various repository lines we are expected to see
 # to test
 # bash repolines.sh  | grep -v '==='>b ; diff expectedreposlines.txt b; rm -f b
@@ -125,13 +126,12 @@ declare -a REPOSLINES=(" deb file:///usr/local/packages/ stable main" \
 " deb http://archive.debian.org/debian/ lenny main non-free contrib")
 
 name=squeeze
-for ((i=0;i<${#REPOSLINES[@]};i++)); do
-line="${REPOSLINES[$i]]}"
+for line in "${REPOSLINES[@]}"; do
 for distro in lenny woody trusty etch sarge; do
  line=$(echo $line | sed "s/$distro/$name/g")
 done
 name2=foobar
 echo $line===
-echo $line | egrep -qai "^ *deb ([a-zA-Z]+)://([-~a-zA-Z0-9./]*) +$name[ /]" && echo $line | sed "s@^ *deb \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\) *$name\([ /]\)@deb \1://\2 $name2\3@"
+echo $line | egrep -qai "^ *deb ([a-zA-Z]+)://([-~a-zA-Z0-9./]*) +${name}[ /]" && echo $line | sed "s@^ *deb \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\) *$name\([ /]\)@deb \1://\2 $name2\3@"
 done
 

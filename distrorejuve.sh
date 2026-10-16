@@ -6,24 +6,21 @@
 # https://wiki.ubuntu.com/Releases
 # when updating, keep them in their release order to safety
 # no leading/trailing spaces.  one space per word.
-LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal jammy noble"
+LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal jammy noble resolute"
 #ARCHIVE_REPO_UBUNTU="precise trusty vivid wily xenial yakkety"
 # https://old-releases.ubuntu.com/releases/
-OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco eoan groovy hirsute impish kinetic lunar"
-ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute impish jammy kinetic lunar mantic noble oracular"
-NON_LTS_UBUNTU=$(for i in $ALL_UBUNTU; do echo $LTS_UBUNTU | grep -qai "$i" || echo -n "$i "; done; echo)
+OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco eoan groovy hirsute impish kinetic lunar precise mantic oracular"
+ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute impish jammy kinetic lunar mantic noble oracular plucky questing resolute stonking"
 
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye bookworm trixie"
 # in egrep code be aware of etch/stretch matching
 # https://wiki.debian.org/LTS
-UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster"
-# no archive for wheezy (update 2020-03, there is now)
-#DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" | sed 's/wheezy//')"
-DEBIAN_ARCHIVE="$(echo "$UNSUPPORTED_DEBIAN squeeze-lts" )"
+UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye"
+DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN squeeze-lts"
 
-# wheezy to 31 May 2018, jessie to April 2020, stretch to June 2022
-DEBIAN_CURRENT="bullseye bookworm trixie"
-IS_DEBUG=
+# Support state differs from repository location; Ubuntu ESM releases stay on live mirrors.
+UNSUPPORTED_UBUNTU="$OLD_RELEASES_UBUNTU trusty xenial bionic focal plucky questing"
+DEBIAN_CURRENT="bookworm trixie"
 # also DEBIAN_FRONTEND=noninteractive ?
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
@@ -90,10 +87,6 @@ Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu 
 
 Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu version.  If the current ubuntu is an LTS version then this skips to the next LTS version.
 
-Run with --fix-vuln to try and fix your server (doing minimal change e.g. just an apt-get install of the affected package).
-
-Run with --break-eggs will run a --dist-upgrade if the server is vulnerable.
-
 Run with --pause to pause a distro rejuve running process (touch ~/distrorejuve.pause).  Triggers 30s sleeps at key points in the script.
 
 Run with --resume to resume a paused distro rejuve running process (rm -f ~/distrorejuve.pause)
@@ -148,20 +141,6 @@ function pause_check() {
   done
 }
 
-function is_fixed() {
-  # 0 = vulnerable, 1 = fixed, 2 = dunno
-  is_CVE_2015_0235_vulnerable
-  ret=$?
-  if [ $ret -eq 1 ]; then
-    is_CVE_2015_7547_vulnerable
-    ret=$?
-    if [ $ret -eq 1 ]; then
-      # return 0 if both vulns are fixed
-      return 0
-    fi
-  fi
-  return 1
-}
 
 # e.g. wordlisttoegrep "a b c" => "a|b|c"
 function wordlisttoegreparg() {
@@ -190,166 +169,19 @@ function replace() {
    sed -i "s@$from@$to@" "$file"
 }
 
-function is_vulnerable() {
-  is_CVE_2015_0235_vulnerable && return 0
-  is_CVE_2015_7547_vulnerable && return 0
-  return 1
-}
 
-function prep_ghost_output_dir() {
+function prepare_output_dir() {
 if [ ! -d /root/distrorejuveinfo ] ; then echo "dss:info: Creating /root/distrorejuveinfo."; mkdir /root/distrorejuveinfo; fi
 return 0
 }
 
 function print_libc_versions() {
 # Checking current glibc version
-local prefix=${1:-prefix}
+local prefix=prefix
 [ -x /usr/bin/ldd ] && /usr/bin/ldd --version | grep -i libc | awk '{print "dss:lddver:'$prefix':" $0}'
 [ -x /usr/bin/dpkg ] && /usr/bin/dpkg -l libc6 | grep libc6 | awk '{print "dss:dpkg:'$prefix':" $0}'
 [ -x /bin/rpm ] && /bin/rpm -qa glibc | awk '{print "dss:rpmqa:'$prefix':" $0}'
 return 0
-}
-
-function is_CVE_2015_0235_vulnerable() {
-  print_CVE_2015_0235_vulnerable > /dev/null
-  return $?
-}
-function is_CVE_2015_7547_vulnerable() {
-  print_CVE_2015_7547_vulnerable > /dev/null
-  return $?
-}
-
-# 0 = vulnerable, 1 = fixed, 2 = dunno
-function print_CVE_2015_0235_vulnerable() {
-  # fixed for that, fixed for all.
-  print_CVE_2015_7547_vulnerable > /dev/null
-  if [ $? -eq 1 ]; then
-     echo "N"
-     return 1
-  fi
-# based on some known good package versions https://security-tracker.debian.org/tracker/CVE-2015-0235
-# http://people.canonical.com/~ubuntu-security/cve/2015/CVE-2015-0235.html
-if [ ! -x /usr/rpm ] && [ -x /usr/bin/dpkg ]; then
-   if dpkg -l | grep libc6 | egrep -qai '2\.19-13|2\.19-15|2\.13-38\+deb7u7|2\.11\.3-4\+deb6u4|2\.11\.1-0ubuntu7.20|2\.15-0ubuntu10.10|2\.19-10ubuntu2|2\.19-0ubuntu6'; then
-     echo "N"
-     return 1
-   fi
-   if dpkg -l | grep libc6 | egrep -qai '2\.11\.3-4|2\.13-38\+deb7u6|2\.7-18lenny7'; then
-     echo "Y"
-     return 0
-   fi
-   # some more that are probably also old/vuln
-   if dpkg -l | grep libc6 | egrep -qai '2\.4-1ubuntu12\.3|2\.10\.1-0ubuntu19|2\.10\.2-1|2\.11\.1-0ubuntu7|2\.11\.2-5|2\.13-38|2\.2\.5-11\.5|2\.2\.5-11\.8|2\.3\.2\.ds1-22|2\.3\.2\.ds1-22sa|2\.3\.6\.ds1-13|2\.3\.6\.ds1-13et|2\.3\.6\.ds1-13etch10|2\.3\.6\.ds1-13etch10\+b1|2\.3\.6\.ds1-13etch2|2\.3\.6\.ds1-13etch8|2\.3\.6\.ds1-13etch9\+b1|2\.3\.6\.ds1-8|2\.5-0ubuntu14|2\.6\.1-1ubuntu10|2\.7-10ubuntu4|2\.7-10ubuntu8\.3|2\.7-18|2\.7-18lenny2|2\.7-18lenny4|2\.8~20080505-0ubuntu9|2\.9-4ubuntu6\.3'; then
-     echo "Y"
-     return 0
-   fi
-   echo "?"
-   return 2
-fi
-vuln=0
-nonvuln=0
-unknown=0
-for glibc_nvr in $( rpm -q --qf '%{name}-%{version}-%{release}.%{arch}\n' glibc ); do
-    glibc_ver=$( echo "$glibc_nvr" | awk -F- '{ print $2 }' )
-    glibc_maj=$( echo "$glibc_ver" | awk -F. '{ print $1 }')
-    glibc_min=$( echo "$glibc_ver" | awk -F. '{ print $2 }')
-    if [ -z "$glibc_maj" ] || [ -z "$glibc_maj" ] || [ -z "$glibc_min" ]; then
-      unknown=$(($unknown+1))
-      continue
-    fi
-    #echo -n "- $glibc_nvr: "
-    if [ "$glibc_maj" -gt 2   -o  \
-        \( "$glibc_maj" -eq 2  -a  "$glibc_min" -ge 18 \) ]; then
-        # fixed upstream version
-        # echo 'not vulnerable'
-        nonvuln=$(($nonvuln+1))
-    else
-        # all RHEL updates include CVE in rpm %changelog
-        if rpm -q --changelog "$glibc_nvr" | grep -q 'CVE-2015-0235'; then
-            #echo "not vulnerable"
-            nonvuln=$(($nonvuln+1))
-        else
-            #echo "vulnerable"
-            vuln=$(($vuln+1))
-        fi
-    fi
-done
-
-if [ $vuln -gt 0 ] ; then echo "Y"; return 0; fi
-if [ $unknown -gt 0 ]; then echo "?"; return 2; fi
-if [ $nonvuln -gt 0 ] ; then echo "N"; return 1; fi
-echo "?"
-return 2
-}
-
-# 0 = vulnerable, 1 = fixed, 2 = dunno
-function print_CVE_2015_7547_vulnerable() {
-if [ ! -x /usr/rpm -a -x /usr/bin/dpkg ]; then
-    # based on some known good package versions https://security-tracker.debian.org/tracker/CVE-2015-7547
-   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.11\.3-4\+deb6u11|2\.13-38\+deb7u10|2\.19-18\+deb8u3|2\.21-8|2\.21-9'; then
-     echo "N"
-     return 1
-   fi
-    # http://people.canonical.com/~ubuntu-security/cve/2015/CVE-2015-7547.html
-   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.15-0ubuntu10\.13|2\.19-0ubuntu6\.7|2\.21-0ubuntu4\.0\.1|2\.21-0ubuntu4\.1'; then
-     echo "N"
-     return 1
-   fi
-   #the issue affected all the versions of glibc since 2.9 e.g. to match 2.3.6.ds1-13etch10+b1  or 2.6-blah
-   if dpkg -l | grep libc6 | grep '^i' | egrep -qai '2\.[1-8][-.]'; then
-     echo "N"
-     return 1
-   fi
-   # some more that are probably also old/vuln
-   if dpkg -l | grep libc6 | egrep -qai '2\.4-1ubuntu12\.3|2\.10\.1-0ubuntu19|2\.10\.2-1|2\.11\.1-0ubuntu7|2\.11\.2-5|2\.13-38|2\.2\.5-11\.5|2\.2\.5-11\.8|2\.3\.2\.ds1-22|2\.3\.2\.ds1-22sa|2\.3\.6\.ds1-13|2\.3\.6\.ds1-13et|2\.3\.6\.ds1-13etch10|2\.3\.6\.ds1-13etch10\+b1|2\.3\.6\.ds1-13etch2|2\.3\.6\.ds1-13etch8|2\.3\.6\.ds1-13etch9\+b1|2\.3\.6\.ds1-8|2\.5-0ubuntu14|2\.6\.1-1ubuntu10|2\.7-10ubuntu4|2\.7-10ubuntu8\.3|2\.7-18|2\.7-18lenny2|2\.7-18lenny4|2\.8~20080505-0ubuntu9|2\.9-4ubuntu6\.3'; then
-     echo "Y"
-     return 0
-   fi
-   echo "?"
-   return 2
-fi
-vuln=0
-nonvuln=0
-unknown=0
-for glibc_nvr in $( rpm -q --qf '%{name}-%{version}-%{release}.%{arch}\n' glibc ); do
-    glibc_ver=$( echo "$glibc_nvr" | awk -F- '{ print $2 }' )
-    glibc_maj=$( echo "$glibc_ver" | awk -F. '{ print $1 }')
-    glibc_min=$( echo "$glibc_ver" | awk -F. '{ print $2 }')
-    if [ -z "$glibc_maj" -o -z "$glibc_maj" -o -z "$glibc_min" ]; then
-      unknown=$(($unknown+1))
-      continue
-    fi
-    #echo -n "- $glibc_nvr: "
-    if [ "$glibc_maj" -gt 2   -o  \
-        \( "$glibc_maj" -eq 2  -a  "$glibc_min" -ge 22 \) -o \
-        \( "$glibc_maj" -eq 2  -a  "$glibc_min" -le 8 \) ]; then
-        # fixed upstream version
-        # echo 'not vulnerable'
-        nonvuln=$(($nonvuln+1))
-    else
-        # all RHEL updates include CVE in rpm %changelog
-        if rpm -q --changelog "$glibc_nvr" | grep -q 'CVE-2015-7547'; then
-            #echo "not vulnerable"
-            nonvuln=$(($nonvuln+1))
-        else
-            #echo "vulnerable"
-            vuln=$(($vuln+1))
-        fi
-    fi
-done
-
-if [ $vuln -gt 0 ] ; then echo "Y"; return 0; fi
-if [ $unknown -gt 0 ]; then echo "?"; return 2; fi
-if [ $nonvuln -gt 0 ] ; then echo "N"; return 1; fi
-echo "?"
-return 2
-}
-
-# use print_vulnerability_status beforefix and print_vulnerability_status afterfix
-function print_vulnerability_status() {
-local prefix=${1:-prefix}
-echo "dss:isvulnerable:$prefix: CVE_2015_0235$(print_CVE_2015_0235_vulnerable)"
-echo "dss:isvulnerable:$prefix: CVE_2015_7547$(print_CVE_2015_7547_vulnerable)"
 }
 
 function print_info() {
@@ -385,7 +217,7 @@ function print_info() {
   echo "dss:info: Checking for disk space on host"
   df -m | awk '{print "dss:dfm:" $0}'
   which dpkg-query >/dev/null && dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
-  [ -f /etc/apt/sources.list ] && cat /etc/apt/sources.list | egrep -v '^$|^#' | awk '{print "dss:aptsources:" $0}'
+  apt_sources_list | awk -F "\t" '{print "dss:aptsources:" $1 ":" $2 ":" $3 ":" $6}'
   for i in /etc/apache2 /etc/httpd ; do
     [ ! -d "$i" ] && continue
     find "$i" -type f | xargs --no-run-if-empty egrep -h '^ *ServerName' | sed 's/.*ServerName //' | sort | uniq | awk '{print "dss:apache:servernames:"$0}' | sort | uniq
@@ -406,6 +238,461 @@ function fix_dns() {
   return 0
 }
 
+# Read only files APT itself loads; backups and nested directories are ignored.
+function apt_sources_files() {
+  local file name
+  for file in "/etc/apt/sources.list" "/etc/apt/sources.list.d/"*.list "/etc/apt/sources.list.d/"*.sources; do
+    [ -f "$file" ] || continue
+    name=${file##*/}
+    case "$name" in *[!a-zA-Z0-9_.-]*) continue;; esac
+    printf '%s\n' "$file"
+  done
+}
+
+# One parser owns both inventory and edits. No Python or modern APT is required.
+# Inventory: file<TAB>line<TAB>provider<TAB>type<TAB>URI<TAB>suite<TAB>components<TAB>architectures.
+# Examples: deb [arch=amd64 signed-by=/key.gpg] https://deb.debian.org/debian bookworm main
+# deb822: Types: deb deb-src / URIs: ... / Suites: bookworm bookworm-updates.
+function apt_sources_process() {
+  local mode=$1 file=$2 family=$3 from=$4 to=$5
+  awk -v mode="$mode" -v family="$family" -v from="$from" -v to="$to" \
+    -v add_security="${apt_sources_add_security:-false}" -v add_updates="${apt_sources_add_updates:-false}" \
+    -v add_lts="${apt_sources_add_lts:-false}" -v ports="${apt_sources_ports:-false}" -v debian_archive="$DEBIAN_ARCHIVE" -v ubuntu_archive="$OLD_RELEASES_UBUNTU" '
+  function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+  function contains(words, word) { return index(" " words " ", " " word " ") > 0 }
+  function provider(uri, host, path) {
+    host=tolower(uri); sub(/^[a-z+]+:\/\//, "", host); sub(/\/.*$/, "", host)
+    path=uri; sub(/^[a-z+]+:\/\/[^/]+/, "", path); sub(/\/$/, "", path)
+    # Credentials and ports must not make a third-party URL look official.
+    if (host ~ /(^|\.)debian\.org$/ || host == "http.debian.net" || host == "volatile.debian.net") {
+      if (path ~ /^\/(debian|debian-security|debian-backports|debian-volatile|debian-non-US)$/ ||
+          path ~ /^\/debian-archive\/(debian|debian-security)$/ ||
+          (path == "" && host ~ /^(security|archive|volatile).debian.org$/)) return "debian"
+    }
+    if (host ~ /(^|\.)(archive.ubuntu.com|security.ubuntu.com|old-releases.ubuntu.com)$/ && path == "/ubuntu") return "ubuntu"
+    if (host == "ports.ubuntu.com" && path == "/ubuntu-ports") return "ubuntu"
+    if ((host == "www.backports.org" || host == "backports.org") && (path == "/debian" || path == "/backports.org")) return "debian"
+    if (host == "mirrors.linode.com" || host == "mirrors.kernel.org") {
+      if (uri ~ /\/debian(-security)?\/?$/) return "debian"
+      if (uri ~ /\/ubuntu\/?$/) return "ubuntu"
+    }
+    if (host == "packages.sury.org") return "sury"
+    if (host == "ppa.launchpad.net" || host == "ppa.launchpadcontent.net") {
+      if (uri ~ /\/ondrej\/php\/ubuntu\/?$/) return "sury"
+      return "ppa"
+    }
+    if (host == "software.virtualmin.com" || host == "software.virtualmin.dev" || host == "download.virtualmin.com") return "virtualmin"
+    if (host == "download.webmin.com") return "webmin"
+    if (host ~ /(^|\.)(plesk.com|plesk.page)$/) return "plesk"
+    if (host ~ /(^|\.)cpanel.net$/) return "cpanel"
+    if (host == "apt.postgresql.org" || host == "apt-archive.postgresql.org") return "postgresql"
+    if (host == "download.docker.com") return "docker"
+    if (host ~ /(^|\.)mariadb\.(org|com)$/) return "mariadb"
+    if (host == "repo.mongodb.org" || host == "repo.mongodb.com") return "mongodb"
+    return "unknown"
+  }
+  function error(message) {
+    print "dss:error: Invalid APT source at " FILENAME ":" NR ": " message > "/dev/stderr"
+    failed=1
+  }
+  # Update only distro-owned records. Vendor suites such as Webmin sarge stay intact.
+  function transform(uri, suite, components, p, base, suffix, archived, security) {
+    newuri=uri; newsuite=suite; newcomponents=components; drop=0
+    p=provider(uri)
+    if (p != family) return
+    if (!(suite == from || index(suite, from "-") == 1 || index(suite, from "/") == 1)) return
+    suffix=substr(suite, length(from)+1)
+    if (mode == "upgrade" && (suffix ~ /^-backports/ || suffix == "-proposed-updates" || suffix == "-lts" || suffix == "/volatile" || suffix == "/non-US")) {
+      drop=1; return
+    }
+    newsuite=to suffix
+    security=(suffix == "/updates" || suffix == "-security")
+    if (family == "debian" && security) {
+      if (contains("bullseye bookworm trixie", to)) newsuite=to "-security"
+      else newsuite=to "/updates"
+    }
+    archived=contains(family == "debian" ? debian_archive : ubuntu_archive, to)
+    if (family == "debian") {
+      if (archived && ((suffix == "-updates" && !contains("buster bullseye", to)) || suffix == "/volatile" || suffix == "/non-US")) { drop=1; return }
+      if (archived) {
+        newuri="http://archive.debian.org/" (security ? "debian-security" : "debian")
+        if (suffix ~ /^-backports/ && contains("sarge etch lenny squeeze", to)) newuri="http://archive.debian.org/debian-backports"
+      }
+      else if (uri ~ /archive.debian.org/ || mode == "upgrade")
+        newuri="http://deb.debian.org/" (security ? "debian-security" : "debian")
+      if (contains("bookworm trixie", to) && contains(components, "non-free") && !contains(components, "non-free-firmware"))
+        newcomponents=components " non-free-firmware"
+    } else {
+      if (archived) newuri="http://old-releases.ubuntu.com/ubuntu"
+      else if (uri ~ /old-releases.ubuntu.com/) {
+        # Ports releases need an architecture-specific mirror after leaving the archive.
+        newuri=(ports == "true" ? "http://ports.ubuntu.com/ubuntu-ports" : (security ? "http://security.ubuntu.com/ubuntu" : "http://archive.ubuntu.com/ubuntu"))
+      }
+    }
+  }
+  function extra_pockets(uri, suite, components, type, prefix, comment, deb822, i, suffixes,n) {
+    if (mode != "upgrade" || suite != from || provider(uri) != family) return
+    n=0
+    if (add_security == "true") suffixes[++n]=(family == "debian" ? "/updates" : "-security")
+    if (add_updates == "true") suffixes[++n]="-updates"
+    if (add_lts == "true") suffixes[++n]="-lts"
+    for (i=1;i<=n;i++) {
+      transform(uri, from suffixes[i], components)
+      if (suffixes[i] == "-lts") { transform(uri, from, components); newsuite=to "-lts"; drop=0 }
+      if (deb822) { print ""; emit_stanza(newuri,newsuite,newcomponents,drop) }
+      else print prefix newuri " " newsuite " " newcomponents (comment ? " " comment : "")
+    }
+  }
+  function list_record(type, uri, suite, components, architectures) {
+    printf "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", FILENAME, start, provider(uri), type, uri, suite, components, (architectures && architectures != "||" ? architectures : "*")
+  }
+  function emit_stanza(uri, suite, components, disabled, i, key) {
+    for (i=1; i<=count; i++) {
+      key=linekey[i]
+      if (key == "uris") { if (first[key] == i) print "URIs: " uri }
+      else if (key == "suites") { if (first[key] == i) print "Suites: " suite }
+      else if (key == "components") { if (first[key] == i) print "Components: " components }
+      else if (key == "enabled" && disabled) { if (first[key] == i) print "Enabled: no" }
+      else print lines[i]
+    }
+    if (disabled && !("enabled" in first)) print "Enabled: no"
+  }
+  function stanza( i,j,k,nu,ns,nt,uris,suites,types,changed,disabled) {
+    if (!count) return
+    if (tolower(values["enabled"]) == "no") { if (mode != "list") for (i=1;i<=count;i++) print lines[i]; return }
+    if (!("types" in values) && !("uris" in values) && !("suites" in values) && !key) {
+      if (mode != "list") for (i=1;i<=count;i++) print lines[i]
+      return
+    }
+    if (!values["types"] || !values["uris"] || !values["suites"]) { error("missing Types, URIs or Suites"); return }
+    for (i=1;i<=count;i++) if (linekey[i] == "enabled" && tolower(values["enabled"]) != "yes") { error("Enabled must be yes or no"); return }
+    nt=split(values["types"], types, /[ \t]+/); nu=split(values["uris"], uris, /[ \t]+/); ns=split(values["suites"], suites, /[ \t]+/)
+    for (k=1;k<=nt;k++) if (types[k] != "deb" && types[k] != "deb-src") { error("unsupported Types"); return }
+    for (i=1;i<=nu;i++) if (uris[i] !~ /^[a-zA-Z][a-zA-Z0-9+.-]*:/) { error("invalid URI"); return }
+    for (j=1;j<=ns;j++) if (!values["components"] && suites[j] !~ /\/$/) { error("missing Components"); return }
+    changed=0
+    for (i=1;i<=nu;i++) for (j=1;j<=ns;j++) {
+      if (mode == "list") for (k=1;k<=nt;k++) list_record(types[k], uris[i], suites[j], values["components"], values["architectures"] "|" values["architectures-add"] "|" values["architectures-remove"])
+      else {
+        transform(uris[i], suites[j], values["components"])
+        if (newuri != uris[i] || newsuite != suites[j] || newcomponents != values["components"] || drop) changed=1
+      }
+    }
+    if (mode == "list") return
+    if (!changed) { for (i=1;i<=count;i++) print lines[i]; return }
+    # Split changed cross-products so main and security can use different archives.
+    for (i=1;i<=nu;i++) for (j=1;j<=ns;j++) {
+      if (i+j > 2) print ""
+      transform(uris[i], suites[j], values["components"])
+      emit_stanza(newuri, newsuite, newcomponents, drop)
+      extra_pockets(uris[i], suites[j], values["components"], "", "", "", 1)
+    }
+  }
+  BEGIN { deb822=(ARGV[1] ~ /\.sources$/) }
+  !deb822 {
+    original=$0; rest=trim($0); start=NR
+    if (rest == "" || rest ~ /^#/) { if (mode != "list") print original; next }
+    if (rest !~ /^deb(-src)?[ \t]+/) { error("expected deb or deb-src"); next }
+    match(rest, /^[^ \t]+[ \t]+/); type=trim(substr(rest,1,RLENGTH)); prefix=substr(rest,1,RLENGTH); rest=substr(rest,RLENGTH+1)
+    if (rest ~ /^\[/) {
+      if (!match(rest,/^\[[^]]*\][ \t]+/)) { error("unclosed options"); next }
+      prefix=prefix substr(rest,1,RLENGTH); rest=substr(rest,RLENGTH+1)
+    }
+    if (!match(rest,/^[^ \t]+[ \t]+/)) { error("missing URI or suite"); next }
+    uri=trim(substr(rest,1,RLENGTH)); rest=trim(substr(rest,RLENGTH+1))
+    match(rest,/^[^ \t#]+/); suite=substr(rest,1,RLENGTH); rest=substr(rest,RLENGTH+1)
+    comment=""; if (match(rest,/#.*/)) { comment=substr(rest,RSTART); rest=substr(rest,1,RSTART-1) }
+    components=trim(rest)
+    architectures=""
+    if (match(prefix, /arch=[^] \t]+/)) { architectures=substr(prefix,RSTART+5,RLENGTH-5); gsub(/,/," ",architectures); architectures=architectures "||" }
+    if (prefix ~ /arch[+-]=/) architectures=prefix
+    if (uri !~ /^[a-zA-Z][a-zA-Z0-9+.-]*:/) { error("invalid URI"); next }
+    if (!suite || (!components && suite !~ /\/$/)) { error("missing suite or components"); next }
+    if (mode == "list") list_record(type,uri,suite,components,architectures)
+    else {
+      transform(uri,suite,components)
+      if (newuri == uri && newsuite == suite && newcomponents == components && !drop) print original
+      else print (drop ? "# " : "") prefix newuri " " newsuite (newcomponents ? " " newcomponents : "") (comment ? " " comment : "")
+      if (provider(uri) == family) extra_pockets(uri,suite,components,type,prefix,comment,0)
+    }
+    next
+  }
+  deb822 {
+    if ($0 ~ /^[ \t]*$/) {
+      stanza(); if (mode != "list") print $0
+      delete lines; delete linekey; delete values; delete first; count=0; key=""; next
+    }
+    if (!count) start=NR
+    lines[++count]=$0
+    if ($0 ~ /^#/) next
+    if ($0 ~ /^[ \t]/) {
+      if (!key) { error("continuation without a field"); next }
+      linekey[count]=key; values[key]=trim(values[key] " " trim($0)); next
+    }
+    if (!match($0,/^[a-zA-Z][a-zA-Z0-9-]*:/)) { error("expected deb822 field"); next }
+    key=tolower(substr($0,1,RLENGTH-1)); linekey[count]=key
+    if (key in values) { error("duplicate deb822 field"); next }
+    first[key]=count; values[key]=trim(substr($0,RLENGTH+1))
+  }
+  END { if (deb822) stanza(); if (failed) exit 1 }
+  ' "$file"
+}
+
+function apt_sources_list() {
+  local file
+  while IFS= read -r file; do
+    apt_sources_process list "$file" || return 1
+  done < <(apt_sources_files)
+}
+
+# Stage every file before activation. Keep originals for manual recovery and rollback.
+function apt_sources_rewrite() {
+  local mode=$1 family=$2 from=$3 to=$4 stage backup file index=0 changed=false ret=0
+  local -a source_files=() activated=()
+  local apt_sources_ports=false arch
+  arch=$(dpkg --print-architecture) || return 1
+  case "$arch" in amd64|i386) :;; *) apt_sources_ports=true;; esac
+  stage=$(mktemp -d "/etc/apt/.distrorejuve.XXXXXX") || return 1
+  while IFS= read -r file; do
+    source_files[index]=$file
+    if ! cp -p -- "$file" "$stage/$index" ||
+        ! apt_sources_process "$mode" "$file" "$family" "$from" "$to" > "$stage/$index"; then
+      rm -r -- "$stage"; return 1
+    fi
+    if ! cmp -s -- "$file" "$stage/$index"; then
+      if [ -L "$file" ]; then
+        echo "dss:error: APT source is a symlink; update its target manually: $file" >&2
+        rm -r -- "$stage"; return 1
+      fi
+      changed=true
+    fi
+    index=$((index+1))
+  done < <(apt_sources_files)
+  if ! $changed; then rm -r -- "$stage"; return 0; fi
+  mkdir -p "/root/distrorejuveinfo/apt-sources" || { rm -r -- "$stage"; return 1; }
+  backup=$(mktemp -d "/root/distrorejuveinfo/apt-sources/change.XXXXXX") || { rm -r -- "$stage"; return 1; }
+  for index in "${!source_files[@]}"; do
+    file=${source_files[index]}
+    if ! mkdir -p "$backup${file%/*}" || ! cp -p -- "$file" "$backup$file"; then
+      rm -r -- "$stage"; return 1
+    fi
+  done
+  for index in "${!source_files[@]}"; do
+    file=${source_files[index]}
+    cmp -s -- "$file" "$stage/$index" && continue
+    mv -- "$stage/$index" "$file" || { ret=1; break; }
+    activated+=("$file")
+  done
+  if [ "$ret" -ne 0 ]; then
+    for file in "${activated[@]}"; do
+      cp -p -- "$backup$file" "$file" || echo "dss:error: Restore APT source from $backup$file" >&2
+    done
+    echo "dss:error: APT source activation failed; originals retained at $backup" >&2
+  else
+    echo "dss:info: Updated APT sources; originals retained at $backup"
+  fi
+  rm -r -- "$stage"
+  return "$ret"
+}
+
+function apt_sources_archive() {
+  local name
+  for name in $DEBIAN_ARCHIVE; do
+    apt_sources_rewrite archive debian "$name" "$name" || return 1
+  done
+  for name in $OLD_RELEASES_UBUNTU; do
+    apt_sources_rewrite archive ubuntu "$name" "$name" || return 1
+  done
+}
+
+function distro_output_codename() {
+  local name version file key value
+  name=$(lsb_release -sc 2>/dev/null) && case " $ALL_DEBIAN $ALL_UBUNTU " in *" $name "*) printf '%s\n' "$name"; return 0;; esac
+  for file in /etc/lsb-release /etc/os-release; do
+    [ -r "$file" ] || continue
+    while IFS='=' read -r key value; do
+      case "$key" in DISTRIB_CODENAME|VERSION_CODENAME|UBUNTU_CODENAME)
+        name=${value#\"}; name=${name%\"}
+        name=${name#\'}; name=${name%\'}
+        case " $ALL_DEBIAN $ALL_UBUNTU " in *" $name "*)
+          [ -n "$name" ] && printf '%s\n' "$name" && return 0;;
+        esac;;
+      esac
+    done < "$file"
+  done
+  if [ -f /etc/debian_version ]; then
+    read -r version < /etc/debian_version
+    case "$version" in
+      5.*) name=lenny;; 6.*) name=squeeze;; 7.*) name=wheezy;; 8.*) name=jessie;;
+      9.*) name=stretch;; 10.*) name=buster;; 11.*) name=bullseye;; 12.*) name=bookworm;; 13.*) name=trixie;; *) return 1;;
+    esac
+    printf '%s\n' "$name"
+    return 0
+  fi
+  return 1
+}
+
+function apt_sources_prepare() {
+  local current family alias
+  [ -f /etc/debian_version ] || return 0
+  current=$(distro_output_codename) || { echo "dss:error: Cannot identify installed release; cannot pin APT aliases." >&2; return 1; }
+  family=debian
+  case " $ALL_UBUNTU " in *" $current "*) family=ubuntu;; esac
+  for alias in stable oldstable oldoldstable; do
+    apt_sources_rewrite pin "$family" "$alias" "$current" || return 1
+  done
+  apt_sources_archive
+}
+
+# Target availability as checked 2026-10-16: 0=supported, 1=unsupported, 2=needs vendor review.
+# These predicates do not certify an installed application or authorize an OS upgrade.
+function apt_repo_sury_support() {
+  case "$1:$2" in debian:bookworm|debian:trixie|ubuntu:jammy|ubuntu:noble|ubuntu:resolute) return 0;; esac
+  return 1
+}
+function apt_repo_virtualmin_support() {
+  case "$1:$2" in debian:bookworm|debian:trixie|ubuntu:noble|ubuntu:resolute) return 0;; esac
+  return 2
+}
+function apt_repo_webmin_support() {
+  return 2
+}
+function apt_repo_plesk_support() {
+  # The installed Plesk version and the exact transition determine support.
+  return 2
+}
+function apt_repo_cpanel_support() {
+  case "$1:$2" in ubuntu:noble) return 0;; debian:*) return 1;; esac
+  return 2
+}
+function apt_repo_postgresql_support() {
+  case "$1:$2" in debian:bookworm|debian:trixie|ubuntu:jammy|ubuntu:noble|ubuntu:resolute|ubuntu:stonking) return 0;; esac
+  return 1
+}
+function apt_repo_docker_support() {
+  case "$1:$2" in debian:bookworm|debian:trixie|ubuntu:jammy|ubuntu:noble|ubuntu:resolute|ubuntu:stonking) return 0;; esac
+  return 1
+}
+function apt_repo_mariadb_support() {
+  return 2
+}
+function apt_repo_mongodb_support() {
+  return 2
+}
+function apt_repo_ppa_support() {
+  return 2
+}
+
+function apt_sources_check() {
+  local target=${1:-${apt_sources_transition_target:-}} current family records file line provider type suite base
+  local ret=0 official=0 seen=' ' support status
+  records=$(apt_sources_list) || return 1
+  if [ -n "$target" ] && { command -v plesk >/dev/null 2>&1 || [ -e /usr/local/cpanel/cpanel ]; }; then
+    echo "dss:error: Hosting panel detected; use its documented distro upgrade procedure." >&2
+    return 1
+  fi
+  current=$(distro_output_codename) || current=
+  family=debian
+  case " $ALL_UBUNTU " in *" $current "*) [ -n "$current" ] && family=ubuntu;; esac
+  while IFS=$'\t' read -r file line provider type _ suite _ _; do
+    [ -n "$file" ] || continue
+    if [ "$provider" = debian ] || [ "$provider" = ubuntu ]; then
+      base=${suite%%[-/]*}
+      if [ "$type" = deb ] && [ "$suite" = "$base" ]; then official=$((official+1)); fi
+      case "$base" in stable|oldstable|oldoldstable) base=$current;; esac
+      case " $ALL_DEBIAN $ALL_UBUNTU " in
+        *" $base "*) case "$seen" in *" $base "*) :;; *) seen="$seen$base ";; esac;;
+        *) echo "dss:warn: $file:$line has an unpinned or unknown distro suite: $suite" >&2; ret=1;;
+      esac
+      if [ -n "$current" ] && [ "$base" != "$current" ] && [ "$base" != "$target" ]; then
+        echo "dss:warn: $file:$line suite $suite does not match installed release $current or this upgrade target." >&2; ret=1
+      fi
+      if [ "$provider" != "$family" ]; then
+        echo "dss:warn: $file:$line belongs to $provider, but the installed distro is $family." >&2; ret=1
+      fi
+      case "$suite" in *-backports*)
+        if [ -z "$IGNOREBACKPORTS" ]; then
+          echo "dss:warn: $file:$line enables backports ($suite); disable before upgrading or export IGNOREBACKPORTS=Y." >&2; ret=1
+        fi;;
+      esac
+      continue
+    fi
+    [ -z "$target" ] && [ -n "$IGNOREOTHERREPOS" ] && continue
+    support=unknown
+    status=2
+    case "$provider" in
+      sury|virtualmin|webmin|plesk|cpanel|postgresql|docker|mariadb|mongodb|ppa)
+        if "apt_repo_${provider}_support" "$family" "${target:-$current}"; then status=0; else status=$?; fi;;
+    esac
+    case "$status" in 0) support=supported;; 1) support=unsupported;; esac
+    echo "dss:info: $file:$line: $provider repository; target ${target:-$current} availability: $support."
+    if [ -n "$target" ] || [ "$status" -ne 0 ]; then
+      echo "dss:warn: Review or disable $provider source at $file:$line before continuing. Vendor migrations require application/version checks; sources are unchanged." >&2
+      ret=1
+    fi
+  done <<< "$records"
+  if [ "$official" -eq 0 ]; then echo "dss:warn: No active recognized Debian/Ubuntu binary base sources found." >&2; ret=1; fi
+  # Only distro-owned suites count; Webmin sarge and PGDG suffixes are vendor data.
+  local -a releases=()
+  read -r -a releases <<< "$seen"
+  if [ "${#releases[@]}" -gt 1 ]; then echo "dss:warn: APT sources mix distro releases:$seen" >&2; ret=1; fi
+  return "$ret"
+}
+
+# Existing security sources must cover each binary base component and architecture filter.
+# Do not add conflicting Signed-By records when only part of a security pocket is configured.
+function apt_sources_check_security_coverage() {
+  local records=$1 family=$2 current=$3 target=$4 provider type suite components architectures
+  local secprovider sectype secsuite seccomponents secarchitectures component covered
+  local -a basecomponents=()
+  while IFS=$'\t' read -r _ _ provider type _ suite components architectures; do
+    if [ "$provider" != "$family" ] || [ "$type" != deb ]; then continue; fi
+    [ "$suite" = "$current" ] || [ "$suite" = "$target" ] || continue
+    read -r -a basecomponents <<< "$components"
+    for component in "${basecomponents[@]}"; do
+      covered=false
+      while IFS=$'\t' read -r _ _ secprovider sectype _ secsuite seccomponents secarchitectures; do
+        if [ "$secprovider" != "$family" ] || [ "$sectype" != deb ]; then continue; fi
+        case "$secsuite" in "$current"/updates|"$current"-security|"$target"/updates|"$target"-security) :;; *) continue;; esac
+        [ "$secarchitectures" = '*' ] || [ "$secarchitectures" = "$architectures" ] || continue
+        case " $seccomponents " in *" $component "*) covered=true; break;; esac
+      done <<< "$records"
+      if ! $covered; then
+        echo "dss:error: Existing security sources do not cover base component $component with its architecture filter. Review APT sources before upgrading." >&2
+        return 1
+      fi
+    done
+  done <<< "$records"
+}
+
+function apt_sources_upgrade() {
+  local family=$1 current=$2 target=$3
+  local records provider type suite
+  local apt_sources_add_security=true apt_sources_add_updates=true apt_sources_add_lts=false
+  case "$family" in
+    debian) case " $ALL_DEBIAN " in *" $target "*) :;; *) return 1;; esac;;
+    ubuntu) case " $ALL_UBUNTU " in *" $target "*) :;; *) return 1;; esac;;
+    *) return 1;;
+  esac
+  if [ "$family" = debian ]; then
+    case " $DEBIAN_ARCHIVE " in *" $target "*)
+      case "$target" in buster|bullseye) :;; *) apt_sources_add_updates=false;; esac;;
+    esac
+    [ "$target" = squeeze ] && apt_sources_add_lts=true
+  fi
+  apt_sources_check "$target" || return 1
+  records=$(apt_sources_list) || return 1
+  while IFS=$'\t' read -r _ _ provider type _ suite _ _; do
+    if [ "$provider" != "$family" ] || [ "$type" != deb ]; then continue; fi
+    case "$suite" in "$current"/updates|"$current"-security|"$target"/updates|"$target"-security) apt_sources_add_security=false;; esac
+    case "$suite" in "$current"-updates|"$target"-updates) apt_sources_add_updates=false;; esac
+  done <<< "$records"
+  if ! $apt_sources_add_security; then
+    apt_sources_check_security_coverage "$records" "$family" "$current" "$target" || return 1
+  fi
+  apt_sources_rewrite upgrade "$family" "$current" "$target"
+}
+
 function upgrade_precondition_checks() {
   local ret=0
   # e.g. 3.12.1
@@ -419,12 +706,6 @@ function upgrade_precondition_checks() {
   # assumptions that this revision number is less than 255.
   ver="$([ -f /proc/sys/kernel/osrelease ] && cat /proc/sys/kernel/osrelease | sed 's/[.-]/ /g' | awk '{print $3}')"
   [ ! -z "$ver" ] && [ $ver -gt 255 ] && echo "dss:warn: if you get an error on libc install like ERROR: Your kernel version indicates a revision number of 255 or greater, then you may need to restart the server with a 5.10 kernel, or a kernel with a version smaller than 255.  You are currently on $(uname -r)" >&2
-  if [ -f /etc/debian_version ] && [ -f /etc/apt/sources.list ] && [ "0" == "$(cat /etc/apt/sources.list | egrep -v '^$|^#' | wc -l)" ]; then
-    echo "dss:warn:/etc/apt/sources.list is empty and does not have any valid lines in it."
-    ret=$(($ret+1))
-  fi
-  # e.g. set for --upgrade.  other repos probably fine.  Only an issue if dist-upgrading.
-  [ ! -z "$IGNOREOTHERREPOS" ] && return $ret
   # ii  dmidecode                       2.9-1.2build1                           Dump Desktop Management Interface data
   local libx11=
   which dpkg >/dev/null 2>&1 && if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
@@ -445,151 +726,17 @@ function upgrade_precondition_checks() {
     fi
   fi
 
-  # check that there is only a single package repo in use.  else mixing two distro versions is troublesome
-  if [ -f /etc/apt/sources.list ]; then
-    num=0
-    distros=""
-    for distro in $ALL_UBUNTU $ALL_DEBIAN; do
-      grep -qai "^ *[a-z].* ${distro}[ /-]" /etc/apt/sources.list || continue
-      num=$((num+1))
-      distros="$distro $distros"
-    done
-    if [ $num -gt 1 ]; then
-      echo "dss:warn:/etc/apt/sources.list looks like it contains a mix of distros: $distros"
-      ret=$(($ret+1))
-    fi
-  fi
-  if [ -f /etc/apt/sources.list ]; then
-    # ^ *deb *[a-z.:/]+/debian[-a-z]*  matches:
-    # deb http://mirrors.linode.com/xdebian stretch main
-    # deb http://mirrors.linode.com/debian stretch-updates main
-    local otherrepos=$(egrep -iv '^ *#|^ *$|^ *[a-z].*ubuntu.com|^ *[a-z].*debian.org|^ *[a-z].*debian.net|software.virtualmin.co|^ *deb *[a-z.:/]+/debian[-a-z]* ' /etc/apt/sources.list | egrep -v '^[[:space:]]*$' | head -n 1 )
-    if [ ! -z "$otherrepos" ]; then
-      echo "dss:warn:/etc/apt/sources.list looks like it contains an unknown repository.  comment out before proceeding?: '$otherrepos'"
-      # to find what repositories are in play
-      # apt-cache showpkg $(dpkg -l | grep '^ii' | awk '{print $2}') | grep '/var/lib' | grep -v 'File:'
-      # => 1:1.2.8.dfsg-2ubuntu5 (/var/lib/apt/lists/archive.ubuntu.com_ubuntu_dists_yakkety_main_binary-amd64_Packages) (/var/lib/dpkg/status)
-      ret=$(($ret+1))
-    fi
-    local otherrepos=$(egrep -iv '^ *#|^ *$' /etc/apt/sources.list | grep backports | head -n 1)
-    if [ ! -z "$otherrepos" ] && [ -z "$IGNOREBACKPORTS" ] ; then
-      echo "dss:warn:/etc/apt/sources.list looks like it contains a backports repository.  comment out before proceeding?: $otherrepos.  Else export IGNOREBACKPORTS=Y"
-      ret=$(($ret+1))
-    fi
-    if [ -d /etc/apt/sources.list.d/ ]; then
-      local othersources=$(find /etc/apt/sources.list.d/ -type f | grep -v save)
-      for othersource in $othersources; do
-        # e.g. othersource = /etc/apt/sources.list.d/wheezy-backports.list
-        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | grep backport | head -n 1)
-        if [ ! -z "$otherrepos" ] && [ ! -z "$IGNOREBACKPORTS" ] ; then continue; fi
-        # this version is used even for newer debian versions
-        # deb http://download.webmin.com/download/repository sarge contrib
-        # deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin-stretch main
-        # deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin-universal main
-        # note webmin repos name is sarge even on other debian/ubuntu versions
-        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | egrep 'download.webmin.com/download/repository.*sarge|deb http://software.virtualmin.com/vm/6/gpl/apt virtualmin' | head -n 1)
-        [ ! -z "$otherrepos" ] && continue
-        local otherrepos=$(egrep -iv '^ *#|^ *$' "$othersource" | grep -ai deb | head -n 1)
-        if [ ! -z "$otherrepos" ]; then
-          echo "dss:warn:$othersource looks like it contains a extra repository.  disable file before proceeding?: $otherrepos"
-          #echo "dss:warn:packages from extra repositories may include: $(aptitude search '?narrow(?installed, !?origin(Debian))!?obsolete')"
-          ret=$(($ret+1))
-        fi
-      done
-
-    fi
-
+  if [ -f /etc/debian_version ]; then
+    apt_sources_check "$1" || ret=1
   fi
   [ "$ret" -eq 0 ] && echo "dss:trace:upgrade_precondition_checks completed."
   [ "$ret" -ne 0 ] && echo "dss:error:upgrade precondition checks failed." >&2
 
   return $ret
 }
-function convert_deb_6_stable_repo_to_squeeze() {
-if [ ! -f /etc/debian_version ] ; then return 0; fi
-
-if [ ! -f /etc/apt/sources.list  ]; then echo "dss:warn: Odd.  Debian distro but no apt sources.list"; return 1; fi
-
-# cat /etc/debian_version
-# 6.0.4
-if ! grep -qai "^6." /etc/debian_version; then return 0; fi
-
-if ! grep -qai "^ *deb.*stable" /etc/apt/sources.list ; then echo "dss:info: Not using 'stable' repo.  Not converting deb6 stable to squeeze"; return 0; fi
-
-prep_ghost_output_dir
-cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
-
-convertfile stable squeeze "debian.org" "" /etc/apt/sources.list
-convertfile stable squeeze "debian.net" "" /etc/apt/sources.list
-return 0
-}
-
-# e.g. convertline squeeze foobar '' '' 'deb-src http://archive.debian.org/debian-security squeeze /updates main contrib non-free'
-# => deb-src http://archive.debian.org/debian-security foobar /updates main contrib non-free
-function convertline() {
-local fromname=$1
-local toname=$2
-local domlike=$3
-local prefix=$4
-local line=$5
-# ^ *deb[-a-zA-Z]*  => match 'deb ' and 'deb-src '
-#  +$fromname[ /-] => needs space first (else stretch/etch get mixed up), space / and - needed for squeeze, squeeze-updates and squeeze/updates
-echo $line | egrep -qai "^ *deb[-a-zA-Z]* ([a-zA-Z]+)://([-~a-zA-Z0-9./]*)${domlike}([-~a-zA-Z0-9./]*) +${fromname}[ /-]" && echo $line | sed "s@^ *deb\([-a-zA-Z]*\) \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\)\(${domlike}\)\([-~a-zA-Z0-9./]*\) *${fromname}\([ /-]\)@${prefix}deb\1 \2://\3\4\5 ${toname}\6@" && return 0
-return 0
-}
-
-function convertfile() {
-local fromname=$1
-local toname=$2
-local domlike=$3
-# typically '#' to comment out a line
-local prefix=$4
-local file=$5
-# repository like deb ftp://a-b.x.com/~home wheezy blah
-sed -i "s@^ *deb\([-a-zA-Z]*\) \([a-zA-Z]*\)://\([-~a-zA-Z0-9./]*\)\($domlike\)\([-~a-zA-Z0-9./]*\) *$fromname\([ /-]\)@${prefix}deb\1 \2://\3\4\5 $toname\6@" "$file"
-return 0
-}
-
-function islinematch() {
-local namematch=$1
-local domlike=$2
-local line=$4
-echo $line | egrep -qai "^ *deb[-a-zA-Z]* ([a-zA-Z]+)://([-~a-zA-Z0-9./]*)${domlike}([-~a-zA-Z0-9./]*) +${namematch}[ /-]" && return 0
-return 1
-}
-
-function convert_old_ubuntu_repo() {
-[ ! -f /etc/apt/sources.list ] && return 0
-lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
-
-CODENAME=$1
-if [ -z "$CODENAME" ]; then echo "dss:error: We require a codename here.  e.g. convert_old_ubuntu_repo hardy"; return 1; fi
-
-! egrep -qai "^ *deb.*ubuntu/ $CODENAME|^ *deb.*ubuntu $CODENAME" /etc/apt/sources.list && return 0
-grep -qai '^ *deb .*old-releases.ubuntu.com' /etc/apt/sources.list && ! grep -qai "^ *deb.*archive.ub*$CODENAME" /etc/apt/sources.list && if ! grep -qai "^ *deb.*security.ub.*$CODENAME" /etc/apt/sources.list; then echo "dss:info: Already running an 'old-releases' $CODENAME repository."; return 0; fi
-
-prep_ghost_output_dir
-cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
-
-echo "dss:info: Commenting out expired $CODENAME repository"
-sed -i "s@^ *deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@#deb http://us.archive.ubuntu.com/ubuntu/ $CODENAME@" /etc/apt/sources.list
-sed -i "s@^ *deb http://security.ubuntu.com/ubuntu $CODENAME@#deb http://security.ubuntu.com/ubuntu $CODENAME@" /etc/apt/sources.list
-sed -i "s@^ *deb-src http://security.ubuntu.com/ubuntu $CODENAME@#deb-src http://security.ubuntu.com/ubuntu $CODENAME@" /etc/apt/sources.list
-sed -i "s@^ *deb\(.*\)archive\(.*\)$CODENAME@#deb\1archive\2$CODENAME@" /etc/apt/sources.list
-if ! grep -ai old-releases /etc/apt/sources.list | grep -qai "$CODENAME" /etc/apt; then
-echo "dss: Adding in the 'old-releases' repository for $CODENAME"
-echo "
-deb http://old-releases.ubuntu.com/ubuntu/ $CODENAME main restricted universe multiverse
-deb http://old-releases.ubuntu.com/ubuntu/ $CODENAME-updates main restricted universe multiverse
-deb http://old-releases.ubuntu.com/ubuntu/ $CODENAME-security main restricted universe multiverse" >> /etc/apt/sources.list
-fi
-
-return 0
-
-}
 
 function add_missing_ubuntu_keys() {
-  [ ! -e /etc/apt/sources.list ] && return 0
+  [ ! -f /etc/debian_version ] && return 0
   [ ! -x /usr/bin/apt-key ] && return 0
   print_distro_info | grep -qai ubuntu || return 0
   # import the lts key
@@ -605,7 +752,7 @@ function add_missing_ubuntu_keys() {
 
 HAS_INSTALLED_KEYS=
 function add_missing_debian_keys() {
-  [ ! -e /etc/apt/sources.list ] && return 0
+  [ ! -f /etc/debian_version ] && return 0
   [ ! -x /usr/bin/apt-key ] && return 0
   print_distro_info | grep -qai debian || return 0
   # only needs doing once
@@ -636,121 +783,8 @@ function add_missing_debian_keys() {
   return 0
 }
 
-# e.g. test with diff /etc/apt/sources.list <(disable_debian_repos squeeze)
-function disable_debian_repos() {
-  [ ! -f /etc/apt/sources.list ] && return 0
-  local name=$1
-  # disable both squeeze and squeeze lts if squeeze
-  [ "$name" == "squeeze" ] && disable_debian_repos squeeze-lts
-  [ ! -z "$IS_DEBUG" ] && echo "dss:sources:disable_debian_repos:pre:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
-  {
-    local line=
-    cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
-      # leave comment lines
-      local line0=$line
-      echo $line | grep -qai '^ *#' && echo $line && continue
-      local line2=
-      local line2=$(convertline $name $name debian.org "#" "$line")
-      [ -z "$line2" ] && line2=$(convertline $name $name debian.net "#" "$line")
-      if [ -z "$line2" ]; then
-        # echo 'deb http://mirrors.linode.com/debian stretch-updates main' | egrep '^ *deb *http[s]{0,1}://[a-z.:/]+/debian[-a-z]* .*' | sed -re 's#^ *deb *http[s]{0,1}://([a-z.:/]+)/debian[-a-z]* .*#\1#'
-        # => mirrors.linode.com
-        local d2="$(echo $line | egrep '^ *deb *http[s]{0,1}://[a-z.:/]+/debian[-a-z]* .*' | sed -re 's#^ *deb *http[s]{0,1}://([a-z.:/]+)/debian[-a-z]* .*#\1#')"
-        if [ ! -z "$d2" ]; then
-          line2=$(convertline $name $name "$d2" "#" "$line")
-        fi
-      fi
-      [ -z "$line2" ] && echo $line
-      echo $line2
-      # leave non-debian lines.  e.g. keep deb http://packages.prosody.im/debian wheezy main
-      #echo $line | grep -q deb && echo "$line" | grep -qaiv --fixed-strings '.debian.' && echo $line && continue
-      # comment out the old entries
-      #line=$(echo $line | sed "s@^ *deb http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://ftp.\1.debian.org/debian $name\2@")
-      #line=$(echo $line | sed "s@^ *deb http://security.debian.org/ $name\([ /]\)@#deb http://security.debian.org/ $name\1@")
-      #line=$(echo $line | sed "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb-src http://ftp.\1.debian.org/debian $name\2@")
-      # deb http://http.us.debian.org/debian/ wheezy main non-free contrib
-      #line=$(echo $line | sed "s@^ *deb http://http.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://http.\1.debian.org/debian $name\2@")
-      #line=$(echo $line | sed "s@^ *deb http://non-us.debian.org/debian-non-US $name\([ /]\)@#deb http://non-us.debian.org/debian-non-US $name\1@")
-      #line=$(echo $line | sed "s@^ *deb http://security.debian.org[/] $name\([ /]\)@#deb http://security.debian.org $name\1@")
-      # deb-src http://ftp.us.debian.org/debian/ wheezy main
-      # deb-src http://security.debian.org/ wheezy/updates main
-      #line=$(echo $line | sed "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb-src http://ftp.\1.debian.org/debian $name\2@")
-      # deb-src http://security.debian.org/ wheezy/updates main
-      # deb-src http://mirrors.coyx.com/debian/ wheezy-updates main
-      #line=$(echo $line | sed "s@^ *deb http://http.\(\S*\).debian.org/debian[/] $name\([ /]\)@#deb http://http.\1.debian.org/debian $name\2@")
-      #line=$(echo $line | sed "s@^ *deb-src http://\([a-zA-Z0-9./]*\) *$name\([ /]\)@#deb-src http://\1 $name\2@")
-      # disable the archive repositories
-      #line=$(echo $line | sed "s@^ *deb http://archive.\([a-zA-Z0-9./]*\) *$name\([ /]\)@#deb http://archive.\1 $name\2@")
-      #echo $line
-    done
-  } > /etc/apt/sources.list.$$
-  [ ! -z "$IS_DEBUG" ] && cat /etc/apt/sources.list.$$ | awk '{print "dss:trace:sources:createdaptsources:" $0}'
-  if diff /etc/apt/sources.list /etc/apt/sources.list.$$ >/dev/null; then
-    rm /etc/apt/sources.list.$$
-    return 0
-  fi
-  [ ! -z "$IS_DEBUG" ] && echo "dss:sources:disable_debian_repos:post:$name: $(cat /etc/apt/sources.list | egrep -v '^$|^#')"
-  prep_ghost_output_dir
-  cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
-  echo "dss:info: disable_debian_repos $name diff follows:"
-  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff: " $0}'
-  mv /etc/apt/sources.list.$$ /etc/apt/sources.list
-  echo "$name: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:disable_debian_repos:post:" $0}'
-  return 0
-}
-
-# e.g. enable_debian_archive squeeze squeeze-lts
-function enable_debian_archive() {
-  [ ! -f /etc/apt/sources.list ] && return 0
-  [ ! -z "$IS_DEBUG" ] && echo "apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:trace:sources:enable_debian_archive:pre:" $0 }'
-  {
-    > /tmp/enablearchive.$$
-    > /tmp/enabledarchive.$$
-    # variables in here not seen outside scope.  need to store in a temp file.
-    local line=
-    cat /etc/apt/sources.list | while IFS='' read -r line || [[ -n "$line" ]]; do
-      local name=
-      for name in $DEBIAN_ARCHIVE; do
-        # comment line.  skip checking other names.  go onto next line
-        local line0=$line
-        local name0=$name
-        echo $line | egrep -qai '^$|^ *#' && echo $line && line="" && break
-
-        echo $line | grep -qai "^deb http://archive.debian.org/debian ${name}[ /-]" && echo " $name " >> /tmp/enabledarchive.$$ && break
-        # disable srcs
-        echo $line | egrep -qai "^ *deb-src ([a-z]+)://([-~a-zA-Z0-9./]*) * ${name}[ /-]" && echo $line | sed "s@^ *deb-src \([a-zA-Z]*\)://\([a-zA-Z0-9./]*\) *$name@#deb-src \1://\2 $name@" && line="" && break
-        echo $line | egrep -qai "^ *deb ([a-z]+)://([-~a-zA-Z0-9./]*) * ${name}[ /-]" && echo " $name " >> /tmp/enablearchive.$$ && echo "#$line" && line="" && break
-      done
-      [ ! -z "$line" ] && echo $line
-    done
-    # if one or the other is enable, add both
-    enablearchive=$(cat /tmp/enablearchive.$$)
-    enabledarchive=$(cat /tmp/enabledarchive.$$)
-    rm -f /tmp/enablearchive.$$ /tmp/enabledarchive.$$
-    echo $enablearchive | grep -qai " squeeze " && enablearchive="$enablearchive squeeze-lts"
-    uniqueenablearchive=$(for i in $enablearchive; do echo $i; done | sort | uniq)
-    spaceenablearchive=$(for i in $uniqueenablearchive; do echo -n " $i "; done)
-    for name in $spaceenablearchive; do
-      # already there
-      echo "$enabledarchive" | grep -qai "$name" && continue
-      echo "deb http://archive.debian.org/debian $name main contrib non-free"
-    done
-  } > /etc/apt/sources.list.$$
-  if diff /etc/apt/sources.list /etc/apt/sources.list.$$ >/dev/null; then
-    rm /etc/apt/sources.list.$$
-    return 0
-  fi
-  prep_ghost_output_dir
-  cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
-  echo "dss:info: enabling debian archive repos.  diff follows:"
-  print_minimal_config_diff /etc/apt/sources.list /etc/apt/sources.list.$$ | awk '{print "dss:configdiff:sources: " $0}'
-  mv /etc/apt/sources.list.$$ /etc/apt/sources.list
-  [ ! -z "$IS_DEBUG" ] && echo "apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:trace:sources:enable_debian_archive:post:" $0 }'
-  return 0
-}
-
 function print_uninstall_fail2ban() {
-  [ ! -f /etc/apt/sources.list ] && return 0
+  [ ! -f /etc/debian_version ] && return 0
   ! dpkg -l | grep -qai '^i.*fail2ban' && return 0
   echo "dss:info: Changes to the fail2ban configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
   echo "dss:info: Please remove the fail2ban configs.  You may do that with the following commands:"
@@ -758,14 +792,14 @@ function print_uninstall_fail2ban() {
 }
 
 function print_uninstall_dovecot() {
-  [ ! -f /etc/apt/sources.list ] && return 0
+  [ ! -f /etc/debian_version ] && return 0
   ! dpkg -l | grep -qai '^i.*dovecot' && return 0
   # trusty 2.9, precise 2.0, lucid (=10.4) 1.29 per https://launchpad.net/ubuntu/+source/dovecot
   echo "dss:info: Seeing '$( [ -f /var/log/mail.info ] && grep 'dovecot' /var/log/mail.info* | grep -c 'Login:')' logins via imap recently."
   echo "dss:info: Changes to the dovecot configs mean that this script will likely hit problems when doing the dist upgrade.  so aborting before starting." >&2
   echo "dss:info: Saving the current dovecot config to /root/distrorejuveinfo/doveconf.log.$$"
   echo "dss:info: Please remove dovecot.  You may do that with the following commands:"
-  prep_ghost_output_dir
+  prepare_output_dir
   postconf -n > /root/distrorejuveinfo/postconf.log.$$
   doveconf -n > /root/distrorejuveinfo/doveconf.log.$$
   echo apt-get -y remove $(dpkg -l | grep dovecot | egrep -i 'ii|iF|iU' | awk '{print $2}')
@@ -879,7 +913,6 @@ export old_distro=bullseye
 export old_ver="inux 11"
 export new_distro=bookworm
 export new_ver="inux 12"
-retain_etc_networking_naming_re_enX0
 dist_upgrade_x_to_y
 ret=$?
 return $ret
@@ -890,8 +923,6 @@ export old_distro=bookworm
 export old_ver="inux 12"
 export new_distro=trixie
 export new_ver="inux 13"
-retain_etc_networking_naming_re_enX0
-check_usrmerge
 dist_upgrade_x_to_y
 ret=$?
 return $ret
@@ -1699,7 +1730,7 @@ function remove_cruft_packages() {
 }
 
 function print_no_available_versions() {
-  [ ! -f /etc/apt/sources.list ] && return 0
+  [ ! -f /etc/debian_version ] && return 0
   [ ! -x /usr/bin/apt-show-versions ] && echo "dss:error:apt-show-versions is not installed." >&2 && return 1
   local not_available="$(mktemp "not_available.log.XXXXXX")"
   local amd64_available="$(mktemp "available.log.XXXXXX")"
@@ -1967,27 +1998,17 @@ exit 0' > $i
 
 function dist_upgrade_x_to_y() {
 pause_check
-[ ! -e /etc/apt/sources.list ] && return 0
+[ ! -f /etc/debian_version ] && return 0
 echo "dss:trace:dist_upgrade_x_to_y:checking:olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 
-if ! grep -qai "^ *deb.*$old_distro" -- /etc/apt/sources.list; then
-  echo "dss:info: Not finding $old_distro in /etc/apt/sources.list.  Skipping $old_distro to $new_distro"
-  return 0
-fi
-fix_missing_lsb_release
-if ! lsb_release -a 2>/dev/null| egrep -qai "$old_distro|$old_ver" ; then
-  echo "dss:info: Not finding $old_distro or $old_ver in lsb_release output.  Skipping $old_distro to $new_distro"
+local current apt_sources_transition_target=$new_distro
+current=$(distro_output_codename) || return 1
+if [ "$current" != "$old_distro" ]; then
+  echo "dss:info: Installed release is $current; skipping $old_distro to $new_distro."
   return 0
 fi
 
 if is_distro_name_older "$old_distro" "squeeze"; then
-  if dpkg -l | grep -qai '^i.*dovecot'; then
-    print_uninstall_dovecot
-    return 1
-  fi
-fi
-# https://www.debian.org/releases/trixie/release-notes/issues.en.html#things-to-be-aware-of-while-upgrading-to-releasename
-if is_distro_name_older "$old_distro" "trixie"; then
   if dpkg -l | grep -qai '^i.*dovecot'; then
     print_uninstall_dovecot
     return 1
@@ -2005,21 +2026,24 @@ if is_distro_name_older "$old_distro" "stretch"; then
   fi
 fi
 
-if is_distro_name_older "$old_distro" "bookworm"; then
-  local bittedness="$(getconf LONG_BIT)"
-  if [ ! -z "$bittedness" ] && [ 32 -eq $bittedness ]; then
-    echo "dss:warn: You are running a 32 bit distro.  Debian 13/trixie has reduced 32 bit support.  So you may wish to use this script to crossgrade the distro to 64 bits before proceeding.  e.g. $0  --to-debian-release 12; $0 --to-64bit " >&2
-    [ -z "$IGNORE_BITTEDNESS_ERROR" ] && return 1
-  fi
+if [ "$new_distro" = trixie ]; then
+  local arch
+  arch=$(dpkg --print-architecture) || return 1
+  case "$arch" in i386|mipsel|mips64el)
+    echo "dss:error: Debian 13 cannot upgrade native $arch; migrate or crossgrade before proceeding." >&2
+    return 1;;
+  esac
   if dpkg -l | grep -qai '^i.*dovecot'; then
-    echo "dss:warn: Dovecot configs work differently.  See https://doc.dovecot.org/main/installation/upgrade/2.3-to-2.4.html.  export IGNORE_DOVECOT_ERROR=Y to continue." >&2
+    echo "dss:warn: Dovecot 2.4 requires config migration: https://doc.dovecot.org/main/installation/upgrade/2.3-to-2.4.html. Export IGNORE_DOVECOT_ERROR=Y after review." >&2
     [ -z "$IGNORE_DOVECOT_ERROR" ] && return 1
-    return 1
   fi
 fi
 
-
-upgrade_precondition_checks || return $?
+upgrade_precondition_checks "$new_distro" || return 1
+apt_sources_prepare || return 1
+if [ "$new_distro" = trixie ]; then check_usrmerge || return 1; fi
+retain_etc_networking_naming_re_enX0
+fix_missing_lsb_release || return 1
 
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_upgrade:old:$old_distro:new:$new_distro"
 apt_get_upgrade
@@ -2031,25 +2055,8 @@ if [ $ret -ne 0 ]; then
   return 1
 fi
 
-disable_debian_repos $old_distro
-
-if ! grep -qai "^ *deb.* ${new_distro}[ /-]" /etc/apt/sources.list; then
-  echo "deb http://http.us.debian.org/debian/ ${new_distro} main non-free contrib" >> /etc/apt/sources.list
-
-  #Err:3 http://security.debian.org bullseye/updates Release
-  #FIXME wrong for bookworm.  See also https://www.debian.org/releases/stable/errata
-  #404  Not Found [IP: 199.232.10.132 80]
-  if is_distro_name_newer "${new_distro}" "buster"; then
-    echo "deb http://security.debian.org/debian-security ${new_distro}-security main" >> /etc/apt/sources.list
-  else
-    echo "deb http://security.debian.org/ ${new_distro}/updates main" >> /etc/apt/sources.list
-  fi
-  echo "$old_distro:$new_distro: apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:dist_upgrade_x_to_y:" $0}'
-fi
-
-
-# redo to convert the above to archive where appropriate.  And add lts if appropriate.
-enable_debian_archive
+apt_sources_upgrade debian "$old_distro" "$new_distro" || return 1
+apt_get_update || return 1
 
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 apt_get_dist_upgrade
@@ -2139,7 +2146,7 @@ function print_minimal_config_diff() {
   return $ret
 }
 function print_config_state_changes() {
-  prep_ghost_output_dir
+  prepare_output_dir
   local now=$(date +%s)
   record_config_state /root/distrorejuveinfo/postupgrade.dpkg.$now
   # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
@@ -2185,7 +2192,7 @@ function print_config_state_changes() {
 }
 
 function record_config_state() {
-  prep_ghost_output_dir
+  prepare_output_dir
   local file=$1
   if [ -z "$file" ]; then
     file="/root/distrorejuveinfo/preupgrade.dpkg.$$"
@@ -2239,13 +2246,13 @@ return $ret
 
 function apt_get_upgrade() {
 pause_check
-[ ! -e /etc/apt/sources.list ] && return 0
+[ ! -f /etc/debian_version ] && return 0
 [ -e /etc/redhat-release ] && return 0
 upgrade_precondition_checks || return $?
 echo "dss:trace:apt_get_upgrade"
 
-enable_debian_archive
-apt_get_update
+apt_sources_archive || return 1
+apt_get_update || return 1
 record_config_state
 dpkg --configure -a --force-confnew --force-confdef --force-confmiss
 apt-get $APT_GET_INSTALL_OPTIONS autoremove
@@ -2283,7 +2290,7 @@ function plesk_upgrade() {
 
 function apt_get_dist_upgrade() {
 pause_check
-[ ! -e /etc/apt/sources.list ] && return 0
+[ ! -f /etc/debian_version ] && return 0
 upgrade_precondition_checks || return $?
 echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
 apt_get_upgrade || return 1
@@ -2326,146 +2333,67 @@ echo "dss:trace:apt_get_dist_upgrade completed $(print_distro_info).  ret=$ret"
 return $ret
 }
 
-# arg1 is the number of distros to upgrade.  default is all/1000.  else you can do 1 to just go up one distro.  lts to lts counts as 1.
-function dist_upgrade_ubuntu_to_latest() {
-pause_check
-[ ! -e /etc/apt/sources.list ] && return 0
-lsb_release -a 2>/dev/null | grep -qai Ubuntu || return 0
-
-echo "dss:trace:dist_upgrade_ubuntu_to_latest $(print_distro_info)."
-
-if is_distro_name_older "$old_distro" "xenial"; then
-  if dpkg -l | grep -qai '^i.*dovecot'; then
-    print_uninstall_dovecot
-    return 1
-  fi
-fi
-
-if is_distro_name_older "$old_distro" "bionic"; then
-  if dpkg -l | grep -qai '^i.*fail2ban'; then
-    print_uninstall_fail2ban
-    return 1
-  fi
-fi
-
-local NUM_TO_DIST_UPGRADE="${1:-1000}"
-
-upgrade_precondition_checks || return $?
-echo "dss:trace:dist_upgrade_ubuntu_to_latest:pre_apt_get_upgrade:"
-apt_get_upgrade
-local candidates="$ALL_UBUNTU"
-# add a symlink
-retain_etc_networking_naming_re_enX0
-for start in $ALL_UBUNTU; do
-  [ $NUM_TO_DIST_UPGRADE -lt 1 ] && echo "Stopping after $1 distro version updates as requested" && return 0
-  #No LSB modules are available.
-  #Distributor ID: Ubuntu
-  #Description:  Ubuntu 14.04.4 LTS
-  #Release:  14.04
-  #Codename: trusty
-  current=$(lsb_release -a 2>/dev/null| grep -i Codename | awk '{print $2}')
-  # remove distros prior to us
-  candidates="$(echo $candidates | sed "s/$start//")"
-  candidates="$(echo $candidates | sed "s/$current//")"
-  [ "32" == "$(getconf LONG_BIT)" ] && lsb_release -a 2>/dev/null | grep -qai 18.04 && echo "dss:error: You cannot dist-upgrade a 32 bit Ubuntu install past Ubuntu 18.04" >&2 && return 1
-  # keep looping till we find our current distro
-  if [ "$current" != "$start" ]; then continue; fi
-  # all done
-  if [ -z "$candidates" ]; then return 0; fi
-  # if we are currently an lts, then we can move from lts to next lts and skip over the non-lts ones
-  if echo $LTS_UBUNTU | grep -qai $current; then
-    local removed=""
-    for remove in $NON_LTS_UBUNTU; do
-       removed="$remove $removed"
-       candidates="$(echo $candidates | sed "s/$remove//")"
-    done
-    echo "dss:info: current distro ($current) is an Ubuntu LTS.  Skipping non-LTS versions: $removed; Leaving LTS versions of: $candidates"
-  fi
-  # comment out current sources entries
-  prep_ghost_output_dir
-  local next=$(echo $candidates | awk '{print $1}')
-  if [ -z "$next" ]; then
-    echo "dss:info: Current Ubuntu distro is $current.  No newer/better distro.  Finished."
-    return 0
-  fi
-  cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
-  # comment out package entries
-  sed -i "s@^ *deb \(.*\)ubuntu.com\(.*\)@#deb \1ubuntu.com\2@" /etc/apt/sources.list
-  # add in new repo names
-  echo "dss:info: attempting a dist-upgrade from $current to $next."
-  if echo $OLD_RELEASES_UBUNTU | grep -qai $next; then
-    echo "deb http://old-releases.ubuntu.com/ubuntu/ $next main restricted universe multiverse" >> /etc/apt/sources.list
-    echo "deb http://old-releases.ubuntu.com/ubuntu/ $next-updates main restricted universe multiverse" >> /etc/apt/sources.list
-    echo "deb http://old-releases.ubuntu.com/ubuntu/ $next-security main restricted universe multiverse" >> /etc/apt/sources.list
-  else
-    echo "deb http://archive.ubuntu.com/ubuntu/ $next main universe" >> /etc/apt/sources.list
-    echo "deb http://security.ubuntu.com/ubuntu/ $next-security main universe" >> /etc/apt/sources.list
-    echo "deb http://archive.ubuntu.com/ubuntu/ $next-updates main universe" >> /etc/apt/sources.list
-  fi
-  # Old apache version contains 'Include /etc/apache2/httpd.conf'. Can be 'touch'ed to recreate
-  [ -d /etc/apache2 ] && [ ! -f /etc/apache2/httpd.conf ] && touch /etc/apache2/httpd.conf
-  echo "dss:trace:dist_upgrade_ubuntu_to_latest:pre_apt_get_upgrade:next:$next"
-apt_get_dist_upgrade
-ret=$?
-NUM_TO_DIST_UPGRADE=$((NUM_TO_DIST_UPGRADE-1))
-if [ $ret -eq 0 ]; then
-  if lsb_release -a 2>/dev/null| grep -qai $next; then
-    # dist-upgrade returned ok, and lsb_release thinks we are wheezy
-    echo "dss:info: dist-upgrade from $current to $next appears to have worked."
-    continue;
-  fi
-  ret=1
-else
-  echo "dss:warn: dist-upgrade from $current to $next appears to have failed."
-fi
-echo "dss:trace:dist_upgrade_ubuntu_to_latest:completed $(print_distro_info).  ret=$ret"
-return $ret
-done
+# LTS releases move to the next LTS; interim releases move to the next release.
+function ubuntu_output_next_release() {
+  local current=$1 release found=false lts=false
+  case " $LTS_UBUNTU " in *" $current "*) lts=true;; esac
+  for release in $ALL_UBUNTU; do
+    if $found; then
+      if $lts; then case " $LTS_UBUNTU " in *" $release "*) :;; *) continue;; esac; fi
+      printf '%s\n' "$release"
+      return 0
+    fi
+    [ "$release" = "$current" ] && found=true
+  done
+  $found && return 0
+  echo "dss:error: Unknown Ubuntu release: $current" >&2
+  return 1
 }
 
-function convert_old_debian_repo() {
-pause_check
-# no apt sources nothing to do
-[ ! -f /etc/apt/sources.list ] && return 0
-lsb_release -a 2>/dev/null | grep -qai Ubuntu && return 0
-
-echo "dss:trace:convert_old_debian_distro"
-
-#deb http://http.us.debian.org/debian sarge main contrib non-free
-#deb http://non-us.debian.org/debian-non-US sarge/non-US main contrib non-free
-#deb http://security.debian.org sarge/updates main contrib non-free
-# ==>
-#deb http://non-us.debian.org/debian-non-US sarge/non-US main contrib non-free
-#deb http://security.debian.org sarge/updates main contrib non-free
-#deb http://archive.debian.org/debian/ sarge main non-free contrib
-
-local name=
-for name in $DEBIAN_ARCHIVE; do
-# no lenny stuff, nothing to do
-! grep -qai "^ *deb.*debian.* ${name}[ /-]" /etc/apt/sources.list && continue
-
-# already using archives, all good
-if grep -qai "^ *deb http://archive.debian.org/debian/ ${name}[ /-]" /etc/apt/sources.list; then
-  echo "dss:info: This is a $name distro, and already has archive.debian in the repository."
-  continue
-fi
-
-prep_ghost_output_dir
-cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
-
-# comment out the old entries
-convertfile $name $name debian.org "#" /etc/apt/sources.list
-#sed -i "s@^ *deb http://ftp.\(\S*\).debian.org/debian $name@#deb http://ftp.\1.debian.org/debian $name@" /etc/apt/sources.list
-#sed -i "s@^ *deb http://security.debian.org/ $name@#deb http://security.debian.org/ $name@" /etc/apt/sources.list
-#sed -i "s@^ *deb-src http://ftp.\(\S*\).debian.org/debian $name main contrib@#deb-src http://ftp.\1.debian.org/debian $name main contrib@" /etc/apt/sources.list
-#sed -i "s@^ *deb http://http.\(\S*\).debian.org/debian $name@#deb http://http.\1.debian.org/debian $name@" /etc/apt/sources.list
-#sed -i "s@^ *deb http://non-us.debian.org/debian-non-US $name@#deb http://non-us.debian.org/debian-non-US $name@" /etc/apt/sources.list
-#sed -i "s@^ *deb http://security.debian.org $name@#deb http://security.debian.org $name@" /etc/apt/sources.list
-
-echo "deb http://archive.debian.org/debian/ ${name} main non-free contrib" >> /etc/apt/sources.list
-echo "$name apt sources now has $(cat /etc/apt/sources.list | egrep -v '^$|^#')" | awk '{print "dss:sources:convert_old_debian_repo:" $0}'
-done
-return 0
+# First argument limits the number of release transitions; LTS to LTS counts as one.
+function dist_upgrade_ubuntu_to_latest() {
+  pause_check
+  [ -f /etc/debian_version ] || return 0
+  local remaining=${1:-1000} current next arch ret apt_sources_transition_target=
+  current=$(distro_output_codename) || return 1
+  case " $ALL_UBUNTU " in *" $current "*) :;; *) return 0;; esac
+  while [ "$remaining" -gt 0 ]; do
+    current=$(distro_output_codename) || return 1
+    next=$(ubuntu_output_next_release "$current") || return 1
+    [ -n "$next" ] || return 0
+    arch=$(dpkg --print-architecture) || return 1
+    if [ "$arch" = i386 ] && ! is_distro_name_older "$current" bionic; then
+      echo "dss:error: Native i386 Ubuntu cannot upgrade past 18.04." >&2
+      return 1
+    fi
+    if is_distro_name_older "$current" xenial && dpkg -l | grep -qai '^i.*dovecot'; then
+      print_uninstall_dovecot; return 1
+    fi
+    if is_distro_name_older "$current" bionic && dpkg -l | grep -qai '^i.*fail2ban'; then
+      print_uninstall_fail2ban; return 1
+    fi
+    if is_distro_name_older "$current" questing && ! is_distro_name_older "$next" questing && dpkg -l | grep -qai '^i.*dovecot'; then
+      echo "dss:warn: Dovecot 2.4 requires config migration before upgrading to $next. Export IGNORE_DOVECOT_ERROR=Y after review." >&2
+      [ -z "$IGNORE_DOVECOT_ERROR" ] && return 1
+    fi
+    apt_sources_transition_target=$next
+    upgrade_precondition_checks "$next" || return 1
+    apt_sources_prepare || return 1
+    apt_get_upgrade || return 1
+    retain_etc_networking_naming_re_enX0
+    apt_sources_upgrade ubuntu "$current" "$next" || return 1
+    apt_get_update || return 1
+    [ -d /etc/apache2 ] && [ ! -f /etc/apache2/httpd.conf ] && touch /etc/apache2/httpd.conf
+    apt_get_dist_upgrade
+    ret=$?
+    if [ "$ret" -ne 0 ] || [ "$(distro_output_codename)" != "$next" ]; then
+      echo "dss:error: Ubuntu upgrade from $current to $next failed." >&2
+      return 1
+    fi
+    echo "dss:info: Ubuntu upgrade from $current to $next completed."
+    remaining=$((remaining-1))
+  done
+  return 0
 }
 
 function print_distro_info() {
@@ -2493,82 +2421,6 @@ ret=$?
 return $ret
 }
 
-function fix_via_apt_install() {
-is_fixed && return 0
-if ! which dpkg >/dev/null 2>&1; then
-  # echo "dss:info: dpkg not installed.  Skipping apt-get install";
-  return 0;
-fi
-add_missing_debian_keys
-add_missing_ubuntu_keys
-
-if print_distro_info | grep Ubuntu | egrep -qai "$(echo $OLD_RELEASES_UBUNTU | sed 's/ /|/')"; then
-  echo "dss:info: Running an EOL Ubuntu.  Not doing an apt-get install -y libc6.  $(print_distro_info)"
-  return 0
-fi
-
-if dpkg -s libc6 2>/dev/null | grep -q "Status.*installed" ; then
-  echo "dss:info: Attempting to apt-get install libc6"
-  apt_get_update
-  ret=$?
-  if [ $ret -ne 0 ]; then
-    echo "dss:warn: There was an error doing an apt-get update"
-  fi
-  for distro in $DEBIAN_CURRENT; do
-    if grep -qai "^ *deb.* ${distro}[ /-]" /etc/apt/sources.list && ! grep -qai "^ *deb.*security\.deb.* ${distro}[ /-]" /etc/apt/sources.list; then
-      echo "dss:info: adding the $distro security repository to the sources.list"
-      cp /etc/apt/sources.list /root/distrorejuveinfo/sources.list.$(date +%Y%m%d.%s)
-      # https://wiki.debian.org/NewInBullseye
-      # The format of the /etc/apt/sources.list line for the security repository has changed. It should look something like this:
-      # deb http://security.debian.org/debian-security bullseye-security main
-      if is_distro_name_newer "${distro}" "buster"; then
-        echo "deb http://security.debian.org/debian-security ${distro}-security main" >> /etc/apt/sources.list
-      else
-        echo "deb http://security.debian.org/ $distro/updates main" >> /etc/apt/sources.list
-      fi
-      apt_get_update
-    fi
-  done
-  POLICY=$(apt-cache policy libc6)
-  POLICY_INSTALLED=$(echo $POLICY | grep Installed | sed -e   's/.*Installed: \(\S*\).*/\1/')
-  POLICY_CANDIDATE=$(echo $POLICY | grep Candidate | sed -e   's/.*Candidate: \(\S*\).*/\1/')
-  if [ ! -z "$POLICY_INSTALLED" -a "$POLICY_INSTALLED" == "$POLICY_CANDIDATE" ]; then
-    echo "dss:info: apt-cache policy reports the latest libc6 package already installed"
-    return 0
-  fi
-  if [ -d /var/lib/dpkg/updates ] && [ 0 -ne $(find /var/lib/dpkg/updates -type f | wc -l) ]; then
-    echo "dss:info: looks like there were some pending updates.  checking if they need configuring before proceeding with the libc6 install"
-    dpkg --configure -a --force-confnew --force-confdef --force-confmiss
-  fi
-  apt_get_install libc6
-  ret=$?
-  if [ $ret -eq 0 ]; then
-  	echo "dss:fixmethod: apt-get install"
-  	# if wrong version is installed you can force the version with something like this on squeeze:
-  	# apt-get install libc6=2.11.3-4+deb6u4 libc6-i686=2.11.3-4+deb6u4 libc-bin=2.11.3-4+deb6u4
-  	return 0
-  fi
-  echo "dss:error: Failed doing apt-get -y install libc6"
-  prep_ghost_output_dir
-  # download isnt an option on some older apts
-  apt-get download libc6 2>/dev/null
-  ret=$?
-  local file=$(find . -name '*.deb' | grep libc6 | head -n 1)
-  if [ $ret -ne 0 ] || [ -z "$file" ]; then
-  	echo "dss:error: Failed downloading the libc6 package with apt-get download libc6"
-  	return 1
-  fi
-  dpkg -i $file
-  ret=$?
-  if [ $ret -eq 0 ]; then
-  	echo "dss:fixmethod: apt-get download libc6 and dpkg -i"
-  	return 0
-  fi
-  return $ret
-fi
-echo "dss:warn: libc6 not installed.  Not running apt-get install libc6"
-return 0
-}
 
 function yum_upgrade() {
   pause_check
@@ -2619,7 +2471,7 @@ rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/python-urlgrabber-2.9.8
 rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/yum-metadata-parser-1.0-8.el4.centos.i386.rpm
 rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/centos-release-4-8.i386.rpm
 rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/yum-2.4.3-4.el4.centos.noarch.rpm
-prep_ghost_output_dir
+prepare_output_dir
 if [ ! -e /root/distrorejuveinfo/CentOS-Base.repo ]; then
   echo "dss:info: Running cp /etc/yum.repos.d/CentOS-Base.repo /root/distrorejuveinfo/CentOS-Base.repo"
   cp /etc/yum.repos.d/CentOS-Base.repo /root/distrorejuveinfo/CentOS-Base.repo
@@ -2633,22 +2485,15 @@ return 0
 }
 
 function report_unsupported() {
-  is_fixed && return 0
-
-  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep Ubuntu | egrep -qai "$(wordlisttoegreparg $OLD_RELEASES_UBUNTU)"; then
-    echo "dss:warn: Running an end-of-life Ubuntu distro ($(print_distro_info)).  No new package updates available.  dist upgrade to the latest lts"
-    return 1
-  fi
-  # DEBIAN 7.4
-  # Debian GNU/Linux 7.9 (n/a) Release: 7.9 Codename: n/a
-  # Distributor ID: Debian Description: Debian GNU/Linux 7.2 (wheezy) Release: 7.2 Codename: wheezy
-
-  [ -f /etc/apt/sources.list ] && [ -f /etc/debian_version ] && if print_distro_info | grep -i 'Debian GNU' | egrep -qai "$(wordlisttoegreparg $UNSUPPORTED_DEBIAN)"; then
-    # due to etch being unsupported and stretch beinc current
-    if ! print_distro_info | grep -i 'Debian GNU' | egrep -qai "$(wordlisttoegreparg $DEBIAN_CURRENT)"; then
-      echo "dss:warn: Running an end-of-life Debian distro ($(print_distro_info)).  No new package updates available.  dist upgrade to the latest lts"
-    fi
-    return 1
+  local current
+  if [ -f /etc/debian_version ]; then
+    current=$(distro_output_codename) || return 1
+    case " $DEBIAN_CURRENT " in *" $current "*) return 0;; esac
+    case " $UNSUPPORTED_DEBIAN $UNSUPPORTED_UBUNTU " in *" $current "*)
+      echo "dss:warn: $current is outside Debian/Ubuntu community support. Review extended-support coverage or upgrade." >&2
+      return 1;;
+    esac
+    return 0
   fi
 
 if [ ! -f /etc/redhat-release ]; then return 0; fi
@@ -2720,74 +2565,13 @@ fi
 return 0
 }
 
-function fix_via_yum_install() {
-  is_fixed && return 0
-  improve_yum_setup || return 1
-  if ! print_distro_info | egrep -i 'redhat|centos' | egrep -qai 'release.* 5|release.* 6|release.* 7' ; then return 0; fi
-  echo "dss:info: Doing a centos5-7 fix for $(print_distro_info)"
-  yum install -y glibc
-  ret=$?
-  if [ $ret -ne 0 ]; then
-    echo "dss:warn:Error running yum install -y glibc"
-  fi
-  echo "dss:fixmethod: yum install glibc"
-  return $ret
-}
-
-
-function fix_vuln() {
-print_vulnerability_status beforefix
-print_libc_versions beforefix || return $?
-print_info
-
-if is_fixed ; then
-  echo "dss:info: The server appears to not be vulnerable.  Not doing anything."
-  return 0
-fi
-
-upgrade_precondition_checks || return $?
-
-# improve apt sources
-convert_deb_6_stable_repo_to_squeeze  || return $?
-convert_old_debian_repo || return $?
-
-# https://wiki.ubuntu.com/Releases
-# lucid server still current?
-for distro in $OLD_RELEASES_UBUNTU; do
-  convert_old_ubuntu_repo $distro || return $?
-done
-enable_debian_archive || return $?
-
-fix_missing_lsb_release
-
-
-fix_via_apt_install #|| return $?
-
-yum_enable_rhel4 || return $?
-
-fix_via_yum_install || return $?
-
-report_unsupported || return $?
-return 0
-}
-
 function packages_upgrade() {
 upgrade_precondition_checks || return $?
 
-# improve apt sources
-convert_deb_6_stable_repo_to_squeeze  || return $?
-convert_old_debian_repo || return $?
-
-# https://wiki.ubuntu.com/Releases
-# lucid server still current?
-for distro in $OLD_RELEASES_UBUNTU; do
-  convert_old_ubuntu_repo $distro || return $?
-done
-enable_debian_archive || return $?
+apt_sources_prepare || return 1
 
 fix_missing_lsb_release
 
-fix_via_apt_install #|| return $?
 
 yum_enable_rhel4 || return $?
 
@@ -2809,9 +2593,7 @@ function dist_upgrade_to_latest() {
   pause_check
   echo "dss:trace:dist_upgrade_to_latest"
 
-  if ! packages_upgrade; then echo "dss:error:dist_upgrade_to_latest:packages_upgrade:failed" && return 1; fi
-  if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
-  if [ -e /etc/apt/sources.list ] && lsb_release -a 2>/dev/null | grep -qai debian; then
+  if [ -f /etc/debian_version ] && lsb_release -a 2>/dev/null | grep -qai debian; then
     if ! dist_upgrade_lenny_to_squeeze; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_lenny_to_squeeze:failed" && return 1; fi
     if ! dist_upgrade_squeeze_to_wheezy; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_squeeze_to_wheezy:failed" && return 1; fi
     if ! dist_upgrade_wheezy_to_jessie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_wheezy_to_jessie:failed" && return 1; fi
@@ -2821,12 +2603,12 @@ function dist_upgrade_to_latest() {
     if ! dist_upgrade_bullseye_to_bookworm; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bullseye_to_bookworm:failed" && return 1; fi
     if ! dist_upgrade_bookworm_to_trixie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bookworm_to_trixie:failed" && return 1; fi
 
-    if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   fi
-  if [ -e /etc/apt/sources.list ] && lsb_release -a 2>/dev/null | grep -qai ubuntu; then
+  if [ -f /etc/debian_version ] && lsb_release -a 2>/dev/null | grep -qai ubuntu; then
     if ! dist_upgrade_ubuntu_to_latest; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_ubuntu_to_latest:failed" && return 1; fi
-    if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   fi
+  if ! packages_upgrade; then echo "dss:error:dist_upgrade_to_latest:packages_upgrade:failed" && return 1; fi
+  if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   if ! plesk_upgrade; then echo "dss:error:dist_upgrade_to_latest:plesk_upgrade:failed" && return 1; fi
 }
 
@@ -2843,11 +2625,10 @@ EOJ
 
 ret=0
 echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
-if [ "--usage" = "${ACTION:-$1}" ] ; then
+if [ "--usage" = "${ACTION:-$1}" ] || [ "--help" = "${ACTION:-$1}" ]; then
   print_usage
 elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
-  print_vulnerability_status beforefix
   print_info
   upgrade_precondition_checks
   report_unsupported
@@ -2856,20 +2637,15 @@ elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
 elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
-  dist_upgrade_lenny_to_squeeze
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_squeeze_to_wheezy
-  [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_lenny_to_squeeze || exit 1
+  dist_upgrade_squeeze_to_wheezy || exit 1
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
-  dist_upgrade_lenny_to_squeeze
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_squeeze_to_wheezy
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_wheezy_to_jessie
-  [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_lenny_to_squeeze || exit 1
+  dist_upgrade_squeeze_to_wheezy || exit 1
+  dist_upgrade_wheezy_to_jessie || exit 1
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   version="$2"
@@ -2880,18 +2656,18 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
       true
       ;;
       *)
-      echo "dss:error: Expecting a --to-debian-release versoin of 6 to 13" && exit 1
+      echo "dss:error: Expecting a --to-debian-release version of 6 to 13" && exit 1
       ;;
   esac
   print_info
-  if [ $version -gt 5 ]; then dist_upgrade_lenny_to_squeeze; [ $? -ne 0 ] && ret=$(($ret+1)); fi
-  if [ $version -gt 6 ]; then dist_upgrade_squeeze_to_wheezy; [ $? -ne 0 ] && ret=$(($ret+1)); fi
-  if [ $version -gt 7 ]; then dist_upgrade_wheezy_to_jessie; [ $? -ne 0 ] && ret=$(($ret+1)); fi
-  if [ $version -gt 8 ]; then dist_upgrade_jessie_to_stretch; [ $? -ne 0 ] && ret=$(($ret+1)); fi
-  if [ $version -gt 9 ]; then dist_upgrade_stretch_to_buster; [ $? -ne 0 ] && ret=$(($ret+1)); fi
-  if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye; [ $? -ne 0 ] && ret=$(($ret+1)); fi
-  if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_bookworm; [ $? -ne 0 ] && ret=$(($ret+1)); fi
-  if [ $version -gt 12 ]; then dist_upgrade_bookworm_to_trixie; [ $? -ne 0 ] && ret=$(($ret+1)); fi
+  if [ $version -gt 5 ]; then dist_upgrade_lenny_to_squeeze || exit 1; fi
+  if [ $version -gt 6 ]; then dist_upgrade_squeeze_to_wheezy || exit 1; fi
+  if [ $version -gt 7 ]; then dist_upgrade_wheezy_to_jessie || exit 1; fi
+  if [ $version -gt 8 ]; then dist_upgrade_jessie_to_stretch || exit 1; fi
+  if [ $version -gt 9 ]; then dist_upgrade_stretch_to_buster || exit 1; fi
+  if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye || exit 1; fi
+  if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_bookworm || exit 1; fi
+  if [ $version -gt 12 ]; then dist_upgrade_bookworm_to_trixie || exit 1; fi
 
 
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
@@ -2899,22 +2675,14 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
 elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
-  dist_upgrade_lenny_to_squeeze
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_squeeze_to_wheezy
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_wheezy_to_jessie
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_jessie_to_stretch
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_stretch_to_buster
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_buster_to_bullseye
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_bullseye_to_bookworm
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  dist_upgrade_bookworm_to_trixie
-  [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_lenny_to_squeeze || exit 1
+  dist_upgrade_squeeze_to_wheezy || exit 1
+  dist_upgrade_wheezy_to_jessie || exit 1
+  dist_upgrade_jessie_to_stretch || exit 1
+  dist_upgrade_stretch_to_buster || exit 1
+  dist_upgrade_buster_to_bullseye || exit 1
+  dist_upgrade_bullseye_to_bookworm || exit 1
+  dist_upgrade_bookworm_to_trixie || exit 1
 
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes"
@@ -2935,8 +2703,7 @@ elif [ "--to-next-ubuntu" = "${ACTION:-$1}" ] ; then
 elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
-  dist_upgrade_lenny_to_squeeze
-  [ $? -ne 0 ] && ret=$(($ret+1))
+  dist_upgrade_lenny_to_squeeze || exit 1
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-squeeze completed ok.  use $0 --show-changes to see changes"
 elif [ "--source" = "${ACTION:-$1}" ] ; then
@@ -2959,31 +2726,12 @@ elif [ "--dist-upgrade" = "${ACTION:-$1}" ] ; then
 elif [ "--dist-update" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
-  yum_upgrade
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  packages_upgrade
-  [ $? -ne 0 ] && ret=$(($ret+1))
+  yum_upgrade || exit 1
+  packages_upgrade || exit 1
   apt_get_dist_upgrade
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --dist-update completed ok.  use $0 --show-changes to see changes"
-elif [ "--break-eggs" = "${ACTION:-$1}" ] ; then
-  [ ! -z "$2" ] && print_usage && exit 1
-  fix_vuln
-  if ! is_fixed; then
-    dist_upgrade_to_latest
-  fi
-  print_libc_versions afterfix
-  print_config_state_changes
-  print_vulnerability_status afterfix
-  if [ $ret -eq 0 ] ; then true ; else false; fi
-elif [ "--fix-vuln" = "${ACTION:-$1}" ] ; then
-  [ ! -z "$2" ] && print_usage && exit 1
-  fix_vuln
-  ret=$?
-  print_libc_versions afterfix
-  print_vulnerability_status afterfix
-  if [ $ret -eq 0 ] ; then true ; else false; fi
 elif [ "--show-cruft" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install)." && exit 0
@@ -3032,7 +2780,5 @@ elif [ "--resume" = "${ACTION:-$1}" ] ; then
   exit 0
 else
   print_usage
+  exit 1
 fi
-
-
-

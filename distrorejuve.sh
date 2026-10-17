@@ -1104,7 +1104,11 @@ function upgrade_compatibility_rule_applies() {
       upgrade_compatibility_config_matches '(^|[[:space:]])(systemd\.unified_cgroup_hierarchy=(0|false|no)|systemd\.legacy_systemd_cgroup_controller(=1|=yes|=true)?)([[:space:]]|$)' /proc/cmdline;;
     ssh-rsa-list)
       upgrade_compatibility_config_matches '^[[:space:]]*(pubkeyacceptedkeytypes|hostbasedacceptedkeytypes)[[:space:]]' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf;;
-    sysctl-conf) upgrade_compatibility_config_matches '^[[:space:]]*[^[:space:]#;]+[[:space:]]*=' /etc/sysctl.conf;;
+    sysctl-conf)
+      for file in /etc/sysctl.d/*.conf; do
+        if [ -f "$file" ] && [ -r "$file" ] && [ "$file" -ef /etc/sysctl.conf ]; then return 1; fi
+      done
+      upgrade_compatibility_config_matches '^[[:space:]]*[^[:space:]#;]+[[:space:]]*=' /etc/sysctl.conf;;
     upstart-jobs)
       upgrade_compatibility_config_matches '^[[:space:]]*(exec|script|start on)[[:space:]]' /etc/init/*.conf;;
     *) echo "dss:error: Unknown compatibility rule: $rule" >&2; return 2;;
@@ -2885,7 +2889,8 @@ function check_usrmerge() {
     grep -Fxq -- "/usr/lib/usrmerge/convert-usrmerge" <<< "$files" || return 1
     "/usr/lib/usrmerge/convert-usrmerge" || return $?
     usrmerge_is_complete || { echo 'dss:error: usrmerge converter returned without canonical /bin, /sbin and /lib links; inspect manually before package work.' >&2; return 1; }
-    dpkg --configure usrmerge || return $?
+    # Configuring an already configured package fails, even after a successful filesystem repair.
+    case "$info" in *' ok unpacked'|*' ok half-configured') dpkg --configure usrmerge || return $?;; esac
   else
     case "$info" in *' ok installed'|*' ok unpacked'|*' ok half-configured') echo 'dss:error: Installed/partial usrmerge has no executable packaged converter; restore the package manually before further package work.' >&2; return 1;; esac
     # Restored systems may have no indexes, or source preparation may have changed mirrors.
@@ -4786,12 +4791,12 @@ function upgrade_obsolete_prepare() {
 )
 }
 
-# Reject all package installation/configuration and every unapproved removal.
+# Reject package installation/configuration; status 3 identifies unapproved removals for the bounded fallback.
 function upgrade_obsolete_output_removals() {
   local plan=$1 allowed=$2 native=$3
   awk -F '\t' -v native="$native" '
     FILENAME == ARGV[1] { allowed[$1 ":" $2]=1; next }
-    /^(Inst|Conf|Purg) / { bad=1 }
+    /^(Inst|Conf|Purg) / { unsafe=1 }
     /^Remv / {
       split($0, field, /[ \t]+/); name=field[2]
       if (name !~ /:/) {
@@ -4801,7 +4806,7 @@ function upgrade_obsolete_output_removals() {
       if (!(name in allowed)) bad=1
       if (!seen[name]++) print name
     }
-    END { exit bad }
+    END { exit unsafe ? 4 : (bad ? 3 : 0) }
   ' "$allowed" "$plan"
 }
 
@@ -4829,7 +4834,7 @@ function upgrade_remove_obsolete_packages() {
   umask 077
   set -o pipefail
   local family=$1 from=$2 to=$3 baseline directory native attempt package files file audit removals query_package signature current_signature
-  local documentation_only logcheck dpkg_help qualified_packages=false gcc_base_pattern='^gcc-[0-9]+([.][0-9]+)?-base$' mariadb_transition_pattern='^mariadb-server-[0-9]+([.][0-9]+)+$'
+  local automatic_remove plan rejection status documentation_only logcheck dpkg_help qualified_packages=false gcc_base_pattern='^gcc-[0-9]+([.][0-9]+)?-base$' mariadb_transition_pattern='^mariadb-server-[0-9]+([.][0-9]+)+$'
   local -a options=()
   local -a obsolete=()
   local -a selected=()
@@ -4882,43 +4887,66 @@ function upgrade_remove_obsolete_packages() {
   read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
   umask "$package_umask"
   pause_check || return 1
-  LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
-    -o APT::Get::AutomaticRemove=true --simulate remove "${obsolete[@]}" > "$attempt/plan" 2>&1 || return 1
-  removals=$(upgrade_obsolete_output_removals "$attempt/plan" "$attempt/eligible" "$native") || {
-    echo "dss:error: Obsolete/autoremove plan includes protected or unknown packages or non-removal work. Review $attempt/plan; no cleanup attempted." >&2; return 1;
-  }
-  [ -n "$removals" ] || return 0
-  while IFS= read -r package; do
-    documentation_only=false
-    case "${package%:*}" in
-      linux-*|grub*|lilo|init*|systemd*|udev*|network*|ifupdown*|netplan.io|resolvconf|dhcpcd*|isc-dhcp-client|iproute*|iptables*|nftables*|apt*|dpkg*|sudo|passwd|login|util-linux|openssh*|apache2*|libapache2-mod-*|nginx*|php*|mysql*|mariadb*|postgresql*|dovecot*|postfix*|exim*|sendmail*|fail2ban*|bind9*|rabbitmq*|slapd*|mailman*|redis*|caddy*|cron*|rsyslog*)
-        if [[ "${package%:*}" =~ $mariadb_transition_pattern ]] && awk -F '\t' -v arch="${package##*:}" -v native="$native" '
-          $1 == "install ok installed" && $2 == "mariadb-server" && $3 == (arch == "all" ? native : arch) { found=1 }
-          END { exit !found }
-        ' "$attempt/packages"; then documentation_only=true
-        else
-          echo "dss:error: Obsolete/autoremove plan includes service or system package $package; migrate it manually. Review $attempt/plan; no cleanup attempted." >&2; return 1
-        fi;;
-    esac
-    query_package=$package
-    if ! $qualified_packages; then
-      case "${package##*:}" in "$native"|all) query_package=${package%:*};; *) return 1;; esac
+  # Automatic removals are optional; retry only the same proven obsolete candidates if they are unsafe.
+  for automatic_remove in true false; do
+    plan="$attempt/plan.auto"
+    if ! $automatic_remove; then plan="$attempt/plan.explicit"; fi
+    selected=()
+    rejection=
+    LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
+      -o APT::Get::AutomaticRemove="$automatic_remove" --simulate remove "${obsolete[@]}" > "$plan" 2>&1 || return 1
+    if removals=$(upgrade_obsolete_output_removals "$plan" "$attempt/eligible" "$native"); then :
+    else
+      status=$?
+      if [ "$status" -ne 3 ]; then
+        echo "dss:error: Cannot validate removal-only cleanup plan. Review $plan; no cleanup attempted." >&2; return 1
+      fi
+      rejection='protected or unknown packages'
     fi
-    files=$(dpkg-query -L "$query_package") || return 1
-    if $documentation_only || [[ "${package%:*}" =~ $gcc_base_pattern ]]; then
-      logcheck=
-      if $documentation_only; then logcheck=${package%:*}; logcheck=${logcheck//./_}; fi
-      upgrade_obsolete_payload_is_documentation "$package" "$files" "$logcheck" || {
-        echo "dss:error: Package $package does not have a verified base/transitional payload; preserve it and migrate manually. Review $attempt/plan; no cleanup attempted." >&2; return 1;
-      }
+    if [ -z "$rejection" ]; then
+      [ -n "$removals" ] || return 0
+      while IFS= read -r package; do
+        documentation_only=false
+        case "${package%:*}" in
+          linux-*|grub*|lilo|init*|systemd*|udev*|network*|ifupdown*|netplan.io|resolvconf|dhcpcd*|isc-dhcp-client|iproute*|iptables*|nftables*|apt*|dpkg*|sudo|passwd|login|util-linux|openssh*|apache2*|libapache2-mod-*|nginx*|php*|mysql*|mariadb*|postgresql*|dovecot*|postfix*|exim*|sendmail*|fail2ban*|bind9*|rabbitmq*|slapd*|mailman*|redis*|caddy*|cron*|rsyslog*)
+            if [[ "${package%:*}" =~ $mariadb_transition_pattern ]]; then
+              if awk -F '\t' -v arch="${package##*:}" -v native="$native" '
+                $1 == "install ok installed" && $2 == "mariadb-server" && $3 == (arch == "all" ? native : arch) { found=1 }
+                END { exit !found }
+              ' "$attempt/packages"; then documentation_only=true
+              else status=$?; [ "$status" -eq 1 ] || return 1
+              fi
+            fi
+            if ! $documentation_only; then rejection="service or system package $package"; break; fi;;
+        esac
+        query_package=$package
+        if ! $qualified_packages; then
+          case "${package##*:}" in "$native"|all) query_package=${package%:*};; *) return 1;; esac
+        fi
+        files=$(dpkg-query -L "$query_package") || return 1
+        if $documentation_only || [[ "${package%:*}" =~ $gcc_base_pattern ]]; then
+          logcheck=
+          if $documentation_only; then logcheck=${package%:*}; logcheck=${logcheck//./_}; fi
+          if ! upgrade_obsolete_payload_is_documentation "$package" "$files" "$logcheck"; then
+            rejection="unverified base/transitional payload for $package"; break
+          fi
+        fi
+        while IFS= read -r file; do
+          case "$file" in /etc/init.d/?*|/etc/init/?*|/etc/cron*|/etc/systemd/system/?*|/etc/systemd/user/?*|/lib/systemd/system/?*|/lib/systemd/user/?*|/usr/lib/systemd/system/?*|/usr/lib/systemd/user/?*|/etc/network/?*|/etc/netplan/?*|/etc/NetworkManager/?*|/etc/kernel/?*|/boot/?*|/var/lib/?*|/var/spool/?*|/srv/?*|/home/?*|/var/www/?*)
+            rejection="service/data path $file owned by $package"; break;;
+          esac
+        done <<< "$files"
+        [ -z "$rejection" ] || break
+        selected+=("$query_package")
+      done <<< "$removals"
     fi
-    while IFS= read -r file; do
-      case "$file" in /etc/init.d/?*|/etc/init/?*|/etc/cron*|/etc/systemd/system/?*|/etc/systemd/user/?*|/lib/systemd/system/?*|/lib/systemd/user/?*|/usr/lib/systemd/system/?*|/usr/lib/systemd/user/?*|/etc/network/?*|/etc/netplan/?*|/etc/NetworkManager/?*|/etc/kernel/?*|/boot/?*|/var/lib/?*|/var/spool/?*|/srv/?*|/home/?*|/var/www/?*)
-        echo "dss:error: Package $package owns service/data path $file; preserve it and migrate manually. Review $attempt/plan; no cleanup attempted." >&2; return 1;;
-      esac
-    done <<< "$files"
-    selected+=("$query_package")
-  done <<< "$removals"
+    [ -n "$rejection" ] || break
+    if $automatic_remove; then
+      echo "dss:warn: Autoremove plan includes $rejection; preserving automatic candidates and retrying only proven obsolete packages. Review $plan." >&2
+    else
+      echo "dss:error: Explicit obsolete cleanup still includes $rejection; migrate manually. Review $plan; no cleanup attempted." >&2; return 1
+    fi
+  done
   # Recheck exact explicit removals with autoremove disabled before allowing package changes.
   LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
     -o APT::Get::AutomaticRemove=false --simulate remove "${selected[@]}" > "$attempt/final.plan" 2>&1 || return 1

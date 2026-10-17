@@ -1719,7 +1719,7 @@ function upgrade_migrate_php_packages() {
 function upgrade_php_runtime_service_is_active() {
   local name=$1 state status
   local -a bounded=()
-  case "$name" in apache2|nginx|php5-fpm) :;; php[0-9]*.[0-9]*-fpm) :;; *) return 2;; esac
+  case "$name" in apache2|nginx|php5-fpm|dovecot|exim4|mysql|mariadb|ssh|fail2ban|bind9|redis-server|slapd|rabbitmq-server) :;; php[0-9]*.[0-9]*-fpm) :;; *) return 2;; esac
   command -v timeout >/dev/null && bounded=(timeout 20)
   if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
     case "$(readlink /proc/1/exe)" in
@@ -2004,6 +2004,315 @@ function upgrade_php_runtime_verify() {
     1) echo 'dss:error: Web runtime verification failed after package changes; see the detailed run log and repair the reported service/upstream before continuing.' >&2; return 1;;
     *) echo 'dss:warn: Web runtime verification is incomplete; review the detailed run log and verify custom service/configuration paths manually.' >&2; return 0;;
   esac
+}
+
+# shellcheck shell=bash
+# Common service checks complement the PHP/web runtime check. All probes are read-only.
+# Rows: family, status selector, owning package. Service aliases can change between releases.
+function upgrade_services_output_roles() {
+  local packages roles
+  packages=$(dpkg-query -W -f='${Package}\t${Status}\n') || return 1
+  roles=$(awk -F '\t' '
+    $2 ~ /^(install|hold) ok installed$/ {
+      name=$1; sub(/:.*/, "", name)
+      if (name == "postfix") owner["postfix"]=name
+      if (name ~ /^dovecot-(core|common|imapd|pop3d)$/ || name == "dovecot") owner["dovecot"]=name
+      if (name ~ /^exim4-daemon-/) owner["exim4"]=name
+      if (name ~ /^mariadb-server($|-[0-9])/) { owner["database"]=name; maria=1 }
+      if (name ~ /^mysql-server($|-[0-9])/ && !maria) owner["database"]=name
+      if (name ~ /^postgresql-[0-9]+([.][0-9]+)*$/) owner["postgresql"]=name
+      if (name == "openssh-server") owner["ssh"]=name
+      if (name ~ /^(fail2ban|bind9|redis-server|slapd|rabbitmq-server)$/) owner[name]=name
+    }
+    END { for (role in owner) print role "\t" (role == "database" ? (maria ? "mariadb" : "mysql") : role) "\t" owner[role] }
+  ' <<< "$packages") || return 1
+  [ -z "$roles" ] || printf '%s\n' "$roles" | LC_ALL=C sort -u
+}
+
+# 0 running, 1 stopped/failed, 2 unknown. Postfix's active(exited) umbrella is not a daemon.
+function upgrade_services_is_active() {
+  local family=$1 selector=$2 state status properties version cluster
+  local -a bounded=()
+  command -v timeout >/dev/null 2>&1 && bounded=(timeout 20)
+  case "$family" in
+    postfix)
+      if [ "$selector" = postfix ]; then
+        command -v postfix >/dev/null 2>&1 || return 2
+        state=$(LC_ALL=C "${bounded[@]}" postfix status 2>&1)
+      else
+        command -v postmulti >/dev/null 2>&1 || return 2
+        state=$(LC_ALL=C "${bounded[@]}" postmulti -i "$selector" -p status 2>&1)
+      fi
+      status=$?
+      case "$status" in
+        0) return 0;;
+        1) case "$state" in *'mail system is not running'*) return 1;; *) return 2;; esac;;
+        *) return 2;;
+      esac;;
+    postgresql)
+      command -v pg_lsclusters >/dev/null 2>&1 || return 2
+      version=${selector%%/*}; cluster=${selector#*/}
+      [ "$version" != "$selector" ] || return 2
+      state=$(LC_ALL=C "${bounded[@]}" pg_lsclusters) || return 2
+      state=$(awk -v version="$version" -v cluster="$cluster" '$1 == version && $2 == cluster { if (found++) exit 2; state=$4 } END { if (found == 1) print state; else exit 2 }' <<< "$state") || return 2
+      case "$state" in online|online,*) return 0;; down|down,*) return 1;; *) return 2;; esac;;
+  esac
+  upgrade_php_runtime_service_is_active "$selector" || return $?
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    case "$(readlink /proc/1/exe)" in */systemd|*/'systemd (deleted)')
+      properties=$(LC_ALL=C "${bounded[@]}" systemctl show -p SubState -p MainPID "$selector.service" 2>/dev/null) || return 2
+      state=$(awk -F= '$1 == "SubState" { state=$2 } $1 == "MainPID" { pid=$2 } END { if (state == "" || pid !~ /^[0-9]+$/) exit 2; print state ":" pid }' <<< "$properties") || return 2
+      case "$state" in running:*) [ "${state#*:}" -gt 0 ] && return 0; return 1;; exited:*|dead:*|failed:*) return 1;; *) return 2;; esac;;
+    esac
+  fi
+  return 0
+}
+
+# The caller creates the root-private sibling of its original preupgrade baseline.
+function upgrade_services_snapshot() {
+(
+  umask 077
+  local directory=$1 roles family selector package instances row state status
+  local -a bounded=()
+  if [ ! -d "$directory" ] || [ -L "$directory" ] || [ "$(stat -c '%u:%a' "$directory")" != 0:700 ]; then return 1; fi
+  if [ -e "$directory/services.before" ] || [ -L "$directory/services.before" ]; then
+    if [ ! -f "$directory/services.before" ] || [ -L "$directory/services.before" ] ||
+        [ "$(stat -c '%u' "$directory/services.before")" != 0 ]; then return 1; fi
+    chmod 600 -- "$directory/services.before" || return 1
+    [ -r "$directory/services.before" ]
+    return $?
+  fi
+  roles=$(upgrade_services_output_roles) || return 1
+  command -v timeout >/dev/null 2>&1 && bounded=(timeout 20)
+  [ ! -L "$directory/services.before.new" ] || return 1
+  : > "$directory/services.before.new" && chmod 600 -- "$directory/services.before.new" || return 1
+  while IFS=$'\t' read -r family selector package; do
+    [ -n "$family" ] || continue
+    instances=$selector
+    if [ "$family" = postfix ] && command -v postmulti >/dev/null 2>&1; then
+      if row=$(LC_ALL=C "${bounded[@]}" postmulti -l) &&
+          instances=$(awk 'NF { if (NF != 4 || $3 !~ /^(y|n)$/ || $4 !~ /^\//) exit 2; print $4; count++ } END { if (!count) exit 2 }' <<< "$row"); then :
+      else instances=''; fi
+    elif [ "$family" = postgresql ]; then
+      if command -v pg_lsclusters >/dev/null 2>&1 && row=$(LC_ALL=C "${bounded[@]}" pg_lsclusters); then
+        instances=$(awk '$1 ~ /^[0-9]+([.][0-9]+)*$/ { if (NF < 4 || $2 ~ /[\/]/) exit 2; print $1 "/" $2; count++ } END { if (!count) exit 2 }' <<< "$row") || instances=''
+      else instances=''; fi
+    fi
+    if [ -z "$instances" ]; then
+      echo "dss:warn: Cannot establish pre-upgrade $family instance activity; verification will be incomplete." >&2
+      printf '%s\t%s\t%s\tunknown\n' "$family" "$selector" "$package" >> "$directory/services.before.new" || return 1
+      continue
+    fi
+    while IFS= read -r selector; do
+      if upgrade_services_is_active "$family" "$selector"; then state=active
+      else status=$?; state=unknown; [ "$status" -ne 1 ] || state=inactive; fi
+      [ "$state" != unknown ] || echo "dss:warn: Cannot establish pre-upgrade $family activity; verification will be incomplete." >&2
+      printf '%s\t%s\t%s\t%s\n' "$family" "$selector" "$package" "$state" >> "$directory/services.before.new" || return 1
+    done <<< "$instances"
+  done <<< "$roles"
+  mv -- "$directory/services.before.new" "$directory/services.before"
+)
+}
+
+function upgrade_services_package_was_purged() {
+  local baseline=$1 package=$2 manifest status
+  for manifest in "$baseline.purged-incompatible/"*/packages.purged; do
+    [ -f "$manifest" ] || continue
+    if awk -v package="$package" '{ name=$0; sub(/:.*/, "", name); if (name == package) found=1 } END { exit !found }' "$manifest"; then return 0
+    else status=$?; [ "$status" -eq 1 ] || return 2; fi
+  done
+  return 1
+}
+
+# Missing packages alone are not an exemption; confirmed baseline purge records are.
+function upgrade_services_check_legacy() {
+  local baseline=$1 roles selector=postfix status
+  [ -f "$baseline" ] && [ -r "$baseline" ] || return 2
+  # Original process metadata can establish default Postfix activity, not all services.
+  awk '
+    /^installed: postfix$/ { installed=1 }
+    /^process: \/usr\/lib\/postfix\/(sbin\/)?master([ \t]|$)/ && $0 !~ /[ \t]-c([ \t]|$)/ { master=1 }
+    END { exit !(installed && master) }
+  ' "$baseline" || return 2
+  if upgrade_services_package_was_purged "$baseline" postfix; then return 2
+  else status=$?; [ "$status" -eq 1 ] || return 2; fi
+  roles=$(upgrade_services_output_roles) || return 2
+  if awk -F '\t' '$1 == "postfix" { found=1 } END { exit !found }' <<< "$roles"; then :
+  else
+    status=$?; [ "$status" -eq 1 ] || return 2
+    echo 'dss:error: Postfix was running in the original process inventory and its installed role is now missing.' >&2; return 1
+  fi
+  command -v postmulti >/dev/null 2>&1 && selector=-
+  if upgrade_services_is_active postfix "$selector"; then return 2; else status=$?; fi
+  if [ "$status" -eq 1 ]; then
+    echo 'dss:error: Postfix was running in the original process inventory and is now stopped/failed; no automatic restart was attempted.' >&2; return 1
+  fi
+  return 2
+}
+
+function upgrade_services_check() {
+  local directory=$1 baseline=${2:-${1%.services}} roles family selector package state status=0 result
+  if [ ! -f "$directory/services.before" ] || [ -L "$directory/services.before" ] || [ ! -r "$directory/services.before" ]; then
+    upgrade_services_check_legacy "$baseline"
+    return $?
+  fi
+  roles=$(upgrade_services_output_roles) || return 2
+  while IFS=$'\t' read -r family selector package state; do
+    [ -n "$family" ] || continue
+    case "$state" in inactive) continue;; active) :;; *) [ "$status" -eq 1 ] || status=2; continue;; esac
+    if upgrade_services_package_was_purged "$baseline" "$package"; then continue
+    else result=$?; if [ "$result" -ne 1 ]; then [ "$status" -eq 1 ] || status=2; continue; fi; fi
+    if awk -F '\t' -v family="$family" '$1 == family { found=1 } END { exit !found }' <<< "$roles"; then :
+    else
+      result=$?
+      if [ "$result" -eq 1 ]; then
+        echo "dss:error: Previously active $family ($selector) no longer has its installed service role; removal was not recorded as intentional." >&2
+        status=1
+      else [ "$status" -eq 1 ] || status=2; fi
+      continue
+    fi
+    # The packaged default database daemon changes from MySQL to MariaDB on some hops.
+    if [ "$family" = database ]; then
+      selector=$(awk -F '\t' '$1 == "database" { print $2 }' <<< "$roles") || return 2
+    fi
+    if upgrade_services_is_active "$family" "$selector"; then :
+    else
+      result=$?
+      if [ "$result" -eq 1 ]; then
+        echo "dss:error: Previously active $family ($selector) is now stopped/failed; no automatic restart was attempted." >&2
+        status=1
+      else
+        echo "dss:warn: Cannot verify previously active $family ($selector); service health is incomplete." >&2
+        [ "$status" -eq 1 ] || status=2
+      fi
+    fi
+  done < "$directory/services.before"
+  return "$status"
+}
+
+function upgrade_services_verify() {
+  local baseline status
+  if baseline=$(config_state_output_baseline); then upgrade_services_check "$baseline.services" "$baseline"; status=$?
+  else status=2; fi
+  case "$status" in 0) return 0;; 1) return 1;; *) echo 'dss:warn: Common-service verification is incomplete; review service status before treating the upgrade as fully verified.' >&2; return 0;; esac
+}
+
+# Only the current private logging directory receives these short machine records.
+function upgrade_outcome_record() {
+(
+  umask 077
+  local category=$1 state=$2 detail=${3:-} directory=${DISTROREJUVE_RUN_DIRECTORY:-}
+  case "$category" in release|packages|cleanup) :;; *) return 1;; esac
+  case "$state" in verified|done|deferred|failed|unknown) :;; *) return 1;; esac
+  [ -n "$directory" ] || return 0
+  if [ ! -d "$directory" ] || [ -L "$directory" ] || [ -L "$directory/outcome.events" ]; then return 1; fi
+  detail=${detail//$'\n'/ }; detail=${detail//$'\r'/ }; detail=${detail//$'\t'/ }
+  printf '%s\t%s\t%s\n' "$category" "$state" "$detail" >> "$directory/outcome.events" && chmod 600 -- "$directory/outcome.events"
+)
+}
+
+function upgrade_outcome_output_php_removals() {
+  local baseline=$1 mapping packages result selected=''
+  for mapping in "$baseline.php-migration/"*/mapping; do
+    if [ ! -f "$mapping" ] || { [ ! -f "${mapping%/*}/started" ] && [ ! -f "${mapping%/*}/completed" ]; }; then continue; fi
+    selected="$selected"$'\n'"$(awk -F '\t' '$5 == "unavailable" { print $1 ":" $2 }' "$mapping")" || return 1
+  done
+  [ -n "${selected//$'\n'/}" ] || return 0
+  packages=$(dpkg-query -W -f='${Package}\t${Architecture}\t${Status}\n') || return 1
+  result=$(awk -F '\t' -v selected="$selected" '
+    BEGIN { n=split(selected, list, "\n"); for (i=1; i<=n; i++) if (list[i] != "") removed[list[i]]=1 }
+    $3 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ { delete removed[$1 ":" $2] }
+    END { for (name in removed) print name }
+  ' <<< "$packages") || return 1
+  [ -z "$result" ] || printf '%s\n' "$result" | LC_ALL=C sort -u
+}
+
+# Called inside the logging action child, including from its EXIT trap.
+# Original action failures take precedence; unknown service status remains a visible warning.
+function upgrade_finish_run() {
+  local action_status=$1 logfile=$2 baseline='' services=2 web=2 status category state detail reason audit='' plan=''
+  local release='not verified' packages='not verified' cleanup='' php_removals='' service_summary='unknown' package_verified=false
+  local directory=${DISTROREJUVE_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0
+  local none=false obsolete_none=false cleanup_done=false missing_provenance=false cleanup_failed=false cleanup_deferred=false
+  case "$action_status" in ''|*[!0-9]*) return 1;; esac
+  [ "$action_status" -le 255 ] || return 1
+  status=$action_status
+  if [ -n "$directory" ] && [ -f "$directory/outcome.events" ]; then
+    while IFS=$'\t' read -r category state detail; do
+      case "$category" in
+        release) release="$state${detail:+ ($detail)}";;
+        packages) packages="$state${detail:+ ($detail)}"; package_verified=false; [ "$state" != verified ] || package_verified=true;;
+        cleanup)
+          case "$state:$detail" in
+            done:*) cleanup_done=true;;
+            deferred:*provenance*) missing_provenance=true;;
+            failed:*) cleanup_failed=true;;
+            deferred:*|unknown:*) cleanup_deferred=true;;
+          esac;;
+      esac
+    done < "$directory/outcome.events"
+  fi
+  # Cleanup may have changed package state since a completion marker was recorded.
+  if $package_verified; then
+    if audit=$(LC_ALL=C dpkg --audit 2>&1) && [ -z "$audit" ] &&
+        plan=$(LC_ALL=C apt-get -s dist-upgrade 2>&1) &&
+        awk '/^(Inst|Remv|Purg|Conf) / { bad=1 } END { exit bad }' <<< "$plan"; then :
+    else
+      [ -z "$audit$plan" ] || printf '%s\n' "$audit" "$plan" >&2
+      echo 'dss:error: Final package state is incomplete or could not be verified; review package repair and the detailed log before continuing.' >&2
+      packages='failed final verification'; [ "$status" -ne 0 ] || status=1
+    fi
+  fi
+  if baseline=$(config_state_output_baseline); then
+    upgrade_services_check "$baseline.services" "$baseline"; services=$?
+    upgrade_php_runtime_check "$baseline.php-runtime"; web=$?
+  fi
+  if [ "$services" -eq 1 ] || [ "$web" -eq 1 ]; then
+    service_summary=failed; [ "$status" -ne 0 ] || status=1
+  elif [ "$services" -eq 0 ] && [ "$web" -eq 0 ]; then service_summary=verified; fi
+  if [ "$services" -eq 2 ] || [ "$web" -eq 2 ]; then
+    echo 'dss:warn: Service health is incomplete; unknown checks are not a successful verification.' >&2
+    if [ -n "$directory" ]; then
+      if [ -L "$directory/outcome.incomplete" ] || ! (umask 077; : > "$directory/outcome.incomplete" && chmod 600 -- "$directory/outcome.incomplete"); then
+        echo 'dss:error: Cannot record incomplete service verification.' >&2
+        [ "$status" -ne 0 ] || status=1
+      fi
+    fi
+  fi
+  if [ -n "$directory" ] && [ -f "$directory/cleanup.outcomes" ]; then
+    while IFS='|' read -r category state detail reason; do
+      case "$category:$state" in
+        autoremove:removed) removed=$((removed+1));;
+        autoremove:none) none=true;;
+        autoremove:deferred) deferred=$((deferred+1));;
+        obsolete:removed) obsolete_removed=$((obsolete_removed+1));;
+        obsolete:none) obsolete_none=true;;
+        obsolete:deferred)
+          case "$reason" in *provenance*) missing_provenance=true;; *) obsolete_deferred=$((obsolete_deferred+1));; esac;;
+      esac
+    done < <(tr '\t' '|' < "$directory/cleanup.outcomes")
+  fi
+  if [ "$removed" -gt 0 ] || [ "$deferred" -gt 0 ]; then
+    cleanup="autoremove $removed removed, $deferred deferred"
+    [ "$deferred" -eq 0 ] || cleanup="$cleanup (protected packages/dependencies or policy)"
+  elif $none; then cleanup='no autoremove candidates'; fi
+  if [ "$obsolete_removed" -gt 0 ] || [ "$obsolete_deferred" -gt 0 ]; then
+    cleanup="$cleanup${cleanup:+; }obsolete $obsolete_removed removed, $obsolete_deferred deferred"
+    [ "$obsolete_deferred" -eq 0 ] || cleanup="$cleanup (protected packages/dependencies or policy)"
+  elif $obsolete_none; then cleanup="$cleanup${cleanup:+; }no obsolete candidates"; fi
+  if $missing_provenance; then cleanup="$cleanup${cleanup:+; }obsolete skipped (no original provenance)"
+  elif $cleanup_done; then cleanup="$cleanup${cleanup:+; }obsolete cleanup done"; fi
+  if $cleanup_failed; then cleanup="$cleanup${cleanup:+; }cleanup failed (see detailed log)"
+  elif $cleanup_deferred; then cleanup="$cleanup${cleanup:+; }cleanup deferred (see detailed log)"; fi
+  printf 'dss:stage: Outcome: release %s; packages %s; services %s.\n' "$release" "$packages" "$service_summary" >&2
+  if [ -n "$baseline" ]; then
+    if php_removals=$(upgrade_outcome_output_php_removals "$baseline"); then
+      [ -z "$php_removals" ] || printf 'dss:warn: PHP extensions removed without target replacements: %s. Review application requirements.\n' "${php_removals//$'\n'/, }" >&2
+    else echo 'dss:warn: Removed PHP extension availability could not be summarized.' >&2; fi
+  fi
+  printf 'dss:stage: Cleanup: %s.\n' "${cleanup:-not recorded; inspect the detailed log}" >&2
+  printf 'dss:stage: Detailed run log: %s\n' "$logfile" >&2
+  return "$status"
 }
 
 # Old nss-systemd can recurse through a D-Bus daemon retained across release upgrades.
@@ -4895,6 +5204,17 @@ function upgrade_obsolete_output_safe_package() {
   printf '%s\n' "$query_package"
 }
 
+# Append only to the current private run; no arguments validates the optional destination.
+function upgrade_cleanup_record() {
+  local directory=${DISTROREJUVE_RUN_DIRECTORY:-} file
+  [ -n "$directory" ] || return 0
+  file="$directory/cleanup.outcomes"
+  [ -d "$directory" ] && [ ! -L "$directory" ] && [ ! -L "$file" ] || return 1
+  [ ! -e "$file" ] || [ -f "$file" ] || return 1
+  [ "$#" -gt 0 ] || return 0
+  (umask 077; printf '%s\t%s\t%s\t%s\n' "$1" "$2" "${3:--}" "${4:-}" >> "$file")
+}
+
 function upgrade_remove_obsolete_packages() {
 (
   local package_umask
@@ -4902,7 +5222,8 @@ function upgrade_remove_obsolete_packages() {
   umask 077
   set -o pipefail
   local family=$1 from=$2 to=$3 baseline directory native attempt package audit removals query_package signature current_signature
-  local automatic_remove plan allowed rejection status dpkg_help qualified_packages=false name architecture version config preserved
+  local direct_plan plan allowed rejection status dpkg_help qualified_packages=false name architecture version config preserved
+  local planning_automatic
   local -a planning_options=()
   local -a planning_packages=()
   local -a options=()
@@ -4912,10 +5233,12 @@ function upgrade_remove_obsolete_packages() {
   case "$from$to" in ''|*[!a-z0-9]*) return 1;; esac
   [ -n "$from" ] && [ -n "$to" ] && [ "$from" != "$to" ] && [ "$(id -u)" = 0 ] || return 1
   if ! baseline=$(config_state_output_baseline); then
+    upgrade_cleanup_record obsolete deferred - "no original provenance for $family $from -> $to" || return 1
     echo "dss:warn: No original distro provenance for $family $from -> $to; preserving packages and skipping obsolete cleanup." >&2; return 0
   fi
   directory="$baseline.obsolete-packages/$family-$from-to-$to"
   if [ ! -f "$directory/prepared" ] || [ ! -s "$directory/provenance" ] || [ -L "$directory" ]; then
+    upgrade_cleanup_record obsolete deferred - "no original provenance for $family $from -> $to" || return 1
     echo "dss:warn: No original distro provenance for $family $from -> $to; preserving packages and skipping obsolete cleanup." >&2; return 0
   fi
   native=$(dpkg --print-architecture) || return 1
@@ -4957,13 +5280,14 @@ function upgrade_remove_obsolete_packages() {
   read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
   umask "$package_umask"
   pause_check || return 1
-  # Retry unsafe autoremove with only safe obsolete packages marked automatic in a private planning state.
-  for automatic_remove in true false; do
-    plan="$attempt/plan.auto"
+  # Remove proven obsolete packages only; use private solver state if their direct removal is unsafe.
+  for direct_plan in true false; do
+    plan="$attempt/plan.obsolete"
     allowed="$attempt/eligible"
     planning_options=()
+    planning_automatic=false
     planning_packages=("${obsolete[@]}")
-    if ! $automatic_remove; then
+    if ! $direct_plan; then
       config=$(LC_ALL=C apt-config dump) || return 1
       if ! awk 'tolower($1) == "dir::state::extended_states" { found=1 } END { exit !found }' <<< "$config"; then
         echo 'dss:error: This APT cannot isolate automatic-package state; preserve packages and review cleanup manually.' >&2; return 1
@@ -4981,17 +5305,23 @@ function upgrade_remove_obsolete_packages() {
           printf '%s\t%s\t%s\n' "$name" "$architecture" "$version" >> "$allowed" || return 1
           # Packages omitted from this private file are manual roots during simulation only.
           printf 'Package: %s\nArchitecture: %s\nAuto-Installed: 1\n\n' "$name" "$architecture" >> "$attempt/extended_states" || return 1
-        else status=$?; [ "$status" -eq 3 ] || return 1
+        else
+          status=$?; [ "$status" -eq 3 ] || return 1
+          upgrade_cleanup_record obsolete deferred "$package" 'protected system/service/data payload' || return 1
         fi
       done < "$attempt/obsolete.candidates"
-      [ -s "$allowed" ] || { echo "dss:warn: No safe obsolete cleanup candidates remain; preserved packages for manual review in $attempt." >&2; return 0; }
+      if [ ! -s "$allowed" ]; then
+        upgrade_cleanup_record obsolete deferred - 'no safe obsolete cleanup candidates' || return 1
+        echo "dss:warn: No safe obsolete cleanup candidates remain; preserved packages for manual review in $attempt." >&2; return 0
+      fi
       planning_options=(-o "Dir::State::extended_states=$attempt/extended_states")
       planning_packages=()
+      planning_automatic=true
     fi
     selected=()
     rejection=
     LC_ALL=C apt-get "${options[@]}" "${planning_options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
-      -o APT::Get::AutomaticRemove=true --simulate remove "${planning_packages[@]}" > "$plan" 2>&1 || return 1
+      -o APT::Get::AutomaticRemove="$planning_automatic" --simulate remove "${planning_packages[@]}" > "$plan" 2>&1 || return 1
     if removals=$(upgrade_obsolete_output_removals "$plan" "$allowed" "$native"); then :
     else
       status=$?
@@ -5001,15 +5331,21 @@ function upgrade_remove_obsolete_packages() {
       rejection='protected or unknown packages'
     fi
     if [ -z "$rejection" ]; then
-      if ! $automatic_remove; then
+      if ! $direct_plan; then
         printf '%s\n' "$removals" > "$attempt/protected.removals" || return 1
         preserved=$(awk -F '\t' 'FILENAME == ARGV[1] { removed[$0]=1; next } !(($1 ":" $2) in removed) { print $1 ":" $2 }' \
           "$attempt/protected.removals" "$allowed") || return 1
         if [ -n "$preserved" ]; then
+          while IFS= read -r package; do
+            upgrade_cleanup_record obsolete deferred "$package" 'required by preserved packages or APT policy' || return 1
+          done <<< "$preserved"
           printf 'dss:warn: Retaining obsolete packages required by preserved packages or APT policy: %s. Review %s.\n' "${preserved//$'\n'/, }" "$plan" >&2
         fi
       fi
-      [ -n "$removals" ] || return 0
+      if [ -z "$removals" ]; then
+        upgrade_cleanup_record obsolete none - 'no obsolete packages selected' || return 1
+        return 0
+      fi
       while IFS= read -r package; do
         if query_package=$(upgrade_obsolete_output_safe_package "$package" "$native" "$qualified_packages" "$attempt/packages"); then selected+=("$query_package")
         else
@@ -5020,8 +5356,8 @@ function upgrade_remove_obsolete_packages() {
       done <<< "$removals"
     fi
     [ -n "$rejection" ] || break
-    if $automatic_remove; then
-      echo "dss:warn: Autoremove plan includes $rejection; preserving automatic candidates and planning a safe obsolete subset. Review $plan." >&2
+    if $direct_plan; then
+      echo "dss:warn: Obsolete cleanup plan includes $rejection; preserving blockers and planning a safe obsolete subset. Review $plan." >&2
     else
       echo "dss:error: Protected cleanup still includes $rejection; migrate manually. Review $plan; no cleanup attempted." >&2; return 1
     fi
@@ -5048,7 +5384,122 @@ function upgrade_remove_obsolete_packages() {
   [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
   LC_ALL=C apt-get check || return 1
   (umask 077; cp "$attempt/removals.requested" "$attempt/packages.removed" && : > "$attempt/completed") || return 1
-  echo "dss:info: Removed obsolete distro packages and unused dependencies without purging configs. Inventory, removal log and config backup: $attempt." >&2
+  while IFS= read -r package; do
+    upgrade_cleanup_record obsolete removed "$package" 'verified obsolete cleanup' || return 1
+  done < "$attempt/removals.requested"
+  echo "dss:info: Removed obsolete distro packages without purging configs. Inventory, removal log and config backup: $attempt." >&2
+)
+}
+
+# Ordinary autoremove needs no original archive provenance; keep protected packages as solver roots.
+function upgrade_autoremove_packages() {
+(
+  local package_umask parent directory native dpkg_help qualified_packages=false signature current_signature
+  local capabilities config audit removals package status name architecture version essential priority query_package reason outcome_kind outcome_status outcome_package outcome_reason outcome_exit_status
+  local -a options=()
+  local -a selected=()
+  package_umask=$(umask) || return 1
+  umask 077
+  set -o pipefail
+  [ "$(id -u)" = 0 ] || return 1
+  upgrade_cleanup_record || return 1
+  parent="/root/distrorejuveinfo/autoremove"
+  [ ! -L "/root/distrorejuveinfo" ] && [ ! -L "$parent" ] && mkdir -p -- "$parent" && chmod 700 "$parent" || return 1
+  directory=$(mktemp -d "$parent/attempt.XXXXXX") || return 1
+  : > "$directory/outcomes" || return 1
+  trap 'outcome_exit_status=$?; while IFS="	" read -r outcome_kind outcome_status outcome_package outcome_reason; do
+    upgrade_cleanup_record "$outcome_kind" "$outcome_status" "$outcome_package" "$outcome_reason" || { [ "$outcome_exit_status" -ne 0 ] || outcome_exit_status=1; }
+  done < "$directory/outcomes"; exit "$outcome_exit_status"' EXIT
+  capabilities=$(LC_ALL=C apt-get --help) || return 1
+  case "$capabilities" in *autoremove*) :;; *) printf 'autoremove\tdeferred\t-\tAPT has no autoremove support\n' > "$directory/outcomes"; return $?;; esac
+  config=$(LC_ALL=C apt-config dump) || return 1
+  if ! awk 'tolower($1) == "dir::state::extended_states" { found=1 } END { exit !found }' <<< "$config"; then
+    echo 'dss:error: Cannot isolate APT automatic-package state; no autoremove attempted.' >&2; return 1
+  fi
+  native=$(dpkg --print-architecture) || return 1
+  dpkg_help=$(LC_ALL=C dpkg --help) || return 1
+  case "$dpkg_help" in *--print-foreign-architectures*) qualified_packages=true;; esac
+  audit=$(LC_ALL=C dpkg --audit 2>&1) || return 1
+  [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
+  LC_ALL=C apt-get check || return 1
+  signature=$(apt_state_output_signature packages) || return 1
+  [ -n "$signature" ] || return 1
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\n' > "$directory/packages.before" || return 1
+  awk -F '\t' -v OFS='\t' '$1 ~ / installed$/ { print $2, $3, $4 }' "$directory/packages.before" > "$directory/installed" || return 1
+  read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
+  pause_check || return 1
+  umask "$package_umask"
+  LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
+    -o APT::Get::AutomaticRemove=true --simulate remove > "$directory/plan.auto" 2>&1 || return 1
+  removals=$(upgrade_obsolete_output_removals "$directory/plan.auto" "$directory/installed" "$native") || {
+    echo "dss:error: Autoremove proposed non-removal work or packages outside the installed snapshot. Review $directory/plan.auto." >&2; return 1;
+  }
+  if [ -z "$removals" ]; then printf 'autoremove\tnone\t-\tno unused packages\n' > "$directory/outcomes"; return $?; fi
+  printf '%s\n' "$removals" > "$directory/removals.auto" || return 1
+  awk -F '\t' 'FILENAME == ARGV[1] { candidate[$0]=1; next } ($2 ":" $3) in candidate' \
+    "$directory/removals.auto" "$directory/packages.before" > "$directory/candidates" || return 1
+  : > "$directory/safe" && : > "$directory/extended_states" || return 1
+  while IFS=$'\t' read -r status name architecture version essential priority; do
+    package="$name:$architecture"; reason=
+    if [ "$status" != 'install ok installed' ]; then reason='held or not fully installed'
+    elif [ "$essential" = yes ]; then reason=Essential
+    else case "$priority" in required|important) reason="priority $priority";; esac
+    fi
+    if [ -z "$reason" ]; then
+      if upgrade_obsolete_output_safe_package "$package" "$native" "$qualified_packages" "$directory/packages.before" > /dev/null 2> "$directory/reason"; then :
+      else
+        status=$?; cat "$directory/reason" >&2 || return 1
+        [ "$status" -eq 3 ] || return 1
+        reason='protected system/service/data payload'
+      fi
+    fi
+    if [ -n "$reason" ]; then
+      printf 'dss:warn: Deferring unused %s: %s.\n' "$package" "$reason" >&2
+      printf 'autoremove\tdeferred\t%s\t%s\n' "$package" "$reason" >> "$directory/outcomes" || return 1
+      continue
+    fi
+    printf '%s\t%s\t%s\n' "$name" "$architecture" "$version" >> "$directory/safe" || return 1
+    printf 'Package: %s\nArchitecture: %s\nAuto-Installed: 1\n\n' "$name" "$architecture" >> "$directory/extended_states" || return 1
+  done < "$directory/candidates"
+  if [ ! -s "$directory/safe" ]; then printf 'autoremove\tnone\t-\tall unused packages protected\n' >> "$directory/outcomes"; return $?; fi
+  # Every omitted package is a manual root in this simulation; real APT marks are untouched.
+  LC_ALL=C apt-get "${options[@]}" -o Dir::State::extended_states="$directory/extended_states" \
+    -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false -o APT::Get::AutomaticRemove=true \
+    --simulate remove > "$directory/plan.protected" 2>&1 || return 1
+  removals=$(upgrade_obsolete_output_removals "$directory/plan.protected" "$directory/safe" "$native") || return 1
+  printf '%s\n' "$removals" > "$directory/removals.protected" || return 1
+  awk -F '\t' 'FILENAME == ARGV[1] { removed[$0]=1; next } !(($1 ":" $2) in removed) { print $1 ":" $2 }' \
+    "$directory/removals.protected" "$directory/safe" > "$directory/deferred.dependencies" || return 1
+  while IFS= read -r package; do
+    [ -n "$package" ] || continue
+    echo "dss:warn: Deferring unused $package: required by protected packages or APT policy." >&2
+    printf 'autoremove\tdeferred\t%s\trequired by protected packages or APT policy\n' "$package" >> "$directory/outcomes" || return 1
+  done < "$directory/deferred.dependencies"
+  if [ -z "$removals" ]; then printf 'autoremove\tnone\t-\tunused packages retained by protected roots\n' >> "$directory/outcomes"; return $?; fi
+  while IFS= read -r package; do
+    query_package=$(upgrade_obsolete_output_safe_package "$package" "$native" "$qualified_packages" "$directory/packages.before") || return 1
+    selected+=("$query_package")
+  done <<< "$removals"
+  LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
+    -o APT::Get::AutomaticRemove=false --simulate remove "${selected[@]}" > "$directory/plan.final" 2>&1 || return 1
+  upgrade_obsolete_output_removals "$directory/plan.final" "$directory/safe" "$native" > "$directory/removals.final" || return 1
+  [ "$(LC_ALL=C sort "$directory/removals.final")" = "$(LC_ALL=C sort "$directory/removals.protected")" ] || return 1
+  (umask 077; tar -C / -czpf "$directory/configuration.tar.gz" etc) || return 1
+  current_signature=$(apt_state_output_signature packages) || return 1
+  if [ -z "$current_signature" ] || [ "$current_signature" != "$signature" ]; then
+    echo 'dss:error: Package/repository state changed during autoremove planning; no removal attempted.' >&2; return 1
+  fi
+  LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
+    -o APT::Get::AutomaticRemove=false --no-download remove "${selected[@]}" 2>&1 | tee "$directory/removal.log" || return 1
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n' > "$directory/packages.after" || return 1
+  awk -F '\t' 'FILENAME == ARGV[1] { removed[$0]=1; next }
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && (($2 ":" $3) in removed) { bad=1 }
+    END { exit bad }' "$directory/removals.final" "$directory/packages.after" || return 1
+  while IFS= read -r package; do printf 'autoremove\tremoved\t%s\tunused noncritical package\n' "$package" >> "$directory/outcomes" || return 1; done < "$directory/removals.final"
+  audit=$(LC_ALL=C dpkg --audit 2>&1) || return 1
+  [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
+  LC_ALL=C apt-get check || return 1
+  echo "dss:info: Removed ${#selected[@]} unused packages without purging configs; inventory, deferred reasons and backup: $directory." >&2
 )
 }
 
@@ -5463,6 +5914,7 @@ if [ $ret -eq 0 ]; then
 	  upgrade_remove_obsolete_packages debian "$old_distro" "$new_distro" || {
 	    upgrade_outcome_record cleanup failed "obsolete cleanup"; return 1;
 	  }
+	  echo "dss:stage: Checking unused packages after verifying $new_distro" >&2
 	  upgrade_autoremove_packages || {
 	    upgrade_outcome_record cleanup failed "guarded autoremove"; return 1;
 	  }
@@ -6012,6 +6464,7 @@ function dist_upgrade_ubuntu_to_latest() {
     upgrade_remove_obsolete_packages ubuntu "$current" "$next" || {
       upgrade_outcome_record cleanup failed "obsolete cleanup"; return 1;
     }
+    echo "dss:stage: Checking unused packages after verifying $next" >&2
     upgrade_autoremove_packages || {
       upgrade_outcome_record cleanup failed "guarded autoremove"; return 1;
     }
@@ -6839,7 +7292,7 @@ function manifest_output() (
 function logging_run() (
 	local logging_root="${DISTROREJUVE_LOG_DIR:-/root/distrorejuveinfo/runs}"
 	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
-	local logging_dir logging_log logging_line logging_status logging_original_umask
+	local logging_dir logging_log logging_line logging_status logging_original_umask logging_action_status=0
 	local logging_color=false logging_summarize=false logging_level
 	local -a logging_pipeline_status
 

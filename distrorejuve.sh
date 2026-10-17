@@ -89,7 +89,7 @@ Run with --remove-deprecated-packages to remove old packages
 Add --crossgrade to a release-upgrade command to permit i386 to amd64 conversion at the last
 release supporting native i386 (Debian 12 or Ubuntu 18.04), then continue to the requested target.
 A running x86_64 kernel is required. Ubuntu also requires ENABLE_UBUNTU_CROSSGRADE.
-Add --allow-crossgrade-blockers to attempt despite known package blockers; final native amd64 verification remains required.
+Set ALLOW_CROSSGRADE_BLOCKERS=true to attempt despite known package blockers; final native amd64 verification remains required.
 
 Run with --to-64bit to convert a 32 bit distro to 64 bit.  Works OK with Debian.  May work for Ubuntu < 18.04.
 
@@ -490,7 +490,8 @@ function apt_sources_list() {
 # Stage every file before activation. Keep originals for manual recovery and rollback.
 function apt_sources_rewrite() {
   local mode=$1 family=$2 from=$3 to=$4 stage backup file index=0 changed=false ret=0
-  local -a source_files=() activated=()
+  local -a source_files=()
+  local -a activated=()
   local apt_sources_ports=false arch
   arch=$(dpkg --print-architecture) || return 1
   case "$arch" in amd64|i386) :;; *) apt_sources_ports=true;; esac
@@ -569,7 +570,7 @@ function distro_output_codename() {
   if [ -f /etc/debian_version ]; then
     read -r version < /etc/debian_version
     case "$version" in
-      5.*) name=lenny;; 6.*) name=squeeze;; 7.*) name=wheezy;; 8.*) name=jessie;;
+      4.*) name=etch;; 5.*) name=lenny;; 6.*) name=squeeze;; 7.*) name=wheezy;; 8.*) name=jessie;;
       9.*) name=stretch;; 10.*) name=buster;; 11.*) name=bullseye;; 12.*) name=bookworm;; 13.*) name=trixie;; *) return 1;;
     esac
     printf '%s\n' "$name"
@@ -830,8 +831,8 @@ function upgrade_precondition_checks() {
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
     echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y.  To automatically remove X11 libs use export REMOVEX11=Y"
     if [ ! -z "$REMOVEX11" ]; then
-      apt-get -y remove $libx11 || ret=$(($ret+1))
-      apt-get -y autoremove
+      apt_get_apply -y remove $libx11 || ret=$(($ret+1))
+      apt_get_apply -y autoremove
     else
       [ -z "$IGNOREX11" ] && ret=$(($ret+1))
     fi
@@ -938,6 +939,8 @@ function upgrade_compatibility_config_matches() {
     [ -e "$file" ] || [ -L "$file" ] || continue
     [ -f "$file" ] && [ -r "$file" ] || return 2
     awk -v pattern="$pattern" '
+      # Original mawk lacks named classes; preserve ASCII whitespace in caller patterns.
+      BEGIN { gsub(/\[:space:\]/, " \t\r\f\013", pattern) }
       { sub(/#.*/, ""); gsub(/["\047]/, ""); if (tolower($0) ~ pattern) matched=1 }
       END { exit !matched }
     ' "$file"
@@ -953,7 +956,7 @@ function upgrade_compatibility_output_config_files() {
   local -a queue=()
   case "$kind" in
     ldap)
-      upgrade_compatibility_config_matches '^[[:space:]]*slapd_conf[[:space:]]*=[[:space:]]*[^[:space:]]|(^|[[:space:]])-[fF][[:space:]]' /etc/default/slapd /etc/systemd/system/slapd.service /etc/systemd/system/slapd.service.d/*.conf
+      upgrade_compatibility_config_matches '^[ \t\r\f\013]*slapd_conf[ \t\r\f\013]*=[ \t\r\f\013]*[^ \t\r\f\013]|(^|[ \t\r\f\013])-[fF][ \t\r\f\013]' /etc/default/slapd /etc/systemd/system/slapd.service /etc/systemd/system/slapd.service.d/*.conf
       status=$?
       [ "$status" -eq 1 ] || return 2
       [ ! -f /etc/ldap/slapd.conf ] || queue+=(/etc/ldap/slapd.conf)
@@ -963,7 +966,7 @@ function upgrade_compatibility_output_config_files() {
       fi;;
     bind) queue=(/etc/bind/named.conf);;
     dovecot)
-      upgrade_compatibility_config_matches '(^|[=[:space:]])-c[[:space:]]|--config([=[:space:]]|$)' /etc/default/dovecot /etc/systemd/system/dovecot.service /etc/systemd/system/dovecot.service.d/*.conf
+      upgrade_compatibility_config_matches '(^|[= \t\r\f\013])-c[ \t\r\f\013]|--config([= \t\r\f\013]|$)' /etc/default/dovecot /etc/systemd/system/dovecot.service /etc/systemd/system/dovecot.service.d/*.conf
       status=$?
       [ "$status" -eq 1 ] || return 2
       queue=(/etc/dovecot/dovecot.conf);;
@@ -979,18 +982,18 @@ function upgrade_compatibility_output_config_files() {
     [ "$size" -le 1048576 ] || return 2
     printf '%s\n' "$file"
     text=$(awk -v kind="$kind" '
-      /^[[:space:]]*#/ { next }
+      /^[ \t\r\f\013]*#/ { next }
        kind == "bind" {
         line=$0; sub(/#.*/, "", line); sub(/\/\/.*/, "", line)
-        while (match(line, /(^|[;{}[:space:]])include[[:space:]]+"[^"]+"[[:space:]]*;/)) {
+        while (match(line, /(^|[;{} \t\r\f\013])include[ \t\r\f\013]+"[^"]+"[ \t\r\f\013]*;/)) {
           value=substr(line,RSTART,RLENGTH); sub(/^[^"]*"/, "", value); sub(/".*$/, "", value)
           print "required|" value; line=substr(line,RSTART+RLENGTH)
         }
-        if (line ~ /(^|[;{}[:space:]])include([[:space:]]|$)/) exit 2
+        if (line ~ /(^|[;{} \t\r\f\013])include([ \t\r\f\013]|$)/) exit 2
       }
-      kind != "bind" && /^[[:space:]]*!?include(_try)?[[:space:]]+/ {
-        line=$0; sub(/^[[:space:]]*!?include(_try)?[[:space:]]+/, "", line); sub(/[[:space:]]+#.*/, "", line)
-        gsub(/^["\047]|["\047][[:space:]]*$/, "", line); print ($0 ~ /!include_try/ ? "optional|" : "required|") line
+      kind != "bind" && /^[ \t\r\f\013]*!?include(_try)?[ \t\r\f\013]+/ {
+        line=$0; sub(/^[ \t\r\f\013]*!?include(_try)?[ \t\r\f\013]+/, "", line); sub(/[ \t\r\f\013]+#.*/, "", line)
+        gsub(/^["\047]|["\047][ \t\r\f\013]*$/, "", line); print ($0 ~ /!include_try/ ? "optional|" : "required|") line
       }
     ' "$file") || return 2
     while IFS='|' read -r requirement included; do
@@ -1052,7 +1055,7 @@ function upgrade_compatibility_rule_applies() {
       upgrade_compatibility_config_matches '^[[:space:]]*auxprop_plugin:[[:space:]]*(mysql|pgsql|sqlite)' /etc/sasl2/*.conf /etc/postfix/sasl/*.conf;;
     xfs-barrier)
       [ -r /etc/fstab ] || return 2
-      awk '$0 !~ /^[[:space:]]*#/ && $3 == "xfs" && $4 ~ /(^|,)(no)?barrier(=[^,]+)?(,|$)/ { bad=1 } END { exit !bad }' /etc/fstab;;
+      awk '$0 !~ /^[ \t\r\f\013]*#/ && $3 == "xfs" && $4 ~ /(^|,)(no)?barrier(=[^,]+)?(,|$)/ { bad=1 } END { exit !bad }' /etc/fstab;;
     ldap-backends|ldap-tls)
       files=$(upgrade_compatibility_output_config_files ldap) || return 2
       while IFS= read -r file; do paths+=("$file"); done <<< "$files"
@@ -1088,7 +1091,7 @@ function upgrade_compatibility_rule_applies() {
             } else { all=all " " line; break }
           }
         }
-        END { exit !(all ~ /(^|[;{}[:space:]])masterfile-format[[:space:]]+"?map"?[[:space:]]*;/) }
+        END { exit !(all ~ /(^|[;{} \t\r\f\013])masterfile-format[ \t\r\f\013]+"?map"?[ \t\r\f\013]*;/) }
       ';;
     pam-lastlog)
       upgrade_compatibility_config_matches '^[[:space:]]*-?(auth|account|password|session)[[:space:]]+(required|requisite|\[[^]]*default=(die|bad)[^]]*\])[[:space:]]+[^[:space:]]*pam_lastlog\.so' /etc/pam.d/*;;
@@ -1165,8 +1168,8 @@ function upgrade_php_has_candidate() {
   [ -n "$version" ] && [ "$version" != '(none)' ] || return 1
   rows=$(LC_ALL=C apt-cache madison "$1") || return 2
   printf '%s\n' "$rows" | awk -F '|' -v version="$version" '
-    { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2) }
-    $2 == version && $3 ~ /[[:space:]][a-z0-9][a-z0-9-]*[[:space:]]+Packages[[:space:]]*$/ { found=1 }
+    { gsub(/^[ \t\r\f\013]+|[ \t\r\f\013]+$/, "", $2) }
+    $2 == version && $3 ~ /[ \t\r\f\013][a-z0-9][a-z0-9-]*[ \t\r\f\013]+Packages[ \t\r\f\013]*$/ { found=1 }
     END { exit !found }
   '
 }
@@ -1190,6 +1193,54 @@ function upgrade_php_apache_module_is_enabled() {
     case "$status" in 0) return 0;; 1) :;; *) return 2;; esac
   done <<< "$files"
   return 1
+}
+
+# APT may choose mod_php before the separately requested FPM alternative.
+# Compare package status, not leftover Apache configuration or apache2-utils.
+function upgrade_php_output_new_apache_packages() {
+  local inventory=$1 plan=$2
+  awk -F '\t' '
+    FILENAME == ARGV[1] {
+      if ($1 !~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/) next
+      name=$2; sub(/:.*/, "", name); present[name]=1
+      if (name == "apache2" || name == "apache2.2-common" || name ~ /^apache2-mpm-/ || name ~ /^libapache2-mod-php/) apache=1
+      next
+    }
+    /^Inst / {
+      split($0, fields, /[ \t]+/); name=fields[2]; sub(/:.*/, "", name)
+      if (!apache && !(name in present) && (name ~ /^apache2(-bin|-data|[.]2-bin|[.]2-common|-mpm-.*)?$/ || name ~ /^libapache2-mod-php/)) {
+        if (!seen[name]++) print name
+      }
+    }
+  ' "$inventory" "$plan"
+}
+
+# Retain the machine's web-server role before every ordinary APT mutation.
+function apt_get_apply() {
+(
+  local directory additions status package_umask
+  package_umask=$(umask) || return 1
+  umask 077
+  upgrade_php_runtime_prepare || return 1
+  directory=$(mktemp -d) || return 1
+  trap 'rm -rf -- "$directory"' EXIT
+  dpkg-query -W -f='${Status}\t${Package}\n' > "$directory/packages" || return 1
+  if awk -F '\t' '
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ &&
+      ($2 ~ /^(apache2|apache2[.]2-common|apache2-mpm-.*)(:[a-z0-9-]+)?$/ || $2 ~ /^libapache2-mod-php/) { found=1 }
+    END { exit !found }
+  ' "$directory/packages"; then :
+  else
+    (umask "$package_umask" && LC_ALL=C apt-get "$@" --simulate) > "$directory/plan" 2>&1 || { status=$?; cat "$directory/plan" >&2; return "$status"; }
+    additions=$(upgrade_php_output_new_apache_packages "$directory/packages" "$directory/plan") || return 1
+    if [ -n "$additions" ]; then
+      printf 'dss:error: APT would add an Apache web server/PHP handler to a host without that role: %s. No package changes attempted; review PHP-FPM/CGI dependency alternatives.\n' "${additions//$'\n'/, }" >&2
+      return 1
+    fi
+  fi
+  umask "$package_umask" || return 1
+  apt-get "$@"
+)
 }
 
 function upgrade_php_check_plan() {
@@ -1224,13 +1275,94 @@ function upgrade_php_output_pending_directory() {
   printf '%s\n' "$found"
 }
 
+# shellcheck shell=bash
+# SysV/Upstart handoff blocks package starts only; it does not disable Apache at boot.
+# Leave the guard on partial failure; do not reboot before completing/reviewing that state.
+function upgrade_php_apache_legacy_control() {
+  local directory=$1 action=$2 policy=/usr/sbin/policy-rc.d saved wrapper temporary quoted actual=absent original original_link current_link owned=false
+  case "$action" in prepare|finish) :;; *) return 1;; esac
+  case "$directory" in /*) :;; *) return 1;; esac
+  [ -d "$directory" ] && [ ! -L "$directory" ] && [ "$(stat -c '%u:%a' "$directory")" = 0:700 ] || return 1
+  [ -x /etc/init.d/apache2 ] && command -v invoke-rc.d >/dev/null || return 1
+  saved="$directory/apache.policy.original"; wrapper="$directory/apache.policy.wrapper"
+  if [ ! -f "$directory/apache.legacy" ]; then
+    [ "$action" = prepare ] || return 1
+    if [ -e "$saved" ] || [ -L "$saved" ] || [ -e "$wrapper" ]; then
+      echo 'dss:error: Incomplete legacy Apache policy records require review before retrying.' >&2; return 1
+    fi
+    (
+      umask 077
+      if [ -e "$policy" ] || [ -L "$policy" ]; then
+        [ -L "$policy" ] || [ -f "$policy" ] || exit 1
+        [ ! -d "$policy" ] || exit 1
+        cp -a -- "$policy" "$saved" || exit 1
+        if [ -x "$policy" ]; then [ -f "$policy" ] && cp -Lp -- "$policy" "$directory/apache.policy.exec" || exit 1; fi
+      else : > "$directory/apache.policy.absent" || exit 1; fi
+      quoted=${directory//\'/\'\\\'\'}
+      # shellcheck disable=SC2016 # The generated policy expands these arguments when called.
+      printf '%s\n' '#!/bin/sh' '# distrorejuve legacy Apache handoff' \
+        'case "$1:$2" in apache2:*|apache2.service:*|--quiet:apache2|--quiet:apache2.service) exit 101;; esac' \
+        "if [ -x '$quoted/apache.policy.exec' ]; then exec '$quoted/apache.policy.exec' \"\$@\"; fi" \
+        'exit 0' > "$wrapper" && chmod 755 "$wrapper" || exit 1
+      : > "$directory/apache.legacy"
+    ) || return 1
+  fi
+  [ -f "$wrapper" ] && [ ! -L "$wrapper" ] || return 1
+  if [ -e "$policy" ] || [ -L "$policy" ]; then actual=$(stat -c '%u:%g:%a' "$policy") || return 1; fi
+  if [ -f "$policy" ] && [ ! -L "$policy" ] && cmp -s -- "$wrapper" "$policy"; then
+    case "$actual" in 0:*:755) owned=true;; *) echo 'dss:error: Legacy Apache guard ownership/mode changed; review it.' >&2; return 1;; esac
+  elif [ -L "$saved" ]; then
+    original=$(stat -c '%u:%g:%a' "$saved") || return 1
+    original_link=$(readlink "$saved") && current_link=$(readlink "$policy") || return 1
+    if [ ! -L "$policy" ] || [ "$original_link" != "$current_link" ] || [ "$original" != "$actual" ]; then
+      echo 'dss:error: Legacy Apache policy changed; refusing to overwrite it.' >&2; return 1
+    fi
+  elif [ -f "$saved" ]; then
+    original=$(stat -c '%u:%g:%a' "$saved") || return 1
+    if [ ! -f "$policy" ] || [ -L "$policy" ] || ! cmp -s -- "$saved" "$policy" || [ "$original" != "$actual" ]; then
+      echo 'dss:error: Legacy Apache policy changed; refusing to overwrite it.' >&2; return 1
+    fi
+  elif [ ! -f "$directory/apache.policy.absent" ] || [ -e "$policy" ] || [ -L "$policy" ]; then
+    echo 'dss:error: Legacy Apache policy changed; refusing to overwrite it.' >&2; return 1
+  fi
+  if [ "$action" = prepare ]; then
+    if ! $owned; then
+      temporary=$(mktemp "$policy.distrorejuve.XXXXXX") || return 1
+      if cp -p -- "$wrapper" "$temporary" && mv -fT -- "$temporary" "$policy"; then :
+      else rm -f -- "$temporary"; return 1; fi
+    fi
+    /etc/init.d/apache2 stop || return 1
+  else
+    if $owned; then
+      if [ -f "$directory/apache.policy.absent" ]; then rm -f -- "$policy" || return 1
+      else
+        temporary=$(mktemp "$policy.distrorejuve.XXXXXX") || return 1
+        if cp -a --remove-destination -- "$saved" "$temporary" && mv -fT -- "$temporary" "$policy"; then :
+        else rm -f -- "$temporary"; return 1; fi
+      fi
+    fi
+    if ! invoke-rc.d apache2 start; then
+      upgrade_php_apache_legacy_control "$directory" prepare || return 1
+      echo 'dss:error: Apache start failed; the legacy package-start guard was restored. Review before reboot.' >&2
+      return 1
+    fi
+  fi
+}
+
 # Keep Apache unable to serve PHP source between removal and activation of its handler.
 # An owned persistent mask remains on failures and across reboot for a safe retry.
 function upgrade_php_apache_control() {
   local directory=$1 action=$2 state runtime=/run/systemd/system/apache2.service persistent=/etc/systemd/system/apache2.service file active
   local helper_mask=/var/lib/systemd/deb-systemd-helper-masked/apache2.service
-  [ -d /run/systemd/system ] || { echo 'dss:error: PHP module migration requires a running systemd service manager.' >&2; return 1; }
-  case "$(readlink /proc/1/exe)" in */systemd|*/'systemd (deleted)') :;; *) echo 'dss:error: Cannot verify systemd PID1 for PHP migration.' >&2; return 1;; esac
+  local systemd=false
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+    case "$(readlink /proc/1/exe)" in */systemd|*/'systemd (deleted)') systemd=true;; esac
+  fi
+  if [ -f "$directory/apache.legacy" ] || { [ ! -f "$directory/apache.state" ] && ! $systemd; }; then
+    upgrade_php_apache_legacy_control "$directory" "$action"
+    return $?
+  fi
+  $systemd || { echo 'dss:error: Recorded systemd Apache handoff requires its original service manager.' >&2; return 1; }
   for file in "$persistent" "$runtime"; do
     if [ -e "$file" ] || [ -L "$file" ]; then
       if [ ! -L "$file" ] || [ "$(readlink "$file")" != /dev/null ]; then
@@ -1314,7 +1446,7 @@ function upgrade_php_output_preserved_packages() {
     }
     /^Purg / { bad=1 }
     /^Remv / {
-      split($0, fields, /[[:space:]]+/); package=fields[2]
+      split($0, fields, /[ \t\r\f\013]+/); package=fields[2]
       if (package !~ /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9][a-z0-9-]*)?$/) { bad=1; next }
       name=package; sub(/:.*/, "", name)
       if ((key(package) in allowed) || (package !~ /:/ && ((name ":all") in allowed))) next
@@ -1337,8 +1469,13 @@ function upgrade_migrate_php_packages() {
   package_umask=$(umask) || return 1
   umask 077
   local target=$1 packages default baseline directory status package arch branch suffix replacement mode concrete
-  local kept='' apache='' audit file pending=false listed native preserved requested attempt
-  local -a installs=() removals=() modules=() arguments=() apt_options=() backups=()
+  local apache='' audit file pending=false listed native preserved requested attempt additions
+  local -a installs=()
+  local -a removals=()
+  local -a modules=()
+  local -a arguments=()
+  local -a apt_options=()
+  local -a backups=()
   case "$target" in ''|*[!a-z0-9]*) return 1;; esac
   [ "$(id -u)" = 0 ] || return 1
   read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
@@ -1346,23 +1483,13 @@ function upgrade_migrate_php_packages() {
   else status=$?; [ "$status" -eq 1 ] || return 1; fi
   packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
   if ! $pending && ! printf '%s\n' "$packages" | awk -F '\t' '$1 == "install ok installed" && $2 ~ /^(php5($|-)|php[0-9]+\.[0-9]+($|-)|libapache2-mod-php[0-9])/ { found=1 } END { exit !found }'; then return 0; fi
+  upgrade_php_runtime_prepare || return 1
   default=$(umask "$package_umask" && upgrade_php_output_default_branch) || return 1
   if $pending; then
     if [ "$(cat "$directory/target")" != "$target" ] || [ "$(cat "$directory/branch")" != "$default" ]; then
       echo "dss:error: Resume the recorded PHP migration before selecting another target/default branch: $directory" >&2; return 1;
     fi
   else
-    # Do not replace an administrator's newer PHP with this release's older default.
-    while IFS=$'\t' read -r status package arch _; do
-      [ "$status" = 'install ok installed' ] || continue
-      package=${package%%:*}
-      case "$package" in libapache2-mod-php*) branch=${package#libapache2-mod-php};; php*) branch=${package#php}; branch=${branch%%-*};; *) continue;; esac
-      [[ "$branch" = 5 || "$branch" =~ ^[0-9]+\.[0-9]+$ ]] || continue
-      if dpkg --compare-versions "$branch" gt "$default"; then
-        echo "dss:warn: Preserving PHP $branch, newer than target default $default; no automatic PHP migration attempted." >&2
-        return 0
-      fi
-    done <<< "$packages"
     baseline=$(config_state_output_baseline) || { echo 'dss:error: PHP migration requires a recorded pre-upgrade comparison baseline.' >&2; return 1; }
     mkdir -p "$baseline.php-migration" && chmod 700 "$baseline.php-migration" || return 1
     directory=$(mktemp -d "$baseline.php-migration/$target.XXXXXX") || return 1
@@ -1370,7 +1497,6 @@ function upgrade_migrate_php_packages() {
     printf '%s\n' "$target" > "$directory/target" || return 1
     printf '%s\n' "$default" > "$directory/branch" || return 1
     : > "$directory/mapping" || return 1
-    : > "$directory/retained" || return 1
     while IFS=$'\t' read -r status package arch _; do
       [ "$status" = 'install ok installed' ] || continue
       package=${package%%:*}; mode=normal
@@ -1389,7 +1515,7 @@ function upgrade_migrate_php_packages() {
           esac;;
         *) continue;;
       esac
-      [[ "$branch" = 5 || "$branch" =~ ^[0-9]+\.[0-9]+$ ]] || continue
+      [[ "$branch" = 5 || "$branch" =~ ^[0-9]+[.][0-9]+$ ]] || continue
       if [ "$replacement" != - ]; then
         if (umask "$package_umask" && upgrade_php_has_candidate "$replacement"); then :
         else
@@ -1402,10 +1528,8 @@ function upgrade_migrate_php_packages() {
             else status=$?; [ "$status" -eq 1 ] || return 1; fi;;
           esac
           if [ "$status" -ne 0 ]; then
-            kept="$kept $branch "
-            printf '%s\t%s\n' "$package:$arch" "$replacement" >> "$directory/retained" || return 1
-            echo "dss:warn: Preserving $package:$arch: no $replacement version in target indexes; its old common package is retained. Review unavailable functionality separately." >&2
-            continue
+            echo "dss:warn: No target $replacement package for $package:$arch; removing the old extension without purging its configuration. Review application requirements separately." >&2
+            replacement=-; mode=unavailable
           fi
         fi
       fi
@@ -1418,13 +1542,11 @@ function upgrade_migrate_php_packages() {
         apache="libapache2-mod-php$default"
         printf '%s\n' "$apache" > "$directory/apache.package" || return 1
       fi
-      dpkg --compare-versions "$branch" lt "$default" || continue
-      if [ "$mode" = common ]; then case "$kept" in *" $branch "*) continue;; esac; fi
+      [ "$branch" != "$default" ] || [ "$mode" = unavailable ] || continue
       printf '%s\n' "$package:$arch" >> "$directory/remove.packages" || return 1
       [ "$mode" != apache ] || printf '%s\n' "$package:$arch" >> "$directory/apache.remove" || return 1
     done < "$directory/mapping"
     sort -u "$directory/install.packages" -o "$directory/install.packages" || return 1
-    [ -s "$directory/install.packages" ] || return 0
   fi
   # Temporarily remove the installed Apache PHP meta so APT cannot upgrade its handler during removal.
   # The normal install plan restores it; it must never enter the permanent removal list.
@@ -1488,8 +1610,23 @@ function upgrade_migrate_php_packages() {
     END { exit bad }
   ' "$directory/normal-dist-upgrade.plan" >> "$directory/install.allowed-removals.new" || return 1
   mv "$directory/install.allowed-removals.new" "$directory/install.allowed-removals" || return 1
+  # Negative constraints apply only to new Apache additions, never an existing server role.
+  if [ ! -f "$directory/apache.excluded" ]; then
+    upgrade_php_output_new_apache_packages "$directory/packages.before" "$directory/normal-dist-upgrade.plan" > "$directory/apache.excluded" || return 1
+  fi
+  while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done < "$directory/apache.excluded"
   for ((attempt=0; attempt<8; attempt++)); do
     (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate --reinstall install "${arguments[@]}") > "$directory/install.plan" 2>&1 || return 1
+    additions=$(upgrade_php_output_new_apache_packages "$directory/packages.before" "$directory/install.plan") || return 1
+    if [ -n "$additions" ]; then
+      [ "$attempt" -lt 7 ] || { echo "dss:error: Cannot preserve the existing web-server role; inspect $directory/install.plan." >&2; return 1; }
+      while IFS= read -r package; do
+        grep -qxF -- "$package" "$directory/apache.excluded" && { echo "dss:error: APT still selects excluded Apache package $package; inspect $directory/install.plan." >&2; return 1; }
+        printf '%s\n' "$package" >> "$directory/apache.excluded" || return 1
+        arguments+=("$package-")
+      done <<< "$additions"
+      continue
+    fi
     upgrade_php_check_plan "$directory/install.allowed-removals" "$directory/install.plan" false "$native" && break
     [ "$attempt" -lt 7 ] || { echo "dss:error: PHP preservation exceeded eight simulations; inspect $directory/install.plan." >&2; return 1; }
     preserved=$(upgrade_php_output_preserved_packages "$directory/install.allowed-removals" "$directory/install.plan" "$packages" "$native") || {
@@ -1518,7 +1655,7 @@ function upgrade_migrate_php_packages() {
   fi
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --download-only --reinstall install "${arguments[@]}") || return 1
   : > "$directory/started" || return 1
-  echo "dss:stage: Migrating installed PHP roles to Debian default $default; configs/inventory: $directory" >&2
+  echo "dss:stage: Migrating installed PHP roles to distribution default $default; configs/inventory: $directory" >&2
   if [ -f "$directory/apache.handoff" ]; then
     upgrade_php_apache_control "$directory" prepare || return 1
     if [ "${#modules[@]}" -gt 0 ]; then
@@ -1529,6 +1666,7 @@ function upgrade_migrate_php_packages() {
       arguments=("${installs[@]}")
       [ -z "$apache" ] || arguments+=("$apache")
       while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done <<< "$listed"
+      while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done < "$directory/apache.excluded"
     fi
   fi
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --no-download --reinstall install "${arguments[@]}") || return 1
@@ -1542,9 +1680,288 @@ function upgrade_migrate_php_packages() {
   audit=$(LC_ALL=C dpkg --audit 2>&1) || { printf '%s\n' "$audit" >&2; return 1; }
   [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
   (umask "$package_umask" && LC_ALL=C apt-get check) || return 1
-  if [ -f "$directory/apache.state" ]; then upgrade_php_apache_control "$directory" finish || return 1; fi
+  if [ -f "$directory/apache.state" ] || [ -f "$directory/apache.legacy" ]; then upgrade_php_apache_control "$directory" finish || return 1; fi
   : > "$directory/completed" || return 1
 )
+}
+
+# shellcheck shell=bash
+# Runtime checks read status/configuration only; they never start or reconfigure services.
+# 0 active, 1 stopped/failed, 2 cannot establish state. Enabled is not the same as active.
+function upgrade_php_runtime_service_is_active() {
+  local name=$1 state status
+  local -a bounded=()
+  case "$name" in apache2|nginx|php5-fpm) :;; php[0-9]*.[0-9]*-fpm) :;; *) return 2;; esac
+  command -v timeout >/dev/null && bounded=(timeout 20)
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+    case "$(readlink /proc/1/exe)" in
+      */systemd|*/'systemd (deleted)')
+        state=$(LC_ALL=C "${bounded[@]}" systemctl show -p ActiveState "$name.service" 2>/dev/null) || return 2
+        case "$state" in ActiveState=active) return 0;; ActiveState=inactive|ActiveState=failed) return 1;; *) return 2;; esac;;
+    esac
+  fi
+  if [ -f "/etc/init/$name.conf" ] && command -v initctl >/dev/null; then
+    state=$(LC_ALL=C "${bounded[@]}" initctl status "$name" 2>/dev/null) || return 2
+    case "$state" in "$name start/running"*) return 0;; "$name stop/waiting"*) return 1;; *) return 2;; esac
+  fi
+  if [ -x "/etc/init.d/$name" ]; then
+    LC_ALL=C "${bounded[@]}" "/etc/init.d/$name" status >/dev/null 2>&1
+    status=$?
+    case "$status" in 0) return 0;; 1|2|3) return 1;; *) return 2;; esac
+  fi
+  return 2
+}
+
+# One batch query; conffiles-only and partially configured packages are not running roles.
+function upgrade_php_runtime_output_roles() {
+  local packages roles
+  packages=$(dpkg-query -W -f='${Package}\t${Status}\n') || return 1
+  roles=$(printf '%s\n' "$packages" | awk -F '\t' '
+    $2 ~ /^(install|hold) ok installed$/ {
+      name=$1; sub(/:.*/, "", name)
+      if (name ~ /^php(5|[0-9]+[.][0-9]+)-fpm$/) print "fpm\t" name
+      if (name == "apache2" || name == "apache2.2-common") apache=1
+      if (name ~ /^nginx(-(core|full|light|extras))?$/) nginx=1
+    }
+    END { if (apache) print "apache\tapache2"; if (nginx) print "nginx\tnginx" }
+  ') || return 1
+  [ -z "$roles" ] || printf '%s\n' "$roles" | sort -u
+}
+
+# The caller supplies a private directory underneath its recorded pre-upgrade baseline.
+function upgrade_php_runtime_snapshot() {
+(
+  umask 077
+  local directory=$1 roles kind service state status
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  if [ -e "$directory/services.before" ] || [ -L "$directory/services.before" ]; then
+    [ -f "$directory/services.before" ] && [ ! -L "$directory/services.before" ] && [ -r "$directory/services.before" ] &&
+      [ "$(stat -c '%a' -- "$directory/services.before")" = 600 ]
+    return $?
+  fi
+  roles=$(upgrade_php_runtime_output_roles) || return 1
+  : > "$directory/services.before.new" || return 1
+  while IFS=$'\t' read -r kind service; do
+    [ -n "$service" ] || continue
+    if upgrade_php_runtime_service_is_active "$service"; then state=active
+    else
+      status=$?; state=inactive
+      if [ "$status" -ne 1 ]; then
+        state=unknown
+        echo "dss:warn: Cannot establish pre-upgrade activity of $service; its runtime verification is incomplete." >&2
+      fi
+    fi
+    printf '%s\t%s\t%s\n' "$kind" "$service" "$state" >> "$directory/services.before.new" || return 1
+  done <<< "$roles"
+  mv -- "$directory/services.before.new" "$directory/services.before"
+)
+}
+
+# Parse only include/listen/FastCGI directives; never run a server/configuration interpreter.
+# NGINX: fastcgi_pass unix:/run/php/site.sock; FPM: listen = /run/php/site.sock
+# Output: include|socket|tcp|unknown TAB value. Dynamic/unsupported syntax stays unknown.
+function upgrade_php_runtime_output_directives() {
+  local kind=$1 file=$2
+  case "$kind" in nginx|fpm) :;; *) return 1;; esac
+  [ -f "$file" ] && [ -r "$file" ] && [ "$(stat -c '%s' -- "$file")" -le 1048576 ] || return 1
+  LC_ALL=C awk -v kind="$kind" '
+    function emit() {
+      if (words[1] == "include") {
+        if (count == 2) print "include\t" words[2]; else print "unknown\tinclude_syntax"
+      } else if (words[1] == "fastcgi_pass") {
+        if (count != 2) print "unknown\tfastcgi_syntax"
+        else if (words[2] ~ /^unix:\//) { sub(/^unix:/, "", words[2]); print "socket\t" words[2] }
+        else if (words[2] ~ /^[0-9.]+:[0-9]+$/ || words[2] ~ /^\[[0-9a-fA-F:]+\]:[0-9]+$/) print "tcp\t" words[2]
+        else print "unknown\tindirect_fastcgi_upstream"
+      }
+      count=0; token=""
+    }
+    function word() { if (token != "") words[++count]=token; token="" }
+    FNR > 20000 { print "unknown\tline_limit"; exit }
+    kind == "fpm" {
+      line=$0; sub(/[;#].*$/, "", line)
+      if (line ~ /^[ \t]*\[[^]]+\][ \t\r]*$/) {
+        sub(/^[ \t]*\[/, "", line); sub(/\][ \t\r]*$/, "", line); pool=line
+      } else if (line ~ /^[ \t]*include[ \t]*=/) {
+        sub(/^[^=]*=[ \t]*/, "", line); sub(/[ \t\r]*$/, "", line); print "include\t" line
+      } else if (line ~ /^[ \t]*listen[ \t]*=/) {
+        sub(/^[^=]*=[ \t]*/, "", line); sub(/[ \t\r]*$/, "", line)
+        if (pool == "" || pool == "global") print "unknown\tlisten_without_pool"
+        else if (line ~ /^\//) listens[pool]="socket\t" line "\t" pool
+        else if (line ~ /^[0-9.]+:[0-9]+$/ || line ~ /^[0-9]+$/ || line ~ /^\[[0-9a-fA-F:]+\]:[0-9]+$/) listens[pool]="tcp\t" line "\t" pool
+        else listens[pool]="unknown\tdynamic_fpm_listen\t" pool
+      }
+      next
+    }
+    {
+      for (i=1; i<=length($0); i++) {
+        c=substr($0,i,1)
+        if (escaped) { print "unknown\tescaped_nginx_syntax"; escaped=0; token=token c; continue }
+        if (c == "\\") { escaped=1; continue }
+        if (quote != "") { if (c == quote) quote=""; else token=token c; continue }
+        if (c == "\042" || c == "\047") { quote=c; continue }
+        if (c == "#") break
+        if (c == ";") { word(); emit() }
+        else if (c == "{" || c == "}") { word(); count=0 }
+        else if (c ~ /[ \t\r\f\013]/) word()
+        else token=token c
+      }
+      if (quote == "" && !escaped) word(); else token=token "\n"
+    }
+    END {
+      if (kind == "fpm") { for (pool in listens) print listens[pool] }
+      else if (quote != "" || escaped || count) print "unknown\tunfinished_nginx_directive"
+    }
+  ' "$file"
+}
+
+# Follow default configuration includes, bounded to 200 files and depth 16.
+# 0 no missing literal socket, 1 confirmed missing socket, 2 incomplete verification.
+function upgrade_php_runtime_check_sockets() {
+(
+  local kind=$1 main=$2 prefix=${2%/*} file depth records directive value pool match index=0 failure=false unknown=false found=false sockets='' pool_records='' endpoints=0
+  local path_pattern='^/[A-Za-z0-9_./:@+-]+$' include_pattern='^[A-Za-z0-9_./*?-]+$'
+  local -a files=("$main")
+  local -a depths=(0)
+  local seen=$'\n' pattern
+  while [ "$index" -lt "${#files[@]}" ]; do
+    file=${files[index]}; depth=${depths[index]}; index=$((index+1))
+    case "$seen" in *$'\n'"$file"$'\n'*) continue;; esac
+    seen="$seen$file"$'\n'
+    if [ "$index" -gt 200 ] || [ "$depth" -gt 16 ]; then
+      echo "dss:warn: $kind socket verification reached its include limit." >&2; unknown=true; break
+    fi
+    if ! records=$(upgrade_php_runtime_output_directives "$kind" "$file"); then
+      echo "dss:warn: Cannot inspect bounded $kind configuration $file; socket verification incomplete." >&2
+      unknown=true; continue
+    fi
+    while IFS=$'\t' read -r directive value pool; do
+      [ -n "$directive" ] || continue
+      if [ "$kind" = fpm ] && [ -n "$pool" ]; then pool_records="$pool_records$pool"$'\n'; fi
+      case "$directive" in
+        include)
+          if [[ ! "$value" =~ $include_pattern ]]; then
+            echo "dss:warn: Unsupported/dynamic $kind include in $file; socket verification incomplete." >&2; unknown=true; continue
+          fi
+          pattern=$value
+          case "$pattern" in /*) :;; *) pattern="$prefix/$pattern";; esac
+          found=false
+          # Expansion is data, never evaluation; unsupported whitespace/metacharacters were rejected.
+          for match in $pattern; do
+            [ -e "$match" ] || continue
+            found=true; files+=("$match"); depths+=("$((depth+1))")
+            if [ "${#files[@]}" -gt 200 ]; then unknown=true; break; fi
+          done
+          if ! $found; then
+            case "$pattern" in *'*'*|*'?'*) :;; *)
+              echo "dss:warn: Included $kind configuration $pattern is missing; verification incomplete." >&2; unknown=true;; esac
+          fi;;
+        socket)
+          if [[ ! "$value" =~ $path_pattern ]]; then
+            echo "dss:warn: Dynamic/unsupported $kind socket in $file; verification incomplete." >&2; unknown=true
+          else sockets="$sockets$value"$'\t'"$file"$'\t'"${pool:--}"$'\n'; endpoints=$((endpoints+1)); fi;;
+        tcp) endpoints=$((endpoints+1)); echo "dss:trace: $kind uses a TCP FastCGI endpoint; network reachability is not probed." >&2;;
+        unknown) echo "dss:warn: $kind configuration $file needs manual verification ($value)." >&2; unknown=true;;
+      esac
+    done <<< "$records"
+  done
+  records=$(printf '%s' "$sockets" | awk -F '\t' -v kind="$kind" -v records="$pool_records" '
+    BEGIN { count=split(records, names, "\n"); for (i=1; i<=count; i++) pools[names[i]]++ }
+    { print $1 "\t" $2 "\t" (kind == "fpm" && pools[$3] > 1 ? "duplicate" : "literal") }
+  ') || { echo "dss:warn: Cannot classify $kind Unix socket records; verification incomplete." >&2; return 2; }
+  while IFS=$'\t' read -r value file pool; do
+    [ -n "$value" ] || continue
+    if [ "$pool" = duplicate ]; then
+      echo "dss:warn: FPM pool is defined in multiple included files; socket verification incomplete." >&2; unknown=true
+    elif [ ! -S "$value" ]; then
+      echo "dss:error: $kind configuration $file references missing Unix socket $value; review the PHP-FPM/upstream configuration." >&2; failure=true
+    else echo "dss:trace: $kind Unix socket exists: $value (listener/reachability not probed)." >&2; fi
+  done <<< "$records"
+  if [ "$kind" = fpm ] && [ "$endpoints" -eq 0 ]; then echo 'dss:warn: No literal PHP-FPM listener established; verification incomplete.' >&2; unknown=true; fi
+  $failure && return 1
+  $unknown && return 2
+  return 0
+)
+}
+
+# Check after the final package pass. Status 1 blocks success; status 2 is an explicit warning.
+function upgrade_php_runtime_check() {
+  local directory=$1 roles kind service state status=0 result current expected_fpm=false nginx=false dependencies selected count=0 main
+  [ -f "$directory/services.before" ] && [ -r "$directory/services.before" ] || return 2
+  roles=$(upgrade_php_runtime_output_roles) || return 2
+  while IFS=$'\t' read -r kind service state; do
+    case "$kind:$state" in fpm:active) expected_fpm=true; continue;; nginx:active) nginx=true;; apache:active) :;; *:inactive) continue;; *:unknown) [ "$status" -eq 1 ] || status=2; continue;; *) return 2;; esac
+    if ! printf '%s\n' "$roles" | grep -qxF "$kind"$'\t'"$service"; then
+      echo "dss:error: Previously active $service no longer has a configured/installed web-server role." >&2
+      status=1; continue
+    fi
+    if upgrade_php_runtime_service_is_active "$service"; then :
+    else
+      result=$?
+      if [ "$result" -eq 1 ]; then
+        echo "dss:error: $service was active before the upgrade and is now stopped/failed." >&2; status=1
+      else echo "dss:warn: Cannot verify expected active $service after package changes." >&2; [ "$status" -eq 1 ] || status=2; fi
+    fi
+  done < "$directory/services.before"
+  if $expected_fpm; then
+    selected=''
+    if dependencies=$(LC_ALL=C apt-cache depends php-fpm 2>/dev/null); then
+      selected=$(printf '%s\n' "$dependencies" | awk '$1 == "Depends:" && $2 ~ /^php(5|[0-9]+[.][0-9]+)-fpm$/ { if (found && found != $2) bad=1; found=$2 } END { if (!bad) print found }')
+    fi
+    if [ -z "$selected" ]; then
+      while IFS=$'\t' read -r kind service; do [ "$kind" != fpm ] || { selected=$service; count=$((count+1)); }; done <<< "$roles"
+      [ "$count" -eq 1 ] || selected=''
+    fi
+    if [ -z "$selected" ] && [ "$count" -eq 0 ]; then
+      echo 'dss:error: Previously active PHP-FPM has no configured/installed replacement runtime.' >&2; status=1
+    elif [ -z "$selected" ]; then
+      echo 'dss:warn: Cannot identify one installed/default replacement PHP-FPM runtime.' >&2; [ "$status" -eq 1 ] || status=2
+    elif ! printf '%s\n' "$roles" | grep -qxF $'fpm\t'"$selected"; then
+      echo "dss:error: Expected replacement PHP-FPM package $selected is not configured/installed." >&2; status=1
+    elif upgrade_php_runtime_service_is_active "$selected"; then
+      case "$selected" in php5-fpm) main=/etc/php5/fpm/php-fpm.conf;; *) current=${selected#php}; current=${current%-fpm}; main="/etc/php/$current/fpm/php-fpm.conf";; esac
+      upgrade_php_runtime_check_sockets fpm "$main"; result=$?
+      case "$result" in 0) :;; 1) status=1;; *) [ "$status" -eq 1 ] || status=2;; esac
+    else
+      result=$?
+      if [ "$result" -eq 1 ]; then echo "dss:error: Expected replacement $selected is stopped/failed." >&2; status=1
+      else echo "dss:warn: Cannot verify expected replacement $selected activity." >&2; [ "$status" -eq 1 ] || status=2; fi
+    fi
+  fi
+  # Also inspect an already-active NGINX even when it was originally inactive.
+  if ! $nginx && upgrade_php_runtime_service_is_active nginx; then nginx=true; fi
+  if $nginx; then
+    # shortcut: inspect Debian/Ubuntu default main config; custom -c/-p invocation needs a separate audit.
+    echo 'dss:trace: Checking on-disk /etc/nginx/nginx.conf; custom invocation paths/loaded configuration are not established.' >&2
+    upgrade_php_runtime_check_sockets nginx /etc/nginx/nginx.conf; result=$?
+    case "$result" in 0) :;; 1) status=1;; *) [ "$status" -eq 1 ] || status=2;; esac
+  fi
+  return "$status"
+}
+
+# Reuse the original comparison baseline, including across release hops and retries.
+function upgrade_php_runtime_prepare() {
+  local baseline directory
+  baseline=$(config_state_output_baseline) || {
+    record_config_state || return 1
+    baseline=$(config_state_output_baseline) || return 1
+  }
+  directory="$baseline.php-runtime"
+  [ ! -L "$directory" ] && mkdir -p -- "$directory" && chmod 700 "$directory" || return 1
+  upgrade_php_runtime_snapshot "$directory"
+}
+
+function upgrade_php_runtime_verify() {
+  local baseline status
+  if baseline=$(config_state_output_baseline); then
+    upgrade_php_runtime_check "$baseline.php-runtime"
+    status=$?
+  else status=2; fi
+  case "$status" in
+    0) return 0;;
+    1) echo 'dss:error: Web runtime verification failed after package changes; see the detailed run log and repair the reported service/upstream before continuing.' >&2; return 1;;
+    *) echo 'dss:warn: Web runtime verification is incomplete; review the detailed run log and verify custom service/configuration paths manually.' >&2; return 0;;
+  esac
 }
 
 # Old nss-systemd can recurse through a D-Bus daemon retained across release upgrades.
@@ -1625,23 +2042,23 @@ function crossgrade_check_apt_architecture_preferences() {
     if ! awk '
       function check( pintext,has_i386,has_amd64) {
         pintext=tolower(pin); gsub(/["\047]/, "", pintext)
-        has_i386=(tolower(package) ~ /:i386([[:space:]]|$)/ || (pintext ~ /^[[:space:]]*release[[:space:]]+/ && pintext ~ /(^|[,[:space:]])b[[:space:]]*=[[:space:]]*i386([,[:space:]]|$)/))
-        has_amd64=(tolower(package) ~ /:amd64([[:space:]]|$)/ || (pintext ~ /^[[:space:]]*release[[:space:]]+/ && pintext ~ /(^|[,[:space:]])b[[:space:]]*=[[:space:]]*amd64([,[:space:]]|$)/))
+        has_i386=(tolower(package) ~ /:i386([ \t\r\f\013]|$)/ || (pintext ~ /^[ \t\r\f\013]*release[ \t\r\f\013]+/ && pintext ~ /(^|[, \t\r\f\013])b[ \t\r\f\013]*=[ \t\r\f\013]*i386([, \t\r\f\013]|$)/))
+        has_amd64=(tolower(package) ~ /:amd64([ \t\r\f\013]|$)/ || (pintext ~ /^[ \t\r\f\013]*release[ \t\r\f\013]+/ && pintext ~ /(^|[, \t\r\f\013])b[ \t\r\f\013]*=[ \t\r\f\013]*amd64([, \t\r\f\013]|$)/))
         if (priority ~ /^[+-]?[0-9]+$/ && ((has_i386 && priority+0 > 0) || (has_amd64 && priority+0 < 0))) {
           printf "dss:error: Review architecture preference at %s:%d before crossgrade; adjust the 32-bit preference or amd64 exclusion manually. No preferences were changed.\n", FILENAME, first
           bad=1
         }
         package=""; pin=""; priority=""; field=""; first=0
       }
-      /^[[:space:]]*#/ { next }
-      /^[[:space:]]*$/ { check(); next }
+      /^[ \t\r\f\013]*#/ { next }
+      /^[ \t\r\f\013]*$/ { check(); next }
       {
         if (!first) first=FNR
         value=$0
-        if ($0 ~ /^[^[:space:]][^:]*:/) {
-          field=tolower($0); sub(/:.*/, "", field); sub(/^[^:]*:[[:space:]]*/, "", value)
+        if ($0 ~ /^[^ \t\r\f\013][^:]*:/) {
+          field=tolower($0); sub(/:.*/, "", field); sub(/^[^:]*:[ \t\r\f\013]*/, "", value)
         }
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        gsub(/^[ \t\r\f\013]+|[ \t\r\f\013]+$/, "", value)
         if (field == "package") package=package " " value
         else if (field == "pin") pin=pin " " value
         else if (field == "pin-priority") priority=value
@@ -1921,10 +2338,10 @@ function upgrade_crossgrade_before_release() {
 # Validate the complete requested path before any package/source mutation.
 # Predict only current package-policy blockers; future archive feasibility is checked later.
 function upgrade_check_crossgrade_package_blockers() {
-  local allow=${UPGRADE_CROSSGRADE_ALLOW_BLOCKERS-false} packages issues issue level=error
+  local allow=${ALLOW_CROSSGRADE_BLOCKERS-false} packages issues issue level=error
   case "$allow" in
     true|false) :;;
-    *) echo 'dss:error: UPGRADE_CROSSGRADE_ALLOW_BLOCKERS must be true or false.' >&2; return 1;;
+    *) echo 'dss:error: ALLOW_CROSSGRADE_BLOCKERS must be true or false.' >&2; return 1;;
   esac
   packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n') || {
     echo 'dss:error: Cannot inspect package holds and architectures before crossgrading.' >&2; return 1;
@@ -1940,10 +2357,10 @@ function upgrade_check_crossgrade_package_blockers() {
   if $allow; then level=warn; fi
   while IFS= read -r issue; do printf 'dss:%s: %s\n' "$level" "$issue" >&2; done <<< "$issues"
   if $allow; then
-    echo 'dss:warn: --allow-crossgrade-blockers permits this attempted conversion; final native amd64 package verification remains mandatory.' >&2
+    echo 'dss:warn: ALLOW_CROSSGRADE_BLOCKERS=true permits this attempted conversion; final native amd64 package verification remains mandatory.' >&2
     return 0
   fi
-  echo 'dss:error: Resolve these package blockers before release changes, or use --allow-crossgrade-blockers to attempt the crossgrade.' >&2
+  echo 'dss:error: Resolve these package blockers before release changes, or set ALLOW_CROSSGRADE_BLOCKERS=true to attempt the crossgrade.' >&2
   return 1
 }
 
@@ -2220,6 +2637,11 @@ function print_failed_dist_upgrade_tips() {
   #echo "dss:warn: May be worth trying: aptitude -vv full-upgrade"
   #echo "dss:warn: after attempting a fix manually, rerun the bash distrorejuve.sh  command"
   return 0
+}
+
+function dist_upgrade_etch_to_lenny() {
+  local old_distro=etch old_ver="inux 4" new_distro=lenny new_ver="inux 5"
+  dist_upgrade_x_to_y
 }
 
 function dist_upgrade_lenny_to_squeeze() {
@@ -2588,7 +3010,7 @@ function apt_state_output_signature() {
   [ "${apt_state_cache_disabled:-false}" = false ] || return 1
   [ -z "$APT_CONFIG$DPKG_ADMINDIR$DPKG_ROOT" ] || return 1
   case "$APT_GET_INSTALL_OPTIONS" in *Dir::*|*--admindir*|*--root*|*--simulate*|*--download-only*|*--print-uris*) return 1;; esac
-  local kind=$1 config path sources keypaths binary metadata
+  local kind=$1 config path sources keypaths binary metadata foreign_architectures dpkg_help
   set -o pipefail
   config=$(apt-config dump) || return 1
   # Custom roots can move inputs outside the paths inspected below; run normally there.
@@ -2617,7 +3039,14 @@ function apt_state_output_signature() {
     printf '%s\n' "$config" "$APT_GET_INSTALL_OPTIONS"
     printf 'defer-autoremove:%s\n' "${apt_defer_autoremove:-false}"
     dpkg --print-architecture || exit 1
-    dpkg --print-foreign-architectures || exit 1
+    if foreign_architectures=$(dpkg --print-foreign-architectures 2>/dev/null); then :
+    else
+      # Pre-Multiarch dpkg has no foreign list; genuine errors on newer dpkg stay fatal.
+      dpkg_help=$(LC_ALL=C dpkg --help) || exit 1
+      case "$dpkg_help" in *--print-foreign-architectures*) exit 1;; esac
+      foreign_architectures=
+    fi
+    printf '%s\n' "$foreign_architectures"
     for binary in apt-get apt-cache apt-config dpkg; do
       path=$(command -v "$binary") || exit 1
       [ -f "$path" ] || exit 1
@@ -2660,8 +3089,8 @@ function apt_state_output_signature() {
         while IFS= read -r -d '' path; do
           metadata=$(stat -L -c '%n %i %s %y %z' -- "$path") || exit 1
           printf '%s\n' "$metadata"
-          if [[ ! "$metadata" =~ \.[0-9]+[[:space:]][+-][0-9]+$ ]] ||
-              [[ "$metadata" =~ \.0+[[:space:]][+-][0-9]+$ ]]; then
+          if [[ ! "$metadata" =~ [.][0-9]+[[:space:]][+-][0-9]+$ ]] ||
+              [[ "$metadata" =~ [.]0+[[:space:]][+-][0-9]+$ ]]; then
             cksum "$path" || exit 1
           fi
         done || exit 1
@@ -2704,14 +3133,14 @@ function apt_get_remove() {
   apt_state_upgraded=
   apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.aptgetremove.log.XXXXXX") || return 1
-  apt-get $APT_GET_INSTALL_OPTIONS remove $@ | tee "$tmplog"
+  apt_get_apply $APT_GET_INSTALL_OPTIONS remove $@ | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
-  [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
+  [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt_get_apply $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
   #if [  $ret -ne 0 ] && echo "$@" | egrep -qai 'gcc-6-base:i386'; then
   #fi
   if [  $ret -ne 0 ] && echo "$@" | egrep -qai 'gcc-6-base:i386'; then
     if egrep -qai 'systemd : Depends: libcap2-bin' "$tmplog"; then
-      echo "dss:info: attempting to install libcap2-bin since gcc-6-base remove failed." && apt_get_install libcap2-bin:amd64 && apt-get $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
+      echo "dss:info: attempting to install libcap2-bin since gcc-6-base remove failed." && apt_get_install libcap2-bin:amd64 && apt_get_apply $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
     fi
   fi
   local essentialissuepackages="$(grep --after-context 50 'WARNING: The following essential packages will be removed.' "$tmplog" | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
@@ -2729,9 +3158,9 @@ function apt_get_install() {
   apt_state_upgraded=
   apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.aptgetinstall.log.XXXXXX") || return 1
-  apt-get $APT_GET_INSTALL_OPTIONS install $@ | tee "$tmplog"
+  apt_get_apply $APT_GET_INSTALL_OPTIONS install $@ | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
-  [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS install $@ && ret=$?
+  [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt_get_apply $APT_GET_INSTALL_OPTIONS install $@ && ret=$?
   local essentialissuepackages="$(grep --after-context 50 'WARNING: The following essential packages will be removed.' "$tmplog" | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_install $@ essential package issues for: $essentialissuepackages"
 
@@ -2753,10 +3182,10 @@ function apt_get_f_install() {
   apt_state_upgraded=
   apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.aptgetfinstall.log.XXXXXX") || return 1
-  apt-get $APT_GET_INSTALL_OPTIONS -f install | tee "$tmplog"
+  apt_get_apply $APT_GET_INSTALL_OPTIONS -f install | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
   if [  $ret -ne 0 ]; then
-    rm_overwrite_files "$tmplog" && apt-get $APT_GET_INSTALL_OPTIONS -f install && ret=$?
+    rm_overwrite_files "$tmplog" && apt_get_apply $APT_GET_INSTALL_OPTIONS -f install && ret=$?
   fi
   echo "dss:trace:apt_get_f_install:$1 results $(egrep 'upgraded' "$tmplog")"
   local essentialissuepackages="$(grep --after-context 50 'WARNING: The following essential packages will be removed.' "$tmplog" | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
@@ -2768,7 +3197,7 @@ function apt_get_f_install() {
     else
       apt-get download perl-base:i386
       dpkg -i perl-base*i386*deb
-      apt-get $APT_GET_INSTALL_OPTIONS -f install | tee "$tmplog"
+      apt_get_apply $APT_GET_INSTALL_OPTIONS -f install | tee "$tmplog"
       local ret=${PIPESTATUS[0]}
     fi
   fi
@@ -2876,8 +3305,8 @@ function crossgrade_bookworm_output_candidate() {
   [ -n "$version" ] && [ "$version" != '(none)' ] || return 1
   rows=$(LC_ALL=C apt-cache madison "$package:amd64") || return 2
   printf '%s\n' "$rows" | awk -F '|' -v version="$version" '
-    { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2) }
-    $2 == version && $3 ~ /[[:space:]]amd64[[:space:]]+Packages[[:space:]]*$/ { found=1 }
+    { gsub(/^[ \t\r\f\013]+|[ \t\r\f\013]+$/, "", $2) }
+    $2 == version && $3 ~ /[ \t\r\f\013]amd64[ \t\r\f\013]+Packages[ \t\r\f\013]*$/ { found=1 }
     END { exit !found }' || return 1
   printf '%s\n' "$version"
 }
@@ -2900,7 +3329,7 @@ function crossgrade_bookworm_check_plan() {
     }
     FILENAME == ARGV[3] { approved[$1]=1; next }
     {
-      line=$0; split(line, field, /[[:space:]]+/); name=field[2]; sub(/:.*/, "", name)
+      line=$0; split(line, field, /[ \t\r\f\013]+/); name=field[2]; sub(/:.*/, "", name)
       if (field[1] == "Inst") {
         if (field[2] ~ /:i386$/ || line ~ /\[i386\]\)$/) { if (phase == "cleanup" || !(name in coinstall)) bad=1 }
         else replaced[name]=1
@@ -2922,7 +3351,9 @@ function crossgrade_bookworm_check_plan() {
 # Download to an empty private cache, check the simulated removals, then inspect every archive.
 function crossgrade_bookworm_download() {
   local directory=$1 targets=$2 installed=$3 phase=$4 file package version arch cache candidates status retries=0 progress
-  local -a apt_options=() learned=() essential_options=(--allow-remove-essential)
+  local -a apt_options=()
+  local -a learned=()
+  local -a essential_options=(--allow-remove-essential)
   shift 4
   read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
   if [ "$phase" = cleanup ]; then
@@ -2942,22 +3373,22 @@ function crossgrade_bookworm_download() {
     # English APT rows: "owner : Depends: child ...", followed by indented Depends rows.
     candidates=$(awk '
       FILENAME == ARGV[1] {
-        if ($0 ~ /^[a-z0-9][a-z0-9+.-]*:amd64(=[^[:space:]]+)?$/) {
+        if ($0 ~ /^[a-z0-9][a-z0-9+.-]*:amd64(=[^ \t\r\f\013]+)?$/) {
           name=$0; sub(/:amd64(=.*)?$/, "", name); requested[name]=1
         }
         next
       }
       {
         text=$0
-        if (text ~ /^[[:space:]]*[^[:space:]]+[[:space:]]+:[[:space:]]+/) {
-          sub(/^[[:space:]]*/, "", text); owner=text; sub(/[[:space:]].*/, "", owner)
+        if (text ~ /^[ \t\r\f\013]*[^ \t\r\f\013]+[ \t\r\f\013]+:[ \t\r\f\013]+/) {
+          sub(/^[ \t\r\f\013]*/, "", text); owner=text; sub(/[ \t\r\f\013].*/, "", owner)
           if (owner ~ /:/ && owner !~ /:amd64$/) owner=""
           sub(/:amd64$/, "", owner)
-          sub(/^[^[:space:]]+[[:space:]]+:[[:space:]]+/, "", text)
-        } else if (text !~ /^[[:space:]]+(Pre-?Depends|Depends):/) { owner=""; next }
-        sub(/^[[:space:]]*/, "", text)
-        if (!(owner in requested) || text !~ /^(Pre-?Depends|Depends):[[:space:]]+/) next
-        sub(/^[^:]+:[[:space:]]+/, "", text); name=text; sub(/[[:space:]].*/, "", name)
+          sub(/^[^ \t\r\f\013]+[ \t\r\f\013]+:[ \t\r\f\013]+/, "", text)
+        } else if (text !~ /^[ \t\r\f\013]+(Pre-?Depends|Depends):/) { owner=""; next }
+        sub(/^[ \t\r\f\013]*/, "", text)
+        if (!(owner in requested) || text !~ /^(Pre-?Depends|Depends):[ \t\r\f\013]+/) next
+        sub(/^[^:]+:[ \t\r\f\013]+/, "", text); name=text; sub(/[ \t\r\f\013].*/, "", name)
         if (name !~ /^[a-z0-9][a-z0-9+.-]*(:amd64)?$/) next
         sub(/:amd64$/, "", name)
         if (!(name in requested) && !(name in seen)) { seen[name]=1; print name }
@@ -3061,12 +3492,12 @@ function crossgrade_bookworm_apache_handoff() {
   local directory=$1 action=$2 package state file
   case "$action" in
     prepare)
-      if [ ! -f "$directory/apache.state" ]; then
+      if [ ! -f "$directory/apache.state" ] && [ ! -f "$directory/apache.legacy" ]; then
         if awk -F '\t' '$1 ~ /^(apache2(-bin)?|libapache2-mod-.*)$/ { found=1 } END { exit !found }' "$directory/targets"; then :
         else state=$?; [ "$state" -eq 1 ] && return 0; return 1; fi
       fi
       if [ ! -f "$directory/apache.php-enabled" ]; then
-        if [ -f "$directory/apache.state" ]; then
+        if [ -f "$directory/apache.state" ] || [ -f "$directory/apache.legacy" ]; then
           echo "dss:error: Original PHP enablement inventory is missing; review $directory before resuming Apache handoff." >&2
           return 1
         fi
@@ -3090,7 +3521,7 @@ function crossgrade_bookworm_apache_handoff() {
       upgrade_php_apache_control "$directory" prepare || return 1
       ;;
     finish)
-      [ -f "$directory/apache.state" ] || return 0
+      [ -f "$directory/apache.state" ] || [ -f "$directory/apache.legacy" ] || return 0
       while IFS= read -r package; do
         [ -n "$package" ] || continue
         state=$(dpkg-query -W -f='${Status}\t${Architecture}' "$package:amd64") || return 1
@@ -3191,7 +3622,8 @@ function crossgrade_bookworm_check_package_tools() {
 # Replay only the exact authenticated archive set; simulated removals are never executed.
 function crossgrade_bookworm_apply_archives() {
   local directory=$1 phase=$2 prepare=${3:-false} cache package version arch file hashes configuration status installed targets obsolete pending attempt previous success=false
-  local -a archives=() retry=()
+  local -a archives=()
+  local -a retry=()
   case "$phase" in bootstrap|remaining) :;; *) return 1;; esac
   cache=$(cat "$directory/$phase.cache") || return 1
   case "$cache" in "$directory/$phase".*) :;; *) return 1;; esac
@@ -3368,6 +3800,7 @@ function upgrade_output_crossgrade_obsolete_packages() {
 
 # Default removal still requires verified compiler roles, library/doc payloads and a backup.
 function crossgrade_bookworm_prepare_obsolete() {
+  local compiler_pattern='^gcc-[0-9]+([.][0-9]+)?$'
   local directory=$1 blockers=$2 remove=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} package dependency reason packages
   case "$remove" in true|false) :;; *) echo 'dss:error: REMOVE_OBSOLETE_CROSSGRADE_PACKAGES must be true or false.' >&2; return 1;; esac
   [ -n "$blockers" ] || return 0
@@ -3383,7 +3816,7 @@ function crossgrade_bookworm_prepare_obsolete() {
     [[ "$package" =~ ^[a-z0-9][a-z0-9+.-]*$ ]] || return 1
     awk -F '\t' -v package="$package" '$1 == package { found=1 } END { exit !found }' "$directory/retained-i386" || return 1
     awk -F '\t' -v package="$package" '$1 == "install ok installed" && $2 == package && $3 == "i386" && $5 != "yes" { found=1 } END { exit !found }' "$directory/original.packages" || return 1
-    if [[ "$package" =~ ^gcc-[0-9]+([.][0-9]+)?$ ]]; then
+    if [[ "$package" =~ $compiler_pattern ]]; then
       # A versioned compiler can retire only when its current default role is converted.
       awk -F '\t' '$1 == "gcc" { found=1 } END { exit !found }' "$directory/targets" || return 1
     else
@@ -3453,12 +3886,12 @@ function crossgrade_bookworm_output_foreign_replacements() {
         if (retained_mode ? !(package in retained) : (foreign_mode[package] != "same" || !(package in requested))) continue
         groups=split(dependencies[package], group, /,/)
         for (part=1; part<=groups; part++) {
-          text=group[part]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", text)
+          text=group[part]; gsub(/^[ \t\r\f\013]+|[ \t\r\f\013]+$/, "", text)
           if (text == "") continue
           alternatives=split(text, alternative, /[|]/); blocked=0; details=""
           for (choice=1; choice<=alternatives; choice++) {
             name=alternative[choice]; gsub(/\([^)]*\)/, "", name)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+            gsub(/^[ \t\r\f\013]+|[ \t\r\f\013]+$/, "", name)
             qualifier=""; if (name ~ /:/) { qualifier=name; sub(/^[^:]*:/, "", qualifier); sub(/:.*/, "", name) }
             if (incompatible(name, qualifier)) {
               blocked++; details=details (details == "" ? "" : "; ") reason
@@ -3478,7 +3911,11 @@ function crossgrade_debian_bookworm() {
   local baseline directory package installed_version essential priority multi_arch candidate status audit version oldmark held cache attempt foreign_replacements retained_blockers obsolete_removals foreign_packages removed_obsolete
   # The download checker reads only the removals verified for this invocation.
   local crossgrade_obsolete_approved=/dev/null
-  local -a arguments=() bootstrap=() backups=() archives=() apt_options=()
+  local -a arguments=()
+  local -a bootstrap=()
+  local -a backups=()
+  local -a archives=()
+  local -a apt_options=()
   read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
   pause_check || return 1
   current=$(distro_output_codename) || return 1
@@ -3500,6 +3937,7 @@ function crossgrade_debian_bookworm() {
         printf '%s\n' "$foreign_packages" >&2
         echo 'dss:error: Active foreign packages without an original crossgrade inventory require manual migration; success requires amd64/all only.' >&2; return 1;
       }
+      upgrade_php_runtime_verify || return 1
       echo 'dss:stage: Bookworm native amd64 conversion is already complete.' >&2
       return 0
     fi
@@ -3701,6 +4139,7 @@ function crossgrade_debian_bookworm() {
   fi
   crossgrade_bookworm_check_completion "$directory" || return 1
   crossgrade_bookworm_apache_handoff "$directory" finish || return 1
+  upgrade_php_runtime_verify || return 1
   (umask 077; : > "$directory/completed") || return 1
   echo 'dss:stage: Bookworm native amd64 packages, package state and 64-bit PID1 verified.' >&2
 }
@@ -4235,11 +4674,14 @@ function apt_packages_output_archives() {
     done < "$inventory" > "$directory/query" || return 1
     LC_ALL=C xargs -0 -r -n 256 apt-cache -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= madison \
       < "$directory/query" > "$directory/madison" || return 1
-    awk -F '|' -v OFS='\t' -v architecture="$architecture" '
+    awk -F '|' -v OFS='\t' -v architecture="$architecture" -v native="$native" '
       { text=$3; gsub(/^[ \t]+|[ \t]+$/, "", text); count=split(text, fields, /[ \t]+/)
-        if (fields[count] != "Packages" || fields[count-1] != architecture) next
+        legacy=(count == 3 && fields[3] == "Packages" && architecture == native && fields[1] ~ /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\/]+\/?$/)
+        if (!legacy && (fields[count] != "Packages" || fields[count-1] != architecture)) next
         name=$1; version=$2; gsub(/^[ \t]+|[ \t]+$/, "", name); gsub(/^[ \t]+|[ \t]+$/, "", version)
-        sub(/:.*/, "", name); print name, architecture, version, fields[1], fields[2]
+        sub(/:.*/, "", name)
+        if (legacy) print name, architecture, version, fields[1], fields[2], "legacy-host"
+        else print name, architecture, version, fields[1], fields[2]
       }
     ' "$directory/madison" || return 1
   done
@@ -4249,9 +4691,19 @@ function apt_packages_output_archives() {
 function upgrade_obsolete_output_provenance() {
   local family=$1 release=$2 native=$3 sources=$4 inventory=$5 archive_records=$6
   awk -F '\t' -v OFS='\t' -v family="$family" -v release="$release" -v native="$native" '
+    # Old APT removes path, credentials and port from index descriptions.
+    function legacy_origin(uri, scheme, host) {
+      scheme=tolower(uri); sub(/:.*/, "", scheme)
+      host=uri; sub(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "", host); sub(/\/.*$/, "", host)
+      sub(/^.*@/, "", host); sub(/:[0-9]+$/, "", host)
+      return scheme "://" tolower(host)
+    }
     FILENAME == ARGV[1] {
+      if ($4 != "deb") next
+      uri=$5; sub(/\/$/, "", uri); origin=legacy_origin(uri) SUBSEP $6
+      if (!seen[origin SUBSEP uri]++) { origins[origin]++; unique_uri[origin]=uri }
       if ($3 == family && $4 == "deb" && ($6 == release || index($6, release "-") == 1 || index($6, release "/") == 1)) {
-        uri=$5; sub(/\/$/, "", uri); official[uri SUBSEP $6]=1
+        official[uri SUBSEP $6]=1
       }; next
     }
     FILENAME == ARGV[2] {
@@ -4262,6 +4714,11 @@ function upgrade_obsolete_output_provenance() {
     {
       key=$1 SUBSEP $2; if (!(key in version) || $3 != version[key]) next
       uri=$4; sub(/\/$/, "", uri); suite=$5; sub(/\/[^\/]*$/, "", suite)
+      if ($6 == "legacy-host") {
+        origin=legacy_origin(uri) SUBSEP suite
+        if (origins[origin] != 1) { ambiguous[key]=1; next }
+        uri=unique_uri[origin]
+      }
       if ((uri SUBSEP suite) in official) found[key]=1; else ambiguous[key]=1
     }
     END { for (key in found) if (!(key in ambiguous)) { split(key, part, SUBSEP); print part[1], arch[key], version[key] } }
@@ -4318,7 +4775,9 @@ function upgrade_remove_obsolete_packages() {
   umask 077
   set -o pipefail
   local family=$1 from=$2 to=$3 baseline directory native attempt package files file audit removals query_package signature current_signature
-  local -a options=() obsolete=() selected=()
+  local -a options=()
+  local -a obsolete=()
+  local -a selected=()
   case "$family:$from:$to" in debian:*:*|ubuntu:*:*) :;; *) return 1;; esac
   case "$from$to" in ''|*[!a-z0-9]*) return 1;; esac
   [ -n "$from" ] && [ -n "$to" ] && [ "$from" != "$to" ] && [ "$(id -u)" = 0 ] || return 1
@@ -4621,6 +5080,7 @@ function tweak_broken_configs() {
       fi
     fi
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:post:" $0}'
+    [ "$dbpkgret" -eq 0 ] || return "$dbpkgret"
     break
   done
 
@@ -4634,9 +5094,13 @@ function tweak_broken_configs() {
   if [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
     echo "dss:info: Disabling log_slow settings, they are now slow_query_log"
     [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs --no-run-if-empty grep -l '^log_slow'); do
-      sed -i 's/^log_slow/#log_slow/' $file && echo "dss:info: disabled log_slow in $file"
+      sed -i 's/^log_slow/#log_slow/' "$file" || return $?
+      echo "dss:info: disabled log_slow in $file"
     done
-    [ -f /etc/init.d/mysql ] && ps auxf | grep -qai '[m]ysqld_safe' && /etc/init.d/mysql restart && echo "dss:info: issued a mysql restart"
+    if [ -f /etc/init.d/mysql ] && ps auxf | grep -qai '[m]ysqld_safe'; then
+      /etc/init.d/mysql restart || return $?
+      echo "dss:info: issued a mysql restart"
+    fi
   fi
 
   for i in $(find /etc/cron.* -type f -name 000loaddelay); do
@@ -4650,7 +5114,7 @@ function tweak_broken_configs() {
 # inet addr:174.136.11.74  Bcast:174.136.11.79  Mask:255.255.255.248
 declare -i random=$(expr $(ifconfig | grep -v inet6  | grep  "inet" | head -n 1 | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
 sleep ${random}
-exit 0' > $i
+exit 0' > "$i" || return 1
     echo "dss:info: updating load delay script: $i"
   done
   # fix missing udev
@@ -4666,6 +5130,7 @@ exit 0' > $i
     apt_get_install udev
     ret=$?
     echo "dss:info: udev install result $ret $(dpkg -l | grep udev)"
+    [ "$ret" -eq 0 ] || return "$ret"
     break
   done
   return 0
@@ -4704,7 +5169,7 @@ function debian_check_release_completion() {
     echo "dss:error: Debian $target still has pending package changes. Review the plan, complete --dist-update, then retry the release command." >&2
     return 1
   fi
-  return 0
+  upgrade_php_runtime_verify
 }
 
 # A failed hop may leave target indexes active while the installed release is still old.
@@ -4733,7 +5198,7 @@ pause_check
 [ ! -f /etc/debian_version ] && return 0
 echo "dss:trace:dist_upgrade_x_to_y:checking:olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 
-local current apt_sources_transition_target=$new_distro apt_defer_autoremove=true
+local current apt_sources_transition_target=$new_distro apt_defer_autoremove=true upgrade_php_runtime_defer_check=true
 current=$(distro_output_codename) || return 1
 if [ "$current" != "$old_distro" ]; then
   echo "dss:info: Installed release is $current; skipping $old_distro to $new_distro."
@@ -4758,7 +5223,7 @@ if [ "$new_distro" = trixie ]; then
   esac
 fi
 
-if [ "$old_distro" == "lenny" ]; then
+if [ "$old_distro" = etch ] || [ "$old_distro" = lenny ]; then
   add_missing_debian_keys || return $?
   [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
 fi
@@ -4779,9 +5244,18 @@ if [ $ret -ne 0 ]; then
 fi
 apt-get clean
 upgrade_obsolete_prepare debian "$old_distro" "$new_distro" || return 1
+# Lenny's release notes require transferring Etch aptitude marks before switching to APT.
+if [ "$old_distro:$new_distro" = etch:lenny ] && command -v aptitude >/dev/null; then
+  aptitude search '?false' >/dev/null || return 1
+fi
 
 apt_sources_upgrade debian "$old_distro" "$new_distro" || return 1
 apt_get_update || return 1
+if [ "$old_distro:$new_distro" = etch:lenny ]; then
+  # Upgrade APT itself before asking Etch's resolver to perform Lenny's full upgrade.
+  apt_get_install apt || return 1
+  apt_get_upgrade || return 1
+fi
 if ! is_distro_name_older "$new_distro" stretch; then
   apt_get_install dpkg || return 1
   upgrade_migrate_php_packages "$new_distro" || return 1
@@ -4795,6 +5269,7 @@ if [ $ret -eq 0 ]; then
 	if lsb_release -a 2>/dev/null| egrep -qai "${new_distro}|${new_ver:-xxxxx}"; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
 	  upgrade_remove_obsolete_packages debian "$old_distro" "$new_distro" || return 1
+	  upgrade_php_runtime_verify || return 1
 	  echo "dss:info: dist-upgrade from ${old_distro} to ${new_distro} appears to have worked."
 	  return 0;
 	else
@@ -5005,6 +5480,19 @@ function record_config_state() {
   ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' | egrep -v '^process: \[|COMMAND|init' | sort | uniq >> "$file"
 
   [  -x /usr/bin/dpkg ] && echo "Installed packages:" >> "$file" && dpkg -l | grep '^ii' | awk '{print $2}' | sed 's/:.*//' | sort | grep -v '^lib' | awk '{ print "installed: " $0 }' >> "$file"
+  case "${file##*/}" in preupgrade.dpkg.*)
+    # Capture active web roles before package work, independently of the optional manifest.
+    (umask 077; mkdir -m 700 -- "$file.php-runtime" && upgrade_php_runtime_snapshot "$file.php-runtime") || return 1
+    # Save original site/runtime relationships once, without DNS or mail-store traversal.
+    if ! (
+      umask 077
+      mkdir -m 700 -- "$file.applications" &&
+        MANIFEST_MAIL_METRICS=false manifest_output json false > "$file.applications/manifest.json.tmp" &&
+        mv -- "$file.applications/manifest.json.tmp" "$file.applications/manifest.json"
+    ); then
+      echo "dss:warn: Original application manifest was not completed; review $file.applications before relying on it." >&2
+    fi;;
+  esac
   return 0
 }
 
@@ -5080,7 +5568,10 @@ function apt_get_autoremove() {
     false) :;;
     *) echo 'dss:error: Internal autoremove policy must be true or false.' >&2; return 1;;
   esac
-  apt-get $APT_GET_INSTALL_OPTIONS autoremove
+  local capabilities
+  capabilities=$(LC_ALL=C apt_get_apply --help) || return 1
+  case "$capabilities" in *autoremove*) :;; *) return 0;; esac
+  apt_get_apply $APT_GET_INSTALL_OPTIONS autoremove
 }
 
 function apt_get_upgrade() {
@@ -5091,11 +5582,15 @@ function apt_get_upgrade() {
   upgrade_precondition_checks || return $?
   apt_sources_archive || return 1
   apt_get_update || return 1
+  upgrade_php_runtime_prepare || return 1
   local signature completed current operation_ret cacheable=true
   signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
   if apt_state_repositories_are_current && [ -n "$signature" ] && [ "$signature" = "${apt_state_upgraded:-}" ]; then
     ret=0
     echo "dss:trace:apt_get_upgrade: packages already upgraded for this state."
+    if [ "${upgrade_php_runtime_defer_check:-false}" != true ]; then
+      upgrade_php_runtime_verify || { ret=$?; return "$ret"; }
+    fi
     return 0
   fi
   apt_state_upgraded=
@@ -5109,7 +5604,7 @@ function apt_get_upgrade() {
   apt_get_f_install || cacheable=false
   echo "dss:info: running an apt-get upgrade"
   apt_state_healthy=
-  apt-get $APT_GET_INSTALL_OPTIONS upgrade
+  apt_get_apply $APT_GET_INSTALL_OPTIONS upgrade
   operation_ret=$?
   if [ "$operation_ret" -eq 0 ]; then
     completed=$(apt_state_output_signature packages 2>/dev/null) || completed=
@@ -5121,11 +5616,14 @@ function apt_get_upgrade() {
   apt_get_f_install || cacheable=false
   if [ "$operation_ret" -ne 0 ]; then
     echo "dss:info: apt-get upgrade failed. trying a dist-upgrade..."
-    apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
+    apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade
     operation_ret=$?
     if [ "$operation_ret" -eq 0 ]; then
       echo "dss:info: apt-get dist-upgrade succeeded when an upgrade failed."
       ret=0
+      if [ "${upgrade_php_runtime_defer_check:-false}" != true ]; then
+        upgrade_php_runtime_verify || { ret=$?; return "$ret"; }
+      fi
       return 0
     else
       echo "dss:warn: apt-get upgrade/dist-upgrade failed."
@@ -5140,6 +5638,9 @@ function apt_get_upgrade() {
     apt_state_upgraded=$completed
   fi
   ret=$operation_ret
+  if [ "${upgrade_php_runtime_defer_check:-false}" != true ]; then
+    upgrade_php_runtime_verify || { ret=$?; return "$ret"; }
+  fi
   return "$ret"
 }
 
@@ -5157,28 +5658,32 @@ function apt_get_dist_upgrade() {
   pause_check
   [ ! -f /etc/debian_version ] && return 0
   upgrade_precondition_checks || return $?
-  local signature completed current first_ret upgrade_ret cacheable=true
+  upgrade_php_runtime_prepare || return 1
+  local signature completed current first_ret upgrade_ret repair_ret cacheable=true
   signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
   if apt_state_repositories_are_current && [ -n "$signature" ] && [ "$signature" = "${apt_state_dist_upgraded:-}" ]; then
     ret=0
     echo "dss:trace:apt_get_dist_upgrade: packages already upgraded for this state."
+    if [ "${upgrade_php_runtime_defer_check:-false}" != true ]; then
+      upgrade_php_runtime_verify || { ret=$?; return "$ret"; }
+    fi
     return 0
   fi
   apt_state_dist_upgraded=
   echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
-  apt_get_upgrade || return 1
+  upgrade_php_runtime_defer_check=true apt_get_upgrade || return 1
   echo "dss:trace:apt_get_dist_upgrade"
   apt_get_f_install || cacheable=false
   apt_get_install dpkg || cacheable=false
   if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
-  apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
+  apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade
   first_ret=$?
   # Keep recovery retries unconditional after a failure, including immediate-configuration workarounds.
   if [ "$first_ret" -ne 0 ]; then
     cacheable=false; apt_state_healthy=
-    if apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
-      apt-get -f $APT_GET_INSTALL_OPTIONS install libc6-dev
-      apt-get dist-upgrade -f -o APT::Immediate-Configure=0 $APT_GET_INSTALL_OPTIONS
+    if apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
+      apt_get_apply -f $APT_GET_INSTALL_OPTIONS install libc6-dev
+      apt_get_apply dist-upgrade -f -o APT::Immediate-Configure=0 $APT_GET_INSTALL_OPTIONS
     fi
   fi
   [ -e /var/log/syslog ] && [ -e /etc/my/my.cnf ] && if grep "unknown variable 'lc-messages-dir" /var/log/syslog; then
@@ -5191,7 +5696,7 @@ function apt_get_dist_upgrade() {
   if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
   apt-get -y autoclean || cacheable=false
   apt_state_healthy=
-  apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
+  apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade
   ret=$?
   if [ "$ret" -eq 0 ]; then
     completed=$(apt_state_output_signature packages 2>/dev/null) || completed=
@@ -5200,7 +5705,7 @@ function apt_get_dist_upgrade() {
     cacheable=false
     echo "dss:warn: Got an error after an apt-get dist-upgrade. trying an apt-get -f install"
     apt_get_f_install
-    apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
+    apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade
     ret=$?
     if [ "$ret" -ne 0 ]; then
       check_systemd_install_matches_init
@@ -5209,7 +5714,12 @@ function apt_get_dist_upgrade() {
   fi
   # Config repairs may change packages or fail after the final successful dist-upgrade.
   upgrade_ret=$ret
-  tweak_broken_configs || cacheable=false
+  if tweak_broken_configs; then :
+  else
+    repair_ret=$?
+    cacheable=false; apt_state_healthy=
+    [ "$upgrade_ret" -ne 0 ] || upgrade_ret=$repair_ret
+  fi
   current=$(apt_state_output_signature packages 2>/dev/null) || current=
   if $cacheable && apt_state_repositories_are_current && [ -n "$completed" ] && [ "$completed" = "$current" ] &&
       [ "$completed" = "${apt_state_healthy:-}" ]; then
@@ -5217,6 +5727,9 @@ function apt_get_dist_upgrade() {
     apt_state_upgraded=$completed
   fi
   ret=$upgrade_ret
+  if [ "$ret" -eq 0 ] && [ "${upgrade_php_runtime_defer_check:-false}" != true ]; then
+    upgrade_php_runtime_verify || { ret=$?; return "$ret"; }
+  fi
   echo "dss:trace:apt_get_dist_upgrade completed $(print_distro_info). ret=$ret"
   return "$ret"
 }
@@ -5242,7 +5755,7 @@ function ubuntu_output_next_release() {
 function dist_upgrade_ubuntu_to_latest() {
   pause_check
   [ -f /etc/debian_version ] || return 0
-  local remaining=${1:-1000} current next arch ret apt_sources_transition_target='' apt_defer_autoremove=true
+  local remaining=${1:-1000} current next arch ret apt_sources_transition_target='' apt_defer_autoremove=true upgrade_php_runtime_defer_check=true
   current=$(distro_output_codename) || return 1
   case " $ALL_UBUNTU " in *" $current "*) :;; *) return 0;; esac
   local planned=$current steps=$remaining
@@ -5256,7 +5769,7 @@ function dist_upgrade_ubuntu_to_latest() {
   while [ "$remaining" -gt 0 ]; do
     current=$(distro_output_codename) || return 1
     next=$(ubuntu_output_next_release "$current") || return 1
-    [ -n "$next" ] || return 0
+    if [ -z "$next" ]; then upgrade_php_runtime_verify; return $?; fi
     check_disk_space || return 1
     upgrade_check_path ubuntu "$current" "$next" || return $?
     if [ "$current" = bionic ]; then
@@ -5290,6 +5803,7 @@ function dist_upgrade_ubuntu_to_latest() {
       return 1
     fi
     upgrade_remove_obsolete_packages ubuntu "$current" "$next" || return 1
+    upgrade_php_runtime_verify || return 1
     echo "dss:info: Ubuntu upgrade from $current to $next completed."
     remaining=$((remaining-1))
   done
@@ -5519,6 +6033,7 @@ function dist_upgrade_to_latest() {
 
   if [ -f /etc/debian_version ] && lsb_release -a 2>/dev/null | grep -qai debian; then
     debian_target=trixie
+    if ! dist_upgrade_etch_to_lenny; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_etch_to_lenny:failed" && return 1; fi
     if ! dist_upgrade_lenny_to_squeeze; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_lenny_to_squeeze:failed" && return 1; fi
     if ! dist_upgrade_squeeze_to_wheezy; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_squeeze_to_wheezy:failed" && return 1; fi
     if ! dist_upgrade_wheezy_to_jessie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_wheezy_to_jessie:failed" && return 1; fi
@@ -5537,17 +6052,6 @@ function dist_upgrade_to_latest() {
   if [ -n "$debian_target" ]; then debian_check_release_completion "$debian_target" || return 1; fi
   if ! plesk_upgrade; then echo "dss:error:dist_upgrade_to_latest:plesk_upgrade:failed" && return 1; fi
 }
-
-function print_php5_advice() {
-cat<<EOJ
-# recent ubuntus have php7.  If your code does not work with that, install
-# php5.x from a ppa repository
-apt-get install software-properties-common
-add-apt-repository ppa:ondrej/php
-apt-get install php5.6
-EOJ
-}
-
 
 # Application/service manifest: bounded read-only collection.
 # shellcheck shell=bash
@@ -5696,6 +6200,7 @@ function manifest_config_files() {
 
 # Match active LoadModule paths to installed package ownership; never load the module.
 function manifest_apache_php() {
+  local version_pattern='^([0-9]+[.][0-9]+([.][0-9]+)?)'
   local file module conditional owners owner package version source owner_count i seen='' ambiguous=false count=0
   while IFS= read -r file; do
     while IFS=$'\t' read -r module conditional; do
@@ -5719,7 +6224,7 @@ function manifest_apache_php() {
                 if [ "$package" != unknown ]; then ambiguous=true; fi
                 package=$owner
                 version=${manifest_php_versions[i]#*:}
-                if [[ "$version" =~ ^([0-9]+[.][0-9]+([.][0-9]+)?) ]]; then version=${BASH_REMATCH[1]}
+                if [[ "$version" =~ $version_pattern ]]; then version=${BASH_REMATCH[1]}
                 else version=unknown; fi
               done
             done <<< "$owners"
@@ -5787,7 +6292,7 @@ function manifest_dns() {
   manifest_dns_addresses=unknown
   manifest_dns_result=unknown
   if ! $manifest_dns_enabled; then manifest_dns_reason=disabled; return; fi
-  if [[ ! "$domain" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z0-9-]+$ ]]; then
+  if [[ ! "$domain" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[.][A-Za-z0-9-]+$ ]]; then
     manifest_dns_reason=wildcard_or_dynamic_name; return
   fi
   for ((i=0; i<${#manifest_dns_names[@]}; i++)); do
@@ -5819,6 +6324,7 @@ function manifest_dns() {
 }
 
 function manifest_application() {
+  local version_pattern='^[0-9][A-Za-z0-9.+_()\ -]{0,100}$'
   local document_root="$1" file='' application=unknown version=unknown language=unknown language_version=unknown version_source=unknown modified=unknown
   case "$document_root" in /*) ;; *) return ;; esac
   case "$document_root" in *'$'*|*'%'*|*'{'*|*'}'*) return ;; esac
@@ -5850,7 +6356,7 @@ function manifest_application() {
     language=$(awk 'NR == 1 { if ($0 ~ /^#!.*perl/) print "Perl"; else if ($0 ~ /^#!.*python/) print "Python"; else print "unknown"; exit }' < <(manifest_read_metadata "$manifest_root$document_root/index.cgi"))
   fi
   # A version is metadata, never an arbitrary expression or configuration value.
-  if [[ ! "$version" =~ ^[0-9][A-Za-z0-9.+_()\ -]{0,100}$ ]]; then version=unknown; fi
+  if [[ ! "$version" =~ $version_pattern ]]; then version=unknown; fi
   if [ -n "$file" ]; then modified=$(stat -c '%y' -- "$file" 2>/dev/null) || modified=unknown; fi
   case "$language" in
     Ruby) file="$manifest_root$document_root/.ruby-version" ;;
@@ -5866,6 +6372,7 @@ function manifest_application() {
 }
 
 function manifest_website() {
+  local name_port_pattern='^([^:]+|\[[^]]+\]):([0-9]+)$'
   local server="$1" names="$2" port="$3" tls="$4" document_root="$5" user="$6" runtime="$7" config="$8"
   local name url scheme=http runtime_version=unknown runtime_source=unknown runtime_package=unknown i
   for ((i=0; i<${#manifest_fpm_sockets[@]}; i++)); do
@@ -5890,7 +6397,7 @@ function manifest_website() {
   # Configs use comma-separated names internally; whitespace and controls are removed by the parsers.
   for name in ${names//,/ }; do
     case "$name" in https://*) scheme=https; name=${name#https://} ;; http://*) scheme=http; name=${name#http://} ;; esac
-    if [[ "$name" =~ ^([^:]+|\[[^]]+\]):([0-9]+)$ ]]; then
+    if [[ "$name" =~ $name_port_pattern ]]; then
       port=${BASH_REMATCH[2]}; name=${BASH_REMATCH[1]}
     elif [[ "$name" == *:* ]] && [[ "$name" != \[*\] ]]; then name="[$name]"; fi
     url="$scheme://$name"
@@ -6068,9 +6575,15 @@ function manifest_output() (
   local manifest_dns_limit=20 manifest_mail_metrics="${MANIFEST_MAIL_METRICS:-true}"
   local manifest_dns_addresses manifest_dns_result manifest_dns_reason
   local manifest_apache_php_available=false manifest_apache_php_version=unknown manifest_apache_php_package=unknown
-  local -a manifest_php_packages=() manifest_php_versions=()
-  local -a manifest_fpm_sockets=() manifest_fpm_users=() manifest_fpm_versions=()
-  local -a manifest_dns_names=() manifest_dns_values=() manifest_dns_results=() manifest_dns_reasons=()
+  local -a manifest_php_packages=()
+  local -a manifest_php_versions=()
+  local -a manifest_fpm_sockets=()
+  local -a manifest_fpm_users=()
+  local -a manifest_fpm_versions=()
+  local -a manifest_dns_names=()
+  local -a manifest_dns_values=()
+  local -a manifest_dns_results=()
+  local -a manifest_dns_reasons=()
   case "$manifest_format:$manifest_dns_enabled:$manifest_mail_metrics" in
     text:true:true|text:true:false|text:false:true|text:false:false|json:true:true|json:true:false|json:false:true|json:false:false) ;;
     *) printf '%s\n' 'dss:error: invalid manifest format or boolean control' >&2; return 1 ;;
@@ -6209,6 +6722,7 @@ elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   upgrade_preflight_action --to-wheezy "${2:-}" || exit $?
   print_info
+  dist_upgrade_etch_to_lenny || exit 1
   dist_upgrade_lenny_to_squeeze || exit 1
   dist_upgrade_squeeze_to_wheezy || exit 1
   debian_check_release_completion wheezy || exit 1
@@ -6217,6 +6731,7 @@ elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   upgrade_preflight_action --to-jessie "${2:-}" || exit $?
   print_info
+  dist_upgrade_etch_to_lenny || exit 1
   dist_upgrade_lenny_to_squeeze || exit 1
   dist_upgrade_squeeze_to_wheezy || exit 1
   dist_upgrade_wheezy_to_jessie || exit 1
@@ -6241,6 +6756,7 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   esac
   upgrade_preflight_action --to-debian-release "${2:-}" || exit $?
   print_info
+  dist_upgrade_etch_to_lenny || exit 1
   if [ "$version" -gt 5 ]; then dist_upgrade_lenny_to_squeeze || exit 1; fi
   if [ "$version" -gt 6 ]; then dist_upgrade_squeeze_to_wheezy || exit 1; fi
   if [ "$version" -gt 7 ]; then dist_upgrade_wheezy_to_jessie || exit 1; fi
@@ -6251,12 +6767,13 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   if [ "$version" -gt 12 ]; then dist_upgrade_bookworm_to_trixie || exit 1; fi
   debian_check_release_completion "$debian_target" || exit 1
 
-  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes"
+  [ "$ret" -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  [ "$ret" -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes"
 elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   upgrade_preflight_action --to-latest-debian "${2:-}" || exit $?
   print_info
+  dist_upgrade_etch_to_lenny || exit 1
   dist_upgrade_lenny_to_squeeze || exit 1
   dist_upgrade_squeeze_to_wheezy || exit 1
   dist_upgrade_wheezy_to_jessie || exit 1
@@ -6289,6 +6806,7 @@ elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   upgrade_preflight_action --to-squeeze "${2:-}" || exit $?
   print_info
+  dist_upgrade_etch_to_lenny || exit 1
   dist_upgrade_lenny_to_squeeze || exit 1
   debian_check_release_completion squeeze || exit 1
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
@@ -6380,22 +6898,21 @@ fi
 
 function distrorejuve_run() {
   local argument action LOG_VERBOSE=false LOG_TRACE=false UPGRADE_CROSSGRADE=false
-  local UPGRADE_CROSSGRADE_ALLOW_BLOCKERS=false
+  case "${ALLOW_CROSSGRADE_BLOCKERS-false}" in
+    true|false) :;;
+    *) echo 'dss:error: ALLOW_CROSSGRADE_BLOCKERS must be true or false.' >&2; return 1;;
+  esac
   local -a arguments=()
   for argument in "$@"; do
     case "$argument" in
       --verbose) LOG_VERBOSE=true;;
       --trace) LOG_TRACE=true;;
       --crossgrade) UPGRADE_CROSSGRADE=true;;
-      --allow-crossgrade-blockers) UPGRADE_CROSSGRADE_ALLOW_BLOCKERS=true;;
+      --allow-crossgrade-blockers) echo 'dss:error: Set ALLOW_CROSSGRADE_BLOCKERS=true instead of --allow-crossgrade-blockers.' >&2; return 1;;
       *) arguments+=("$argument");;
     esac
   done
   action=${ACTION:-${arguments[0]:-}}
-  if $UPGRADE_CROSSGRADE_ALLOW_BLOCKERS && ! $UPGRADE_CROSSGRADE && [ "$action" != --to-64bit ]; then
-    echo 'dss:error: --allow-crossgrade-blockers requires a release upgrade with --crossgrade, or --to-64bit.' >&2
-    return 1
-  fi
   if $UPGRADE_CROSSGRADE; then
     case "$action" in
       --dist-upgrade|--to-debian-release|--to-latest-debian|--to-latest-lts|--to-next-ubuntu|--to-squeeze|--to-wheezy|--to-jessie) :;;

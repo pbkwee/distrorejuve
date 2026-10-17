@@ -1761,14 +1761,14 @@ function upgrade_php_runtime_snapshot() {
 (
   umask 077
   local directory=$1 roles kind service state status file
-  [ -d "$directory" ] && [ ! -L "$directory" ] && [ "$(stat -c '%u:%a' -- "$directory")" = 0:700 ] || {
+  if [ ! -d "$directory" ] || [ -L "$directory" ] || [ "$(stat -c '%u:%a' -- "$directory")" != 0:700 ]; then
     echo 'dss:error: PHP runtime snapshot directory must be root-owned and private (700).' >&2; return 1
-  }
+  fi
   file="$directory/services.before"
   if [ -e "$file" ] || [ -L "$file" ]; then
-    [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] && [ "$(stat -c '%u:%h' -- "$file")" = 0:1 ] || {
+    if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -r "$file" ] || [ "$(stat -c '%u:%h' -- "$file")" != 0:1 ]; then
       echo 'dss:error: Refusing an unsafe existing PHP runtime snapshot; review its owner/type/links.' >&2; return 1
-    }
+    fi
     # A default ACL can override umask; secure the original snapshot without replacing it.
     chmod 600 -- "$file" || { echo 'dss:error: Cannot secure the existing PHP runtime snapshot.' >&2; return 1; }
     return 0
@@ -1776,13 +1776,13 @@ function upgrade_php_runtime_snapshot() {
   roles=$(upgrade_php_runtime_output_roles) || return 1
   file="$directory/services.before.new"
   if [ -e "$file" ] || [ -L "$file" ]; then
-    [ -f "$file" ] && [ ! -L "$file" ] && [ "$(stat -c '%u:%h' -- "$file")" = 0:1 ] || {
+    if [ ! -f "$file" ] || [ -L "$file" ] || [ "$(stat -c '%u:%h' -- "$file")" != 0:1 ]; then
       echo 'dss:error: Refusing an unsafe staged PHP runtime snapshot.' >&2; return 1
-    }
+    fi
   fi
-  : > "$file" && chmod 600 -- "$file" || {
+  if ! { : > "$file" && chmod 600 -- "$file"; }; then
     echo 'dss:error: Cannot create a private PHP runtime snapshot.' >&2; return 1
-  }
+  fi
   while IFS=$'\t' read -r kind service; do
     [ -n "$service" ] || continue
     if upgrade_php_runtime_service_is_active "$service"; then state=active
@@ -2343,6 +2343,10 @@ function upgrade_check_crossgrade_checkpoint() {
     echo 'dss:error: Pending package changes prevent crossgrading. Finish updating this release first.' >&2
     return 1
   fi
+  upgrade_outcome_record release verified "$release" || return 1
+  upgrade_outcome_record packages verified "$release" || return 1
+  upgrade_php_runtime_verify || return 1
+  upgrade_services_verify
 }
 
 # Call before changing repositories at bookworm -> trixie or bionic -> focal.
@@ -5351,7 +5355,10 @@ function debian_check_release_completion() {
     echo "dss:error: Debian $target still has pending package changes. Review the plan, complete --dist-update, then retry the release command." >&2
     return 1
   fi
-  upgrade_php_runtime_verify
+  upgrade_outcome_record release verified "$target" || return 1
+  upgrade_outcome_record packages verified "$target" || return 1
+  upgrade_php_runtime_verify || return 1
+  upgrade_services_verify
 }
 
 # A failed hop may leave target indexes active while the installed release is still old.
@@ -5450,9 +5457,17 @@ if [ $ret -eq 0 ]; then
   echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
 	if lsb_release -a 2>/dev/null| egrep -qai "${new_distro}|${new_ver:-xxxxx}"; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
-	  upgrade_remove_obsolete_packages debian "$old_distro" "$new_distro" || return 1
-	  upgrade_php_runtime_verify || return 1
-	  echo "dss:info: dist-upgrade from ${old_distro} to ${new_distro} appears to have worked."
+	  debian_check_release_completion "$new_distro" || {
+	    upgrade_outcome_record cleanup deferred "release verification did not complete"; return 1;
+	  }
+	  upgrade_remove_obsolete_packages debian "$old_distro" "$new_distro" || {
+	    upgrade_outcome_record cleanup failed "obsolete cleanup"; return 1;
+	  }
+	  upgrade_autoremove_packages || {
+	    upgrade_outcome_record cleanup failed "guarded autoremove"; return 1;
+	  }
+	  debian_check_release_completion "$new_distro" || return 1
+	  echo "dss:info: Debian $new_distro package upgrade and post-cleanup checks passed."
 	  return 0;
 	else
 	  echo "dss:warn: dist-upgrade from ${old_distro} appears to have failed.  lsb_release does not match '${new_distro}' or '${new_ver:-xxxxx}': $(lsb_release -a)"
@@ -5665,6 +5680,7 @@ function record_config_state() {
   case "${file##*/}" in preupgrade.dpkg.*)
     # Capture active web roles before package work, independently of the optional manifest.
     (umask 077; mkdir -m 700 -- "$file.php-runtime" && upgrade_php_runtime_snapshot "$file.php-runtime") || return 1
+    (umask 077; mkdir -m 700 -- "$file.services" && upgrade_services_snapshot "$file.services") || return 1
     # Save original site/runtime relationships once, without DNS or mail-store traversal.
     if ! (
       umask 077
@@ -5990,8 +6006,16 @@ function dist_upgrade_ubuntu_to_latest() {
       echo "dss:error: Ubuntu upgrade from $current to $next failed." >&2
       return 1
     fi
-    upgrade_remove_obsolete_packages ubuntu "$current" "$next" || return 1
-    upgrade_php_runtime_verify || return 1
+    upgrade_check_crossgrade_checkpoint ubuntu "$next" || {
+      upgrade_outcome_record cleanup deferred "release verification did not complete"; return 1;
+    }
+    upgrade_remove_obsolete_packages ubuntu "$current" "$next" || {
+      upgrade_outcome_record cleanup failed "obsolete cleanup"; return 1;
+    }
+    upgrade_autoremove_packages || {
+      upgrade_outcome_record cleanup failed "guarded autoremove"; return 1;
+    }
+    upgrade_check_crossgrade_checkpoint ubuntu "$next" || return 1
     echo "dss:info: Ubuntu upgrade from $current to $next completed."
     remaining=$((remaining-1))
   done
@@ -6816,7 +6840,7 @@ function logging_run() (
 	local logging_root="${DISTROREJUVE_LOG_DIR:-/root/distrorejuveinfo/runs}"
 	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
 	local logging_dir logging_log logging_line logging_status logging_original_umask
-	local logging_color=false logging_level
+	local logging_color=false logging_summarize=false logging_level
 	local -a logging_pipeline_status
 
 	case "$logging_verbose:$logging_trace" in
@@ -6854,6 +6878,9 @@ function logging_run() (
 			return 1
 		fi
 	fi
+	case "$1:${ACTION:-${2:-}}" in
+		distrorejuve_main:--upgrade|distrorejuve_main:--dist-update|distrorejuve_main:--dist-upgrade|distrorejuve_main:--to-*) logging_summarize=true;;
+	esac
 	printf 'dss:stage Detailed run log: %s\n' "$logging_log" >&2
 
 	# The subshell contains traps, tracing and callback exits; caller state is intact.
@@ -6863,6 +6890,12 @@ function logging_run() (
 	trap 'printf "dss:error Action disconnected; details: %s\n" "$logging_log" >&2; exit 129' HUP
 	(
 		trap - INT TERM HUP
+		if $logging_summarize; then
+			DISTROREJUVE_RUN_DIRECTORY=$logging_dir
+			export DISTROREJUVE_RUN_DIRECTORY
+			# Main dispatch can exit directly; retain its status and still report final health.
+			trap 'logging_action_status=$?; trap - EXIT; upgrade_finish_run "$logging_action_status" "$logging_log"; exit $?' EXIT
+		fi
 		if $logging_trace; then
 			if ! exec 9> "$logging_dir/trace.log"; then exit 1; fi
 			BASH_XTRACEFD=9
@@ -6894,6 +6927,8 @@ function logging_run() (
 	fi
 	if [ "$logging_status" -ne 0 ]; then
 		printf 'dss:error Action failed (status %s); details: %s\n' "$logging_status" "$logging_log" >&2
+	elif [ -f "$logging_dir/outcome.incomplete" ]; then
+		printf 'dss:warn Action finished with incomplete service verification; details: %s\n' "$logging_log" >&2
 	else
 		printf 'dss:stage Action complete; details: %s\n' "$logging_log" >&2
 	fi

@@ -12,10 +12,12 @@ LTS_UBUNTU="dapper hardy lucid precise trusty xenial bionic focal jammy noble re
 OLD_RELEASES_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic maverick natty oneiric quantal raring saucy lucid utopic vivid wily yakkety zesty  artful cosmic disco eoan groovy hirsute impish kinetic lunar precise mantic oracular"
 ALL_UBUNTU="warty hoary breezy dapper edgy feisty gutsy hardy intrepid jaunty karmic lucid maverick natty oneiric precise quantal raring saucy trusty utopic vivid wily xenial yakkety zesty artful bionic cosmic disco eoan focal groovy hirsute impish jammy kinetic lunar mantic noble oracular plucky questing resolute stonking"
 
+# https://www.debian.org/releases/
 ALL_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye bookworm trixie"
 # in egrep code be aware of etch/stretch matching
 # https://wiki.debian.org/LTS
 UNSUPPORTED_DEBIAN="hamm slink potato woody sarge etch lenny squeeze wheezy jessie stretch buster bullseye"
+# https://archive.debian.org/debian/dists/ and https://archive.debian.org/debian-security/dists/
 DEBIAN_ARCHIVE="$UNSUPPORTED_DEBIAN squeeze-lts"
 
 # Support state differs from repository location; Ubuntu ESM releases stay on live mirrors.
@@ -24,7 +26,12 @@ DEBIAN_CURRENT="bookworm trixie"
 # also DEBIAN_FRONTEND=noninteractive ?
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
-APT_GET_INSTALL_OPTIONS=' -y -o DPkg::Lock::Timeout=-1 -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confmiss '
+# ucf manages some configurations independently of dpkg; honour an explicit keep-old policy.
+if [ -z "${UCF_FORCE_CONFFOLD:-}" ]; then
+  export UCF_FORCE_CONFFNEW="${UCF_FORCE_CONFFNEW:-1}"
+  export UCF_FORCE_CONFFMISS="${UCF_FORCE_CONFFMISS:-1}"
+fi
+APT_GET_INSTALL_OPTIONS=' -y -o DPkg::Lock::Timeout=-1 -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confmiss '
 # export this variable, e.g. to DAYS_UPGRADE_ONGOING=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
 DAYS_UPGRADE_ONGOING="${DAYS_UPGRADE_ONGOING:-7}"
 function print_usage() {
@@ -57,7 +64,7 @@ Arguments:
 
 Run with --usage to get this message
 
-Run with --check (or no argument) makes no changes.  Reports information like disk space free, kernel, distro version, config files modified from package defaults.
+Run with --check (or no argument) to report disk space, kernel, distro version and configuration changes. Leave REMOVEX11 unset for a read-only check.
 
 Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to latest debian.
 
@@ -90,6 +97,16 @@ Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu versio
 Run with --pause to pause a distro rejuve running process (touch ~/distrorejuve.pause).  Triggers 30s sleeps at key points in the script.
 
 Run with --resume to resume a paused distro rejuve running process (rm -f ~/distrorejuve.pause)
+
+Disk space: upgrades and crossgrades require 5120 MiB free on package/cache/state filesystems.
+Set MIN_FREE_DISK_MIB to a positive integer to adjust the floor, or SKIP_DISK_SPACE_CHECK=true to bypass.
+--check reports a failed precondition with a nonzero exit status. Help and cleanup commands do not require this floor.
+Legacy skip controls (any nonempty value enables them): IGNOREKERNEL, IGNOREX11, IGNOREBACKPORTS,
+IGNOREOTHERREPOS (current-release only), IGNORECRUFT, IGNORE_DOVECOT_ERROR (2.4 migration only).
+REMOVEX11 enables X11 removal; ENABLE_UBUNTU_CROSSGRADE permits experimental Ubuntu crossgrading.
+DAYS_UPGRADE_ONGOING sets the configuration-history lookback (default 7 days).
+PURGE_INCOMPATIBLE_PACKAGES=false blocks known config-breaking packages before release upgrades.
+Set it to literal true to back them up and purge them; reinstall and configure them manually afterward.
 
 Use with --source if you just wish to have the distrorejuve functions available to you for testing
 
@@ -239,6 +256,7 @@ function fix_dns() {
 }
 
 # Read only files APT itself loads; backups and nested directories are ignored.
+# https://manpages.debian.org/trixie/apt/sources.list.5.en.html
 function apt_sources_files() {
   local file name
   for file in "/etc/apt/sources.list" "/etc/apt/sources.list.d/"*.list "/etc/apt/sources.list.d/"*.sources; do
@@ -262,7 +280,7 @@ function apt_sources_process() {
   function contains(words, word) { return index(" " words " ", " " word " ") > 0 }
   function provider(uri, host, path) {
     host=tolower(uri); sub(/^[a-z+]+:\/\//, "", host); sub(/\/.*$/, "", host)
-    path=uri; sub(/^[a-z+]+:\/\/[^/]+/, "", path); sub(/\/$/, "", path)
+    path=uri; sub(/^[a-z+]+:\/\/[^\/]+/, "", path); sub(/\/$/, "", path)
     # Credentials and ports must not make a third-party URL look official.
     if (host ~ /(^|\.)debian\.org$/ || host == "http.debian.net" || host == "volatile.debian.net") {
       if (path ~ /^\/(debian|debian-security|debian-backports|debian-volatile|debian-non-US)$/ ||
@@ -477,6 +495,10 @@ function apt_sources_rewrite() {
       rm -r -- "$stage"; return 1
     fi
   done
+  apt_state_updated=
+  apt_state_healthy=
+  apt_state_upgraded=
+  apt_state_dist_upgraded=
   for index in "${!source_files[@]}"; do
     file=${source_files[index]}
     cmp -s -- "$file" "$stage/$index" && continue
@@ -547,43 +569,66 @@ function apt_sources_prepare() {
 # Target availability as checked 2026-10-16: 0=supported, 1=unsupported, 2=needs vendor review.
 # These predicates do not certify an installed application or authorize an OS upgrade.
 function apt_repo_sury_support() {
+  # Debian supported releases and Ubuntu standard-support LTS only (snapshot above).
+  # https://github.com/oerdnj/deb.sury.org/wiki/Frequently-Asked-Questions#supported-distributions
   case "$1:$2" in debian:bookworm|debian:trixie|ubuntu:jammy|ubuntu:noble|ubuntu:resolute) return 0;; esac
   return 1
 }
 function apt_repo_virtualmin_support() {
+  # Grade A targets; other grades need manual product/version review.
+  # https://www.virtualmin.com/docs/os-support/
   case "$1:$2" in debian:bookworm|debian:trixie|ubuntu:noble|ubuntu:resolute) return 0;; esac
   return 2
 }
 function apt_repo_webmin_support() {
+  # Repository availability alone cannot validate an old-key/new-key migration.
+  # https://webmin.com/download/
   return 2
 }
 function apt_repo_plesk_support() {
   # The installed Plesk version and the exact transition determine support.
+  # https://support.plesk.com/hc/en-us/articles/12377714344983-How-to-perform-dist-upgrade-procedure-on-Linux-server-with-Plesk
   return 2
 }
 function apt_repo_cpanel_support() {
+  # Ubuntu availability depends on the cPanel LTS version; Debian is not supported.
+  # https://docs.cpanel.net/installation-guide/system-requirements/
+  # https://docs.cpanel.net/installation-guide/system-requirements-ubuntu/
   case "$1:$2" in ubuntu:noble) return 0;; debian:*) return 1;; esac
   return 2
 }
 function apt_repo_postgresql_support() {
+  # PGDG lists supported codenames separately from PostgreSQL major-version support.
+  # https://www.postgresql.org/download/linux/debian/
+  # https://www.postgresql.org/download/linux/ubuntu/
   case "$1:$2" in debian:bookworm|debian:trixie|ubuntu:jammy|ubuntu:noble|ubuntu:resolute|ubuntu:stonking) return 0;; esac
   return 1
 }
 function apt_repo_docker_support() {
+  # OS availability only; these pages also impose architecture/package constraints.
+  # https://docs.docker.com/engine/install/debian/
+  # https://docs.docker.com/engine/install/ubuntu/
   case "$1:$2" in debian:bookworm|debian:trixie|ubuntu:jammy|ubuntu:noble|ubuntu:resolute|ubuntu:stonking) return 0;; esac
   return 1
 }
 function apt_repo_mariadb_support() {
+  # Supported platforms vary with the selected MariaDB release series.
+  # https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/installing-mariadb/binary-packages/mariadb-package-repository-setup-and-usage/
   return 2
 }
 function apt_repo_mongodb_support() {
+  # Platform/architecture support depends on the MongoDB version and edition.
+  # https://www.mongodb.com/docs/manual/administration/production-notes/
   return 2
 }
 function apt_repo_ppa_support() {
+  # Each PPA publishes its own series; Launchpad hosting is not an OS support policy.
+  # https://ubuntu.com/docs/launchpad/user/reference/packaging/ppas/ppa/
   return 2
 }
 
-function apt_sources_check() {
+# Check official suite consistency/base sources/backports and vendor upgrade blockers.
+function apt_sources_check_releases_and_vendors() {
   local target=${1:-${apt_sources_transition_target:-}} current family records file line provider type suite base
   local ret=0 official=0 seen=' ' support status
   records=$(apt_sources_list) || return 1
@@ -680,7 +725,7 @@ function apt_sources_upgrade() {
     esac
     [ "$target" = squeeze ] && apt_sources_add_lts=true
   fi
-  apt_sources_check "$target" || return 1
+  apt_sources_check_releases_and_vendors "$target" || return 1
   records=$(apt_sources_list) || return 1
   while IFS=$'\t' read -r _ _ provider type _ suite _ _; do
     if [ "$provider" != "$family" ] || [ "$type" != deb ]; then continue; fi
@@ -693,7 +738,49 @@ function apt_sources_upgrade() {
   apt_sources_rewrite upgrade "$family" "$current" "$target"
 }
 
+# Require free space on each package/cache/state filesystem before changing packages.
+function check_disk_space() {
+  local skip=${SKIP_DISK_SPACE_CHECK:-false} minimum=${MIN_FREE_DISK_MIB:-5120}
+  local path output available
+  case "$skip" in
+    true|false) :;;
+    *) echo "dss:error: SKIP_DISK_SPACE_CHECK must be true or false." >&2; return 1;;
+  esac
+  $skip && return 0
+  case "$minimum" in
+    *[!0-9]*|'') echo "dss:error: MIN_FREE_DISK_MIB must be a positive integer (default 5120)." >&2; return 1;;
+  esac
+  if ! [ "$minimum" -gt 0 ] 2>/dev/null; then
+    echo "dss:error: MIN_FREE_DISK_MIB must be a positive integer (default 5120)." >&2
+    return 1
+  fi
+  # Probe package/cache/state paths individually to catch separate mounts and symlinks.
+  for path in . / /usr /var /var/cache /var/cache/apt /var/cache/apt/archives /var/cache/yum /var/lib/apt /var/lib/apt/lists /var/lib/dpkg /var/lib/rpm /root /root/distrorejuveinfo; do
+    [ -d "$path" ] || continue
+    if ! output=$(LC_ALL=C df -Pm -- "$path"); then
+      echo "dss:error: Cannot check disk space for $path. Resolve df failure or export SKIP_DISK_SPACE_CHECK=true after review." >&2
+      return 1
+    fi
+    # df -Pm: Filesystem 1048576-blocks Used Available Capacity Mounted-on; field 4 is MiB free.
+    # Refuse shifted columns (for example a filesystem name containing whitespace).
+    available=$(printf '%s\n' "$output" | awk '
+      NR == 2 && NF >= 6 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ &&
+        $4 ~ /^-?[0-9]+$/ && $5 ~ /^[0-9]+%$/ { print $4 }
+    ')
+    if [ "$available" -lt "$minimum" ] 2>/dev/null; then
+      echo "dss:error: Insufficient disk space for $path: $available MiB available; require $minimum MiB. Free space or review MIN_FREE_DISK_MIB; export SKIP_DISK_SPACE_CHECK=true to bypass." >&2
+      return 1
+    fi
+    if ! [ "$available" -ge "$minimum" ] 2>/dev/null; then
+      echo "dss:error: Cannot read available disk space for $path from df -Pm." >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
 function upgrade_precondition_checks() {
+  check_disk_space || return 1
   local ret=0
   # e.g. 3.12.1
   if uname -r | grep -qai '^[12]'; then
@@ -727,7 +814,7 @@ function upgrade_precondition_checks() {
   fi
 
   if [ -f /etc/debian_version ]; then
-    apt_sources_check "$1" || ret=1
+    apt_sources_check_releases_and_vendors "$1" || ret=1
   fi
   [ "$ret" -eq 0 ] && echo "dss:trace:upgrade_precondition_checks completed."
   [ "$ret" -ne 0 ] && echo "dss:error:upgrade precondition checks failed." >&2
@@ -780,6 +867,134 @@ function add_missing_debian_keys() {
   fi
   HAS_INSTALLED_KEYS=Y
 
+  return 0
+}
+
+# Output installed/unpacked blockers only; removed packages with residual configs do not block.
+function upgrade_output_incompatible_packages() {
+  local family=$1 current=$2 target=$3 dovecot=false fail2ban=false packages
+  case "$family" in
+    debian)
+      if is_distro_name_older "$current" wheezy && ! is_distro_name_older "$target" wheezy; then dovecot=true; fi
+      if is_distro_name_older "$current" stretch && ! is_distro_name_older "$target" stretch; then fail2ban=true; fi
+      [ "$target" = trixie ] && [ -z "$IGNORE_DOVECOT_ERROR" ] && dovecot=true
+      ;;
+    ubuntu)
+      if is_distro_name_older "$current" xenial && ! is_distro_name_older "$target" xenial; then dovecot=true; fi
+      if is_distro_name_older "$current" bionic && ! is_distro_name_older "$target" bionic; then fail2ban=true; fi
+      if is_distro_name_older "$current" questing && ! is_distro_name_older "$target" questing && [ -z "$IGNORE_DOVECOT_ERROR" ]; then
+        dovecot=true
+      fi
+      ;;
+    *) return 1;;
+  esac
+  $dovecot || $fail2ban || return 0
+  packages=$(dpkg-query -W -f='${Status}\t${Package}\n') || return 1
+  # Status example: install ok installed<TAB>dovecot-imapd. Include half-configured packages.
+  printf '%s\n' "$packages" | awk -F '\t' -v dovecot="$dovecot" -v fail2ban="$fail2ban" '
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ &&
+      ((dovecot == "true" && $2 ~ /^dovecot($|-)/) || (fail2ban == "true" && $2 == "fail2ban")) { print $2 }
+  '
+}
+
+# Config/state backups deliberately exclude mail stores and unrelated application data.
+function upgrade_backup_incompatible_packages() {
+(
+  umask 077
+  local baseline=$1 family=$2 current=$3 target=$4 directory package path
+  shift 4
+  directory="${baseline}.purged-incompatible"
+  mkdir -p -- "$directory" && chmod u=rwx,go= -- "$directory" || return 1
+  directory=$(mktemp -d "$directory/$family-$current-to-$target.XXXXXX") || return 1
+  echo "dss:info: Backing up incompatible packages to $directory" >&2
+  printf '%s\n' "$@" > "$directory/packages.requested" || return 1
+  printf '%s\n' "$family $current -> $target" > "$directory/transition" || return 1
+  : > "$directory/archive-paths" || return 1
+  for package in "$@"; do
+    dpkg-query -W -f='${Status}\t${Package}\t${Version}\t${Architecture}\n' "$package" > "$directory/$package.status" || return 1
+    dpkg-query -L "$package" > "$directory/$package.files" || return 1
+    dpkg-query -W -f='${Conffiles}\n' "$package" > "$directory/$package.conffiles" || return 1
+    # Keep package manifests as well as custom files beneath each service's config/state roots.
+    while read -r path _; do
+      case "$path" in "/etc/"*) [ ! -e "$path" ] && [ ! -L "$path" ] && continue;; *) continue;; esac
+      printf '%s\0' "${path#/}" >> "$directory/archive-paths" || return 1
+    done < "$directory/$package.conffiles"
+  done
+  for path in "/etc/fail2ban" "/var/lib/fail2ban" "/etc/dovecot" "/var/lib/dovecot" "/var/lib/ucf/hashfile" "/var/lib/ucf/registry"; do
+    case "$path" in
+      *fail2ban*) case " $* " in *' fail2ban '*) :;; *) continue;; esac;;
+      *dovecot*) case " $* " in *' dovecot'* ) :;; *) continue;; esac;;
+    esac
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    printf '%s\0' "${path#/}" >> "$directory/archive-paths" || return 1
+  done
+  # Do not dereference symlinks into mail stores or other data; retain links for manual review.
+  tar -C / -czpf "$directory/config-state.tar.gz" --null -T "$directory/archive-paths" || return 1
+  if command -v doveconf >/dev/null 2>&1; then
+    doveconf -n > "$directory/doveconf.txt" 2>&1
+    printf '%s\n' "$?" > "$directory/doveconf.status" || return 1
+  fi
+  printf '%s\n' "$directory"
+)
+}
+
+function upgrade_check_incompatible_packages() {
+  local family=$1 current=$2 target=$3 purge=${PURGE_INCOMPATIBLE_PACKAGES-false}
+  local listed baseline backup plan status package
+  local -a packages=()
+  case "$purge" in
+    true|false) :;;
+    *) echo "dss:error: PURGE_INCOMPATIBLE_PACKAGES must be true or false." >&2; return 1;;
+  esac
+  listed=$(upgrade_output_incompatible_packages "$family" "$current" "$target") || return 1
+  [ -n "$listed" ] || return 0
+  while IFS= read -r package; do packages+=("$package"); done <<< "$listed"
+  if ! $purge; then
+    case " $listed " in *fail2ban*) print_uninstall_fail2ban;; esac
+    if printf '%s\n' "$listed" | grep -q '^dovecot'; then
+      if [ "$target" = trixie ] || { [ "$family" = ubuntu ] && ! is_distro_name_older "$target" questing; }; then
+        echo "dss:error: Dovecot 2.4 requires config migration. Export IGNORE_DOVECOT_ERROR=Y only after manual migration review." >&2
+      else
+        print_uninstall_dovecot
+      fi
+    fi
+    echo "dss:error: Upgrade $current to $target blocked by: ${packages[*]}. Set PURGE_INCOMPATIBLE_PACKAGES=true to back up and purge them; services remain removed until manual reinstall." >&2
+    return 1
+  fi
+  # Validate the other upgrade conditions before stopping services or removing their packages.
+  upgrade_precondition_checks "$target" || return 1
+  record_config_state || return 1
+  baseline=$(config_state_output_baseline) || return 1
+  backup=$(upgrade_backup_incompatible_packages "$baseline" "$family" "$current" "$target" "${packages[@]}") || {
+    echo "dss:error: Incompatible-package backup failed; no purge attempted." >&2; return 1;
+  }
+  plan=$(LC_ALL=C apt-get $APT_GET_INSTALL_OPTIONS -o APT::Get::AutomaticRemove=false --simulate purge "${packages[@]}" 2>&1)
+  status=$?
+  (umask 077; printf '%s\n' "$plan" > "$backup/purge-plan.txt") || return 1
+  [ "$status" -eq 0 ] || { echo "dss:error: Purge simulation failed; see $backup/purge-plan.txt." >&2; return "$status"; }
+  # APT may otherwise remove reverse dependencies. Permit only the named blockers, with no installs.
+  if ! printf '%s\n' "$plan" | awk -v packages="${packages[*]}" '
+    BEGIN { count=split(packages, selected, " "); for (i=1; i<=count; i++) allowed[selected[i]]=1 }
+    /^(Remv|Purg) / { name=$2; sub(/:.*/, "", name); if (!(name in allowed)) bad=1; removed[name]=1 }
+    /^Inst / { bad=1 }
+    END { for (name in allowed) if (!(name in removed)) bad=1; exit bad }
+  '; then
+    echo "dss:error: Purge would change packages beyond the selected blockers; review $backup/purge-plan.txt. No purge attempted." >&2
+    return 1
+  fi
+  apt_state_healthy=''
+  apt_state_upgraded=''
+  apt_state_dist_upgraded=''
+  (umask 077; : > "$backup/purge.log") || return 1
+  LC_ALL=C apt-get $APT_GET_INSTALL_OPTIONS -o APT::Get::AutomaticRemove=false purge "${packages[@]}" 2>&1 | tee "$backup/purge.log"
+  local -a result=("${PIPESTATUS[@]}")
+  if [ "${result[0]}" -ne 0 ] || [ "${result[1]}" -ne 0 ]; then
+    echo "dss:error: Purge failed; upgrade stopped. Backup: $backup. Review package state before retrying." >&2
+    [ "${result[0]}" -ne 0 ] && return "${result[0]}"
+    return 1
+  fi
+  mv -- "$backup/packages.requested" "$backup/packages.purged" || return 1
+  echo "dss:warn: Purged incompatible packages: ${packages[*]}. Backup: $backup. Reinstall manually after upgrading: apt-get install ${packages[*]}" >&2
   return 0
 }
 
@@ -1052,9 +1267,132 @@ function rm_overwrite_files() {
   return 0
 }
 
+# Reuse work only within this invocation; never persist success across script runs.
+apt_state_updated=
+apt_state_healthy=
+apt_state_upgraded=
+apt_state_dist_upgraded=
+
+# Local checks are cheaper than APT resolution/network work. A failed probe disables reuse.
+function apt_state_output_signature() {
+(
+  [ "${apt_state_cache_disabled:-false}" = false ] || return 1
+  [ -z "$APT_CONFIG$DPKG_ADMINDIR$DPKG_ROOT" ] || return 1
+  case "$APT_GET_INSTALL_OPTIONS" in *Dir::*|*--admindir*|*--root*|*--simulate*|*--download-only*|*--print-uris*) return 1;; esac
+  local kind=$1 config path sources keypaths binary metadata
+  set -o pipefail
+  config=$(apt-config dump) || return 1
+  # Custom roots can move inputs outside the paths inspected below; run normally there.
+  printf '%s\n' "$config" | awk -F '"' '
+    BEGIN {
+      expected["Dir"]="/"; expected["Dir::State"]="var/lib/apt"
+      expected["Dir::State::lists"]="lists/"; expected["Dir::State::status"]="/var/lib/dpkg/status"
+      expected["Dir::State::extended_states"]="extended_states"
+      expected["Dir::Cache"]="var/cache/apt"; expected["Dir::Cache::archives"]="archives/"
+      expected["Dir::Cache::pkgcache"]="pkgcache.bin"; expected["Dir::Cache::srcpkgcache"]="srcpkgcache.bin"
+      expected["Dir::Etc"]="etc/apt"; expected["Dir::Etc::sourcelist"]="sources.list"
+      expected["Dir::Etc::sourceparts"]="sources.list.d"; expected["Dir::Etc::main"]="apt.conf"
+      expected["Dir::Etc::parts"]="apt.conf.d"; expected["Dir::Etc::preferences"]="preferences"
+      expected["Dir::Etc::preferencesparts"]="preferences.d"
+      expected["Dir::Etc::trusted"]="trusted.gpg"; expected["Dir::Etc::trustedparts"]="trusted.gpg.d"
+    }
+    { key=$1; sub(/[ \t]+$/, "", key)
+      if ((key in expected) && $2 != expected[key] &&
+          !(key ~ /^Dir::Cache::(srcpkgcache|pkgcache)$/ && $2 == "")) bad=1
+      if (key == "RootDir" && $2 != "") bad=1
+    }
+    END { exit bad }
+  ' || return 1
+  sources=$(apt_sources_files) || return 1
+  {
+    printf '%s\n' "$config" "$APT_GET_INSTALL_OPTIONS"
+    dpkg --print-architecture || exit 1
+    dpkg --print-foreign-architectures || exit 1
+    for binary in apt-get apt-cache apt-config dpkg; do
+      path=$(command -v "$binary") || exit 1
+      [ -f "$path" ] || exit 1
+      stat -L -c '%n %i %s %y %z' -- "$path" || exit 1
+    done
+    for path in "/etc/apt" "/usr/share/keyrings"; do
+      if [ -e "$path" ]; then
+        find -L "$path" -maxdepth 2 -type f -exec cksum {} + || exit 1
+      else
+        printf 'absent:%s\n' "$path"
+      fi
+    done
+    # Signed-By may reference keys outside the normal keyring directories.
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      keypaths=$(awk '
+        {
+          text=$0
+          if (FILENAME ~ /\.sources$/) {
+            if ($0 ~ /^[^ \t#]/) signed=(tolower($0) ~ /^signed-by:/)
+            if (!signed) next
+            sub(/^[^:]+:/, "", text)
+          } else {
+            if (!match(tolower(text), /signed-by=[^] \t]+/)) next
+            text=substr(text,RSTART+10,RLENGTH-10)
+          }
+          gsub(/,/, " ", text); n=split(text,words,/[ \t]+/)
+          for (i=1;i<=n;i++) if (words[i] ~ /^\//) print words[i]
+        }
+      ' "$path") || exit 1
+      while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        cksum "$path" || exit 1
+      done <<< "$keypaths"
+    done <<< "$sources"
+    # Hash indexes with coarse ctimes; precise metadata avoids scanning large index contents.
+    if [ "$kind" = inputs ]; then :
+    elif [ -d "/var/lib/apt/lists" ]; then
+      find -L "/var/lib/apt/lists" -maxdepth 1 -type f ! -name lock -print0 |
+        while IFS= read -r -d '' path; do
+          metadata=$(stat -L -c '%n %i %s %y %z' -- "$path") || exit 1
+          printf '%s\n' "$metadata"
+          if [[ ! "$metadata" =~ \.[0-9]+[[:space:]][+-][0-9]+$ ]] ||
+              [[ "$metadata" =~ \.0+[[:space:]][+-][0-9]+$ ]]; then
+            cksum "$path" || exit 1
+          fi
+        done || exit 1
+    else
+      exit 1
+    fi
+    if [ "$kind" = packages ]; then
+      cksum "/var/lib/dpkg/status" || exit 1
+      for path in "/var/lib/dpkg/arch" "/var/lib/apt/extended_states"; do
+        if [ -e "$path" ]; then cksum "$path" || exit 1; else printf 'absent:%s\n' "$path"; fi
+      done
+      for path in "/var/lib/dpkg/updates" "/var/lib/dpkg/triggers"; do
+        if [ -e "$path" ]; then
+          find -L "$path" -maxdepth 1 -type f ! -name Lock ! -name lock -exec cksum {} + || exit 1
+        else
+          printf 'absent:%s\n' "$path"
+        fi
+      done
+    fi
+  } | LC_ALL=C sort | cksum
+)
+}
+
+function apt_state_repositories_are_current() {
+  local signature
+  [ -n "${apt_state_updated:-}" ] || return 1
+  signature=$(apt_state_output_signature repositories 2>/dev/null) || return 1
+  [ -n "$signature" ] && [ "$signature" = "$apt_state_updated" ]
+}
+
+function apt_state_record_healthy() {
+  apt_state_healthy=$(apt_state_output_signature packages 2>/dev/null) || apt_state_healthy=
+  return 0
+}
+
 function apt_get_remove() {
   pause_check
   local tmplog
+  apt_state_healthy=
+  apt_state_upgraded=
+  apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.aptgetremove.log.XXXXXX") || return 1
   apt-get $APT_GET_INSTALL_OPTIONS remove $@ | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
@@ -1070,12 +1408,16 @@ function apt_get_remove() {
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_remove $@ essential package issues for: $essentialissuepackages"
   echo "$essentialissuepackages" | egrep -qai 'libgcc-s1:i386' && echo "dss:warn: This issue may be related to this bug report: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=992317"
   rm -f "$tmplog"
+  if [ "$ret" -eq 0 ]; then apt_state_record_healthy; fi
   return $ret
 }
 
 function apt_get_install() {
   pause_check
   local tmplog
+  apt_state_healthy=
+  apt_state_upgraded=
+  apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.aptgetinstall.log.XXXXXX") || return 1
   apt-get $APT_GET_INSTALL_OPTIONS install $@ | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
@@ -1084,12 +1426,21 @@ function apt_get_install() {
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_install $@ essential package issues for: $essentialissuepackages"
 
   rm -f "$tmplog"
+  if [ "$ret" -eq 0 ]; then apt_state_record_healthy; fi
   return $ret
 }
 
 function apt_get_f_install() {
   pause_check
-  local tmplog
+  local tmplog signature
+  signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
+  if [ -n "$signature" ] && [ "$signature" = "${apt_state_healthy:-}" ]; then
+    echo "dss:trace:apt_get_f_install: dependency state already checked."
+    return 0
+  fi
+  apt_state_healthy=
+  apt_state_upgraded=
+  apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.aptgetfinstall.log.XXXXXX") || return 1
   apt-get $APT_GET_INSTALL_OPTIONS -f install | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
@@ -1117,14 +1468,18 @@ function apt_get_f_install() {
     dpkg -l  | egrep -v '^ii|^rc|^iU' | awk '{print "dss:warn:apt_get_f_install: " $0}'
     echo "dss:info: as a last resort you can move away the failed dpkg status files at /var/lib/dpkg/info/pkngname*"
   fi
+  if [ "$ret" -eq 0 ]; then apt_state_record_healthy; fi
   return $ret
 }
 
 function dpkg_install() {
   [  -z "$1" ] && return 0
   local tmplog
+  apt_state_healthy=
+  apt_state_upgraded=
+  apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.dpkginstall.log.XXXXXX") || return 1
-  dpkg --force-confnew --force-confdef --force-confmiss --install $@ 2>&1 | tee "$tmplog"
+  dpkg --force-confnew --force-confmiss --install $@ 2>&1 | tee "$tmplog"
   ret=${PIPESTATUS[0]}
   if [  $ret -eq 0 ]; then
     # dpkg: error processing archive /var/cache/apt/archives/bash_4.4-5_amd64.deb (--install):
@@ -1155,14 +1510,14 @@ function dpkg_install() {
     local failedinstalls=$(cat "$tmplog" | grep --after-context 50 'Errors were encountered while processing:' | sed 's/.*Errors were encountered while processing://' | grep '.deb')
     if [  ! -z "$failedinstalls" ]; then
       echo "dss:trace:dpkg_install: some .deb packages had issues.  retrying those: $failedinstalls"
-      dpkg --force-confnew --force-confdef --force-confmiss --install $failedinstalls
+      dpkg --force-confnew --force-confmiss --install $failedinstalls
       ret=$?
       echo "dss:trace:dpkg_install: retry install $([ $ret -eq 0 ] && echo "succeeded" || echo "failed")"
     fi
   fi
   if [ $ret -ne 0 ]; then
     echo "dss:trace:dpkg_install: some .deb packages had issues.  retrying to install all packages."
-    dpkg --force-confnew --force-confdef --force-confmiss --install $@  2>&1 | tee "$tmplog"
+    dpkg --force-confnew --force-confmiss --install $@  2>&1 | tee "$tmplog"
     ret=${PIPESTATUS[0]}
     if [  $ret -eq 0 ]; then
       egrep -qai 'Errors |pre-dependency problem|dpkg: error' "$tmplog" && ret=1 && echo "dss:warn: dpkg install lied about the return code(#2).  will need to retry the install."
@@ -1235,7 +1590,9 @@ function check_systemd_install_matches_init() {
 }
 
 function crossgrade_debian() {
+  local apt_state_cache_disabled=true
   [  ! -f /etc/debian_version ] && echo "dss:info: Only debian derived distro crossgrades are supported, but not $(print_distro_info)." && return 0
+  check_disk_space || return 1
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
 
@@ -1279,7 +1636,7 @@ function crossgrade_debian() {
   echo "dss:info: cross grading distro from 32 to 64 bit."
   local vimpkg="$(dpkg -l | grep '^.*ii' | grep -qai vim && echo vim)"
   local apachepkg="$(dpkg -l | grep '^.*ii' | grep -qai apache2-bin && echo apache2-bin)"
-  apt_get_update
+  apt_get_update || return 1
   apt_get_install apt-rdepends
 
   if [ $? -ne 0 ]; then
@@ -1297,7 +1654,7 @@ function crossgrade_debian() {
   [ $? -ne 0 ] && echo "dss:error: Failed adding amd64 architecture." 2>&1 && return 1
 
   # needed to load amd package info.  e.g. on debian.
-  apt_get_update
+  apt_get_update || return 1
   #apt-get $APT_GET_INSTALL_OPTIONS autoremove
 
   apt-get $APT_GET_INSTALL_OPTIONS --allow-downgrades upgrade
@@ -1326,7 +1683,8 @@ function crossgrade_debian() {
     [  $? -ne 0 ] && apt-get download perl-base:amd64
     apt-get --reinstall --download-only $APT_GET_INSTALL_OPTIONS install perl:amd64 perl:i386
     [  $? -ne 0 ] && apt-get download perl:amd64
-    requiredlist="$(apt-rdepends apt apt-listchanges| grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}')"
+    # apt-rdepends can emit python3:any; replace its qualifier, not python3:any:amd64.
+    requiredlist="$(apt-rdepends apt apt-listchanges| grep -v "^ "|grep -v "libc-dev" | awk -F: '{print $1":amd64"}')"
     echo "dss:trace: cross grading.  doing a 'download only' on $requiredlist."
     for i in $requiredlist; do apt-get --reinstall --download-only  $APT_GET_INSTALL_OPTIONS install $i; done
      dpkg -l | grep ii | grep -v lib | awk '{print $2}' | grep -v "^ "|grep -v "libc-dev" | awk '{print $0":amd64"}'
@@ -1729,6 +2087,57 @@ function remove_cruft_packages() {
    return $ret
 }
 
+# Report from existing indexes only; this deliberately does not use the mutating cruft helpers.
+function print_installed_packages_without_available_versions() {
+(
+  [ -f /etc/debian_version ] || return 0
+  umask 077
+  set -o pipefail
+  local directory native architecture package _installed_arch _version query_arch
+  native=$(dpkg --print-architecture) || return 1
+  directory=$(mktemp -d) || return 1
+  trap 'rm -rf -- "$directory"' EXIT
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n' > "$directory/status" || return 1
+  # package<TAB>installed architecture<TAB>version<TAB>query architecture; 'all' uses native indexes.
+  awk -F '\t' -v OFS='\t' -v native="$native" '
+    $1 ~ / installed$/ { print $2, $3, $4, ($3 == "all" ? native : $3) }
+  ' "$directory/status" > "$directory/installed" || return 1
+  : > "$directory/available" || return 1
+  local architectures
+  architectures=$(awk -F '\t' '{ print $4 }' "$directory/installed" | sort -u) || return 1
+  for architecture in $architectures; do
+    : > "$directory/query" || return 1
+    while IFS=$'\t' read -r package _installed_arch _version query_arch; do
+      [ "$query_arch" = "$architecture" ] || continue
+      if [ "$architecture" = "$native" ]; then
+        printf '%s\0' "$package"
+      else
+        printf '%s\0' "$package:$architecture"
+      fi
+    done < "$directory/installed" > "$directory/query" || return 1
+    # Bound argv size; cache files remain untouched. Madison may also print Sources rows.
+    if ! LC_ALL=C xargs -0 -r -n 256 apt-cache -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= madison < "$directory/query" > "$directory/madison"; then
+      echo "dss:error: Cannot assess installed package availability from existing APT indexes; no packages were changed." >&2
+      return 1
+    fi
+    # Madison example: package:i386 | version | URI suite/component i386 Packages
+    awk -F '|' -v OFS='\t' -v architecture="$architecture" '
+      $3 ~ / Packages[ \t]*$/ {
+        name=$1; gsub(/^[ \t]+|[ \t]+$/, "", name); sub(/:.*/, "", name)
+        if (name != "") print name, architecture
+      }
+    ' "$directory/madison" >> "$directory/available" || return 1
+  done
+  # A missing name/architecture is a migration hint, not a support or vulnerability assessment.
+  awk -F '\t' '
+    FILENAME == ARGV[1] { available[$1 SUBSEP $2]=1; next }
+    !(($1 SUBSEP $4) in available) {
+      print "dss:warn: Installed package " $1 ":" $2 " (" $3 ") has no versions in active APT indexes. Review manually and migrate if needed; package preserved."
+    }
+  ' "$directory/available" "$directory/installed"
+)
+}
+
 function print_no_available_versions() {
   [ ! -f /etc/debian_version ] && return 0
   [ ! -x /usr/bin/apt-show-versions ] && echo "dss:error:apt-show-versions is not installed." >&2 && return 1
@@ -1996,6 +2405,42 @@ exit 0' > $i
   return 0
 }
 
+# Release metadata can change before dpkg finishes; checking the codename alone is insufficient.
+function debian_check_release_completion() {
+  local target=$1 current audit plan apt_sources_transition_target=''
+  current=$(distro_output_codename) || return 1
+  case " $ALL_DEBIAN " in *" $current "*) :;; *) echo "dss:error: Expected a Debian release when checking completion." >&2; return 1;; esac
+  if is_distro_name_newer "$current" "$target"; then return 0; fi
+  if [ "$current" != "$target" ]; then
+    echo "dss:error: Requested Debian $target has not been reached; installed release is $current." >&2
+    return 1
+  fi
+  # This check must remain read-only: do not run upgrade_precondition_checks (REMOVEX11 can remove packages).
+  apt_sources_check_releases_and_vendors || return 1
+  if ! audit=$(LC_ALL=C dpkg --audit 2>&1); then
+    printf '%s\n' "$audit" >&2
+    echo "dss:error: Cannot verify Debian $target package state. Review dpkg errors, repair with --dist-update, then retry the release command." >&2
+    return 1
+  fi
+  if [ -n "$audit" ]; then
+    printf '%s\n' "$audit" >&2
+    echo "dss:error: Debian $target still has incomplete package work. Review dpkg errors, repair with --dist-update, then retry the release command." >&2
+    return 1
+  fi
+  if ! plan=$(LC_ALL=C apt-get -s dist-upgrade 2>&1); then
+    printf '%s\n' "$plan" >&2
+    echo "dss:error: Cannot verify Debian $target upgrade completion. Review APT errors, repair with --dist-update, then retry the release command." >&2
+    return 1
+  fi
+  # Jessie APT documents these simulated dpkg action records; no indexes are refreshed here.
+  if printf '%s\n' "$plan" | grep -Eq '^(Inst|Conf|Remv|Purg) '; then
+    printf '%s\n' "$plan" >&2
+    echo "dss:error: Debian $target still has pending package changes. Review the plan, complete --dist-update, then retry the release command." >&2
+    return 1
+  fi
+  return 0
+}
+
 function dist_upgrade_x_to_y() {
 pause_check
 [ ! -f /etc/debian_version ] && return 0
@@ -2008,22 +2453,11 @@ if [ "$current" != "$old_distro" ]; then
   return 0
 fi
 
-if is_distro_name_older "$old_distro" "squeeze"; then
-  if dpkg -l | grep -qai '^i.*dovecot'; then
-    print_uninstall_dovecot
-    return 1
-  fi
-fi
+check_disk_space || return 1
+
 if [ "$old_distro" == "lenny" ]; then
   add_missing_debian_keys
   [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
-fi
-
-if is_distro_name_older "$old_distro" "stretch"; then
-  if dpkg -l | grep -qai '^i.*fail2ban'; then
-    print_uninstall_fail2ban
-    return 1
-  fi
 fi
 
 if [ "$new_distro" = trixie ]; then
@@ -2033,12 +2467,9 @@ if [ "$new_distro" = trixie ]; then
     echo "dss:error: Debian 13 cannot upgrade native $arch; migrate or crossgrade before proceeding." >&2
     return 1;;
   esac
-  if dpkg -l | grep -qai '^i.*dovecot'; then
-    echo "dss:warn: Dovecot 2.4 requires config migration: https://doc.dovecot.org/main/installation/upgrade/2.3-to-2.4.html. Export IGNORE_DOVECOT_ERROR=Y after review." >&2
-    [ -z "$IGNORE_DOVECOT_ERROR" ] && return 1
-  fi
 fi
 
+upgrade_check_incompatible_packages debian "$old_distro" "$new_distro" || return $?
 upgrade_precondition_checks "$new_distro" || return 1
 apt_sources_prepare || return 1
 if [ "$new_distro" = trixie ]; then check_usrmerge || return 1; fi
@@ -2048,12 +2479,12 @@ fix_missing_lsb_release || return 1
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_upgrade:old:$old_distro:new:$new_distro"
 apt_get_upgrade
 local ret=$?
-apt-get clean
-apt-get $APT_GET_INSTALL_OPTIONS autoremove
 if [ $ret -ne 0 ]; then
   echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_x_to_y:${old_distro}_to_${new_distro}"
   return 1
 fi
+apt-get clean
+apt-get $APT_GET_INSTALL_OPTIONS autoremove
 
 apt_sources_upgrade debian "$old_distro" "$new_distro" || return 1
 apt_get_update || return 1
@@ -2061,8 +2492,8 @@ apt_get_update || return 1
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 apt_get_dist_upgrade
 ret=$?
-apt-get $APT_GET_INSTALL_OPTIONS  autoremove
 if [ $ret -eq 0 ]; then
+  apt-get $APT_GET_INSTALL_OPTIONS autoremove
   echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
 	if lsb_release -a 2>/dev/null| egrep -qai "${new_distro}|${new_ver:-xxxxx}"; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
@@ -2147,23 +2578,25 @@ function print_minimal_config_diff() {
 }
 function print_config_state_changes() {
   prepare_output_dir
+  local availability_ret=0
+  print_installed_packages_without_available_versions || availability_ret=$?
   local now=$(date +%s)
-  record_config_state /root/distrorejuveinfo/postupgrade.dpkg.$now
+  record_config_state "/root/distrorejuveinfo/postupgrade.dpkg.$now"
   # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
   local fromfile="${1}"
   if [  -z "$fromfile" ]; then
-    fromfile="$(find /root/distrorejuveinfo/ /root/deghostinfo/ -mtime -${DAYS_UPGRADE_ONGOING} 2>/dev/null | grep preupgrade)"
-    [  ! -z "$fromfile" ] && fromfile="$(ls -1rt $fromfile | head -n 1)"
+    fromfile=$(config_state_output_baseline) || fromfile=
   fi
   [ -z "$fromfile" ] && fromfile=/root/distrorejuveinfo/preupgrade.dpkg.$$
   # no prior changes just yet.
-  [  ! -f  "$fromfile" ] && return 0
+  [  ! -f  "$fromfile" ] && return "$availability_ret"
+  print_incompatible_package_changes "$fromfile"
   # dpkg-new is used on unpack prior to choosing dpkg-dist or overwriting.
   echo "dss:info: Config changes to check.  e.g. different processes after upgrade.  e.g. different ports.  e.g. different apache status output.  e.g. changes to dpkg-old/dpkg-dist files.  dpkg-old = your files that were not used.  dpkg-dist = distro files that were not used."
-  print_minimal_config_diff $fromfile /root/distrorejuveinfo/postupgrade.dpkg.$now | awk '{print "dss:configdiff:statechanges:" $0}'
+  print_minimal_config_diff "$fromfile" "/root/distrorejuveinfo/postupgrade.dpkg.$now" | awk '{print "dss:configdiff:statechanges:" $0}'
 
   # ucf-dist = backup of what was there before dist upgrade
-  local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
+  local files=$(find "/etc" -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
   [  -z "$files" ] && echo "dss:info: Looks like the server is using all distro-provided config files (no local overrides).  That makes it easy."
   [ ! -z "$files" ] && echo "dss:info:key: How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files?"
   for file in $files; do
@@ -2188,95 +2621,200 @@ function print_config_state_changes() {
   for file in $nonconfsitefiles; do
     echo "dss:warn: Apache config file '$file' should have a .conf extension: mv $file $file.conf;a2ensite $(basename $file).conf"
   done
-  return 0
+  return "$availability_ret"
+}
+
+# Keep purge reminders attached to the same oldest recent baseline used for configuration diffs.
+function config_state_output_baseline() {
+  local file baseline='' days=${DAYS_UPGRADE_ONGOING:-7}
+  case "$days" in *[!0-9]*|'') echo "dss:error: DAYS_UPGRADE_ONGOING must be a positive integer." >&2; return 1;; esac
+  [ "$days" -gt 0 ] || return 1
+  for file in "/root/distrorejuveinfo/"*preupgrade* "/root/deghostinfo/"*preupgrade*; do
+    [ -f "$file" ] || continue
+    [ -n "$(find "$file" -maxdepth 0 -mtime "-$days" -print)" ] || continue
+    if [ -z "$baseline" ] || [ "$file" -ot "$baseline" ]; then baseline=$file; fi
+  done
+  [ -n "$baseline" ] || return 1
+  printf '%s\n' "$baseline"
+}
+
+function print_incompatible_package_changes() {
+  local baseline=$1 manifest package backup confirmed
+  for manifest in "$baseline.purged-incompatible/"*/packages.purged "$baseline.purged-incompatible/"*/packages.requested; do
+    [ -f "$manifest" ] || continue
+    backup=${manifest%/*}
+    confirmed=false
+    case "$manifest" in
+      */packages.purged) confirmed=true;;
+      *) [ -f "$backup/packages.purged" ] && continue;;
+    esac
+    while IFS= read -r package; do
+      if $confirmed; then
+        echo "dss:warn: Package purged before upgrading: $package. Backup: $backup. Reinstall manually if needed: apt-get install $package"
+      else
+        echo "dss:warn: Purge completion unconfirmed for selected package: $package. Backup/attempt directory: $backup. Review package state before manual reinstall: apt-get install $package"
+      fi
+    done < "$manifest"
+  done
 }
 
 function record_config_state() {
   prepare_output_dir
   local file=$1
   if [ -z "$file" ]; then
-    file="/root/distrorejuveinfo/preupgrade.dpkg.$$"
+    if ! file=$(config_state_output_baseline); then
+      file="/root/distrorejuveinfo/preupgrade.dpkg.$$"
+      [ -e "$file" ] && file="$file.$(date +%s)"
+    fi
   fi
   # don't overwrite the preupgrade file
-  echo $file | grep -qai preupgrade && [ -f $file ] && return 0
+  echo "$file" | grep -qai preupgrade && [ -f "$file" ] && return 0
   echo "dss:trace:record_config_state:$file"
-  local files=$(find /etc -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
-  > $file
+  local files=$(find "/etc" -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
+  > "$file" || return 1
   # conf files
-  echo "Date: $(date)" >> $file
-  [ ! -z "$files" ] && ls -lrt $files | awk '{print "configfiles:" $0}' > $file
-  echo "Listening ports:" >> $file
-  echo "" >> $file
+  echo "Date: $(date)" >> "$file"
+  [ ! -z "$files" ] && ls -lrt $files | awk '{print "configfiles:" $0}' > "$file"
+  echo "Listening ports:" >> "$file"
+  echo "" >> "$file"
   # listening ports
   # Listen ports: 0.0.0.0:995 dovecot
-  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 3 | uniq >> $file
-  echo "Apache vhosts:" >> $file
-  echo "" >> $file
-  print_distro_info >> $file
+  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 3 | uniq >> "$file"
+  echo "Apache vhosts:" >> "$file"
+  echo "" >> "$file"
+  print_distro_info >> "$file"
   # vhosts
-  [ -x /usr/sbin/apache2ctl ] && /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> $file
-  echo "" >> $file
-  echo "Running processes:" >> $file
-  echo "" >> $file
-  ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' | egrep -v '^process: \[|COMMAND|init' | sort | uniq >> $file
+  [ -x /usr/sbin/apache2ctl ] && /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> "$file"
+  echo "" >> "$file"
+  echo "Running processes:" >> "$file"
+  echo "" >> "$file"
+  ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' | egrep -v '^process: \[|COMMAND|init' | sort | uniq >> "$file"
 
-  [  -x /usr/bin/dpkg ] && echo "Installed packages:" >> $file && dpkg -l | grep '^ii' | awk '{print $2}' | sed 's/:.*//' | sort | grep -v '^lib' | awk '{ print "installed: " $0 }' >> $file
+  [  -x /usr/bin/dpkg ] && echo "Installed packages:" >> "$file" && dpkg -l | grep '^ii' | awk '{print $2}' | sed 's/:.*//' | sort | grep -v '^lib' | awk '{ print "installed: " $0 }' >> "$file"
   return 0
 }
 
 function apt_get_update() {
 pause_check
-local tmplog
+local tmplog signature completed inputs current_inputs warning_status
+signature=$(apt_state_output_signature repositories 2>/dev/null) || signature=
+if [ -n "$signature" ] && [ "$signature" = "${apt_state_updated:-}" ]; then
+  ret=0
+  echo "dss:trace:apt_get_update: indexes already refreshed for these repositories."
+  return 0
+fi
+inputs=$(apt_state_output_signature inputs 2>/dev/null) || inputs=
+apt_state_updated=
+apt_state_upgraded=
+apt_state_dist_upgraded=
 tmplog=$(mktemp "tmplog.aptgetupdate.log.XXXXXX") || return 1
 apt-get $APT_GET_INSTALL_OPTIONS update 2>&1 | tee "$tmplog"
 ret=${PIPESTATUS[0]}
 
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
-if [ $ret -ne 0 ]; then apt-get -o Acquire::ForceIPv4=true  -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false  update; ret=$?; fi
+if [ "$ret" -ne 0 ]; then
+  local -a release_options=()
+  # E: Repository 'URI suite InRelease' changed its 'Suite' value from 'stable' to 'oldstable'
+  # Quoted fields 6/8 must age together in EVERY repository, preserving pocket suffixes.
+  # https://manpages.debian.org/trixie/apt/apt-get.8.en.html#allow-releaseinfo-change
+  if awk -F"'" '
+    /^E: Repository / && $4 == "Suite" {
+      found=1
+      if ($6 !~ /^(stable|oldstable)(-(updates|security))?$/ || $8 != "old" $6) bad=1
+    }
+    END { exit (!found || bad) }
+  ' "$tmplog"; then
+    echo "dss:info: Retrying APT update with Suite aging accepted; other release metadata checks remain enabled."
+    release_options=(-o Acquire::AllowReleaseInfoChange::Suite=true)
+  fi
+  apt-get -o Acquire::ForceIPv4=true -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false "${release_options[@]}" update 2>&1 | tee -a "$tmplog"
+  ret=${PIPESTATUS[0]}
+fi
 
 # https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.html#non-free-split
 if egrep -qai "Repository 'Debian bookworm' changed its 'non-free component' value from 'non-free' to 'non-free non-free-firmware'" "$tmplog" && [ -d /etc/apt/apt.conf.d/ ]; then
   echo "dss:info: disabling the warning around non-free/non-free-firmware per /etc/apt/apt.conf.d/no-bookworm-firmware.conf and https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.html#non-free-split" && echo 'APT::Get::Update::SourceListWarnings::NonFreeFirmware "false";' > /etc/apt/apt.conf.d/no-bookworm-firmware.conf
 fi
 
+# A stale APT::Default-Release can break package selection even after a good update.
+if [ "$ret" -eq 0 ]; then
+  apt-cache policy >/dev/null
+  ret=$?
+  [ "$ret" -ne 0 ] && echo "dss:error: APT policy is invalid. Review APT::Default-Release (apt-config dump) and release pins before retrying; policy files were not changed." >&2
+fi
+# Exit-zero partial downloads/warnings must not suppress the next update attempt.
+grep -Eq '^[WE]:' "$tmplog"
+warning_status=$?
+if [ "$ret" -eq 0 ] && [ "$warning_status" -eq 1 ]; then
+  completed=$(apt_state_output_signature repositories 2>/dev/null) || completed=
+  current_inputs=$(apt_state_output_signature inputs 2>/dev/null) || current_inputs=
+  # Post-update hooks must not change repository inputs underneath a successful refresh.
+  if [ -n "$inputs" ] && [ "$inputs" = "$current_inputs" ] && [ -n "$completed" ]; then
+    apt_state_updated=$completed
+  fi
+fi
 rm -f "$tmplog"
 [ "$ret" -ne 0 ] && echo "dss:error:apt_get_update failed." >&2
 return $ret
 }
 
 function apt_get_upgrade() {
-pause_check
-[ ! -f /etc/debian_version ] && return 0
-[ -e /etc/redhat-release ] && return 0
-upgrade_precondition_checks || return $?
-echo "dss:trace:apt_get_upgrade"
-
-apt_sources_archive || return 1
-apt_get_update || return 1
-record_config_state
-dpkg --configure -a --force-confnew --force-confdef --force-confmiss
-apt-get $APT_GET_INSTALL_OPTIONS autoremove
-apt_get_f_install
-echo "dss:info: running an apt-get upgrade"
-apt-get $APT_GET_INSTALL_OPTIONS --allow-downgrades upgrade
-ret=$?
-apt-get $APT_GET_INSTALL_OPTIONS autoremove
-apt_get_f_install
-if [ $ret -ne 0 ]; then
-  echo "dss:info: apt-get upgrade failed.  trying a dist-ugprade..."
-  apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
-  ret=$?
-  if [ $ret -eq 0 ]; then
-    echo "dss:info: apt-get dist-upgrade succeeded when a upgrade failed."
+  pause_check
+  [ ! -f /etc/debian_version ] && return 0
+  [ -e /etc/redhat-release ] && return 0
+  upgrade_precondition_checks || return $?
+  apt_sources_archive || return 1
+  apt_get_update || return 1
+  local signature completed current operation_ret cacheable=true
+  signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
+  if apt_state_repositories_are_current && [ -n "$signature" ] && [ "$signature" = "${apt_state_upgraded:-}" ]; then
+    ret=0
+    echo "dss:trace:apt_get_upgrade: packages already upgraded for this state."
     return 0
-  else
-    echo "dss:warn: apt-get upgrade/dist-upgrade failed."
-    return 1
   fi
-fi
-apt-get clean
-[ "$ret" -ne 0 ] && echo "dss:error:apt_get_upgrade failed." >&2
-return $ret
+  apt_state_upgraded=
+  apt_state_dist_upgraded=
+  echo "dss:trace:apt_get_upgrade"
+  record_config_state
+  if ! dpkg --configure -a --force-confnew --force-confmiss; then
+    cacheable=false; apt_state_healthy=
+  fi
+  if ! apt-get $APT_GET_INSTALL_OPTIONS autoremove; then cacheable=false; apt_state_healthy=; fi
+  apt_get_f_install || cacheable=false
+  echo "dss:info: running an apt-get upgrade"
+  apt_state_healthy=
+  apt-get $APT_GET_INSTALL_OPTIONS upgrade
+  operation_ret=$?
+  if [ "$operation_ret" -eq 0 ]; then
+    completed=$(apt_state_output_signature packages 2>/dev/null) || completed=
+    $cacheable && apt_state_healthy=$completed
+  else
+    cacheable=false
+  fi
+  if ! apt-get $APT_GET_INSTALL_OPTIONS autoremove; then cacheable=false; apt_state_healthy=; fi
+  apt_get_f_install || cacheable=false
+  if [ "$operation_ret" -ne 0 ]; then
+    echo "dss:info: apt-get upgrade failed. trying a dist-upgrade..."
+    apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
+    operation_ret=$?
+    if [ "$operation_ret" -eq 0 ]; then
+      echo "dss:info: apt-get dist-upgrade succeeded when an upgrade failed."
+      ret=0
+      return 0
+    else
+      echo "dss:warn: apt-get upgrade/dist-upgrade failed."
+      ret=1
+      return 1
+    fi
+  fi
+  apt-get clean || cacheable=false
+  current=$(apt_state_output_signature packages 2>/dev/null) || current=
+  if $cacheable && apt_state_repositories_are_current && [ -n "$completed" ] && [ "$completed" = "$current" ] &&
+      [ "$completed" = "${apt_state_healthy:-}" ]; then
+    apt_state_upgraded=$completed
+  fi
+  ret=$operation_ret
+  return "$ret"
 }
 
 function plesk_upgrade() {
@@ -2289,48 +2827,71 @@ function plesk_upgrade() {
 }
 
 function apt_get_dist_upgrade() {
-pause_check
-[ ! -f /etc/debian_version ] && return 0
-upgrade_precondition_checks || return $?
-echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
-apt_get_upgrade || return 1
-echo "dss:trace:apt_get_dist_upgrade"
-apt_get_f_install
-apt_get_install dpkg
-apt-get  $APT_GET_INSTALL_OPTIONS  autoremove
-apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
-# cope with 'one of those random things'
-# E: Could not perform immediate configuration on 'python-minimal'.Please see man 5 apt.conf under APT::Immediate-Configure for details. (2)
-if [ $? -ne 0 ] && apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
-  apt-get -f $APT_GET_INSTALL_OPTIONS install libc6-dev
-  apt-get dist-upgrade -f -o APT::Immediate-Configure=0 $APT_GET_INSTALL_OPTIONS
-fi
-[ -e /var/log/syslog ] && [ -e /etc/my/my.cnf ] && if grep "unknown variable 'lc-messages-dir" /var/log/syslog; then
-  #lc-messages-dir        = /usr/share/mysql...
-  echo "dss: info: commenting out the my.cnf lc-messages-dir directive in case it is causing problems"
-  sed -i "s@^lc-messages-dir\(.*\)@#lc-messages-dir\1@" /etc/my/my.cnf
-fi
-
-dpkg --configure -a --force-confnew --force-confdef --force-confmiss
-apt-get $APT_GET_INSTALL_OPTIONS autoremove
-apt-get -y autoclean
-apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
-ret=$?
-if [ $ret -ne 0 ] ; then
-  echo "dss:warn: Got an error after an apt-get dist-upgrade.  trying an apt-get -f install"
-  apt_get_f_install
-  apt-get  $APT_GET_INSTALL_OPTIONS  dist-upgrade
-  ret=$?
-  if [ $ret -ne 0 ] ; then
-    check_systemd_install_matches_init
-    echo "dss:error: Got an error after an apt-get dist-upgrade"
+  pause_check
+  [ ! -f /etc/debian_version ] && return 0
+  upgrade_precondition_checks || return $?
+  local signature completed current first_ret upgrade_ret cacheable=true
+  signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
+  if apt_state_repositories_are_current && [ -n "$signature" ] && [ "$signature" = "${apt_state_dist_upgraded:-}" ]; then
+    ret=0
+    echo "dss:trace:apt_get_dist_upgrade: packages already upgraded for this state."
+    return 0
   fi
-fi
-# report -dist or -old file changes
-tweak_broken_configs
-echo "dss:trace:apt_get_dist_upgrade completed $(print_distro_info).  ret=$ret"
-
-return $ret
+  apt_state_dist_upgraded=
+  echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
+  apt_get_upgrade || return 1
+  echo "dss:trace:apt_get_dist_upgrade"
+  apt_get_f_install || cacheable=false
+  apt_get_install dpkg || cacheable=false
+  if ! apt-get $APT_GET_INSTALL_OPTIONS autoremove; then cacheable=false; apt_state_healthy=; fi
+  apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
+  first_ret=$?
+  # Keep recovery retries unconditional after a failure, including immediate-configuration workarounds.
+  if [ "$first_ret" -ne 0 ]; then
+    cacheable=false; apt_state_healthy=
+    if apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
+      apt-get -f $APT_GET_INSTALL_OPTIONS install libc6-dev
+      apt-get dist-upgrade -f -o APT::Immediate-Configure=0 $APT_GET_INSTALL_OPTIONS
+    fi
+  fi
+  [ -e /var/log/syslog ] && [ -e /etc/my/my.cnf ] && if grep "unknown variable 'lc-messages-dir" /var/log/syslog; then
+    echo "dss: info: commenting out the my.cnf lc-messages-dir directive in case it is causing problems"
+    sed -i "s@^lc-messages-dir\(.*\)@#lc-messages-dir\1@" /etc/my/my.cnf
+  fi
+  if ! dpkg --configure -a --force-confnew --force-confmiss; then
+    cacheable=false; apt_state_healthy=
+  fi
+  if ! apt-get $APT_GET_INSTALL_OPTIONS autoremove; then cacheable=false; apt_state_healthy=; fi
+  apt-get -y autoclean || cacheable=false
+  apt_state_healthy=
+  apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
+  ret=$?
+  if [ "$ret" -eq 0 ]; then
+    completed=$(apt_state_output_signature packages 2>/dev/null) || completed=
+    $cacheable && apt_state_healthy=$completed
+  else
+    cacheable=false
+    echo "dss:warn: Got an error after an apt-get dist-upgrade. trying an apt-get -f install"
+    apt_get_f_install
+    apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
+    ret=$?
+    if [ "$ret" -ne 0 ]; then
+      check_systemd_install_matches_init
+      echo "dss:error: Got an error after an apt-get dist-upgrade"
+    fi
+  fi
+  # Config repairs may change packages or fail after the final successful dist-upgrade.
+  upgrade_ret=$ret
+  tweak_broken_configs || cacheable=false
+  current=$(apt_state_output_signature packages 2>/dev/null) || current=
+  if $cacheable && apt_state_repositories_are_current && [ -n "$completed" ] && [ "$completed" = "$current" ] &&
+      [ "$completed" = "${apt_state_healthy:-}" ]; then
+    apt_state_dist_upgraded=$completed
+    apt_state_upgraded=$completed
+  fi
+  ret=$upgrade_ret
+  echo "dss:trace:apt_get_dist_upgrade completed $(print_distro_info). ret=$ret"
+  return "$ret"
 }
 
 # LTS releases move to the next LTS; interim releases move to the next release.
@@ -2361,21 +2922,13 @@ function dist_upgrade_ubuntu_to_latest() {
     current=$(distro_output_codename) || return 1
     next=$(ubuntu_output_next_release "$current") || return 1
     [ -n "$next" ] || return 0
+    check_disk_space || return 1
     arch=$(dpkg --print-architecture) || return 1
     if [ "$arch" = i386 ] && ! is_distro_name_older "$current" bionic; then
       echo "dss:error: Native i386 Ubuntu cannot upgrade past 18.04." >&2
       return 1
     fi
-    if is_distro_name_older "$current" xenial && dpkg -l | grep -qai '^i.*dovecot'; then
-      print_uninstall_dovecot; return 1
-    fi
-    if is_distro_name_older "$current" bionic && dpkg -l | grep -qai '^i.*fail2ban'; then
-      print_uninstall_fail2ban; return 1
-    fi
-    if is_distro_name_older "$current" questing && ! is_distro_name_older "$next" questing && dpkg -l | grep -qai '^i.*dovecot'; then
-      echo "dss:warn: Dovecot 2.4 requires config migration before upgrading to $next. Export IGNORE_DOVECOT_ERROR=Y after review." >&2
-      [ -z "$IGNORE_DOVECOT_ERROR" ] && return 1
-    fi
+    upgrade_check_incompatible_packages ubuntu "$current" "$next" || return $?
     apt_sources_transition_target=$next
     upgrade_precondition_checks "$next" || return 1
     apt_sources_prepare || return 1
@@ -2425,6 +2978,7 @@ return $ret
 function yum_upgrade() {
   pause_check
   [ ! -f /etc/redhat-release ] && return 0
+  check_disk_space || return 1
   yum_enable_rhel4 || return 0
   if ! which yum >/dev/null 2>&1; then echo "dss:info: yum not found."; return 1; fi
   local QOPT=" -q"
@@ -2591,9 +3145,11 @@ return 0
 
 function dist_upgrade_to_latest() {
   pause_check
+  local debian_target=''
   echo "dss:trace:dist_upgrade_to_latest"
 
   if [ -f /etc/debian_version ] && lsb_release -a 2>/dev/null | grep -qai debian; then
+    debian_target=trixie
     if ! dist_upgrade_lenny_to_squeeze; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_lenny_to_squeeze:failed" && return 1; fi
     if ! dist_upgrade_squeeze_to_wheezy; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_squeeze_to_wheezy:failed" && return 1; fi
     if ! dist_upgrade_wheezy_to_jessie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_wheezy_to_jessie:failed" && return 1; fi
@@ -2609,6 +3165,7 @@ function dist_upgrade_to_latest() {
   fi
   if ! packages_upgrade; then echo "dss:error:dist_upgrade_to_latest:packages_upgrade:failed" && return 1; fi
   if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
+  if [ -n "$debian_target" ]; then debian_check_release_completion "$debian_target" || return 1; fi
   if ! plesk_upgrade; then echo "dss:error:dist_upgrade_to_latest:plesk_upgrade:failed" && return 1; fi
 }
 
@@ -2631,14 +3188,15 @@ elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
   upgrade_precondition_checks
+  ret=$?
   report_unsupported
-  # set return code
-  true
+  [ "$ret" -eq 0 ]
 elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
   dist_upgrade_lenny_to_squeeze || exit 1
   dist_upgrade_squeeze_to_wheezy || exit 1
+  debian_check_release_completion wheezy || exit 1
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
@@ -2646,15 +3204,21 @@ elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
   dist_upgrade_lenny_to_squeeze || exit 1
   dist_upgrade_squeeze_to_wheezy || exit 1
   dist_upgrade_wheezy_to_jessie || exit 1
+  debian_check_release_completion jessie || exit 1
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   version="$2"
   [ -z "$version" ] && echo "dss:error: Need a version e.g. 11 for --to-debian-release" && exit 1
   [ ! -z "$3" ] && print_usage && exit 1
   case "$version" in
-      6|7|8|9|10|11|12|13)
-      true
-      ;;
+      6) debian_target=squeeze;;
+      7) debian_target=wheezy;;
+      8) debian_target=jessie;;
+      9) debian_target=stretch;;
+      10) debian_target=buster;;
+      11) debian_target=bullseye;;
+      12) debian_target=bookworm;;
+      13) debian_target=trixie;;
       *)
       echo "dss:error: Expecting a --to-debian-release version of 6 to 13" && exit 1
       ;;
@@ -2668,7 +3232,7 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye || exit 1; fi
   if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_bookworm || exit 1; fi
   if [ $version -gt 12 ]; then dist_upgrade_bookworm_to_trixie || exit 1; fi
-
+  debian_check_release_completion "$debian_target" || exit 1
 
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes"
@@ -2683,6 +3247,7 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   dist_upgrade_buster_to_bullseye || exit 1
   dist_upgrade_bullseye_to_bookworm || exit 1
   dist_upgrade_bookworm_to_trixie || exit 1
+  debian_check_release_completion trixie || exit 1
 
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes"
@@ -2704,6 +3269,7 @@ elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
   dist_upgrade_lenny_to_squeeze || exit 1
+  debian_check_release_completion squeeze || exit 1
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-squeeze completed ok.  use $0 --show-changes to see changes"
 elif [ "--source" = "${ACTION:-$1}" ] ; then
@@ -2750,6 +3316,7 @@ elif [ "--remove-deprecated-packages" = "${ACTION:-$1}" ] ; then
   exit $?
 elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
+  check_disk_space || exit 1
   if [  64 -eq $(getconf LONG_BIT) ]; then
     if has_cruft_packages 32bit; then
       echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-running crossgrade."
@@ -2767,7 +3334,7 @@ elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
   exit $ret
 elif [ "--show-changes" = "${ACTION:-$1}" ] ; then
   print_config_state_changes
-  exit $ret
+  exit $?
 elif [ "--pause" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   touch ~/distrorejuve.pause

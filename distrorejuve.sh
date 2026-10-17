@@ -1588,12 +1588,16 @@ function upgrade_migrate_php_packages() {
   listed=$(upgrade_php_output_pending_removals "$directory/apache.remove" "$packages") || return 1
   while IFS= read -r package; do [ -z "$package" ] || modules+=("$package"); done <<< "$listed"
   if [ -f "$directory/apache.package" ]; then apache=$(cat "$directory/apache.package") || return 1; fi
-  # A completed current-default role needs no reinstall. Untracked versioned roles gain a meta once.
+  # Configured concrete default roles need no reinstall merely to add optional versionless metas.
+  # Mapping/candidate checks above still reject unavailable roles; partial PHP state needs repair.
   if ! $pending && [ "${#removals[@]}" -eq 0 ]; then
     status=0
-    for package in "${installs[@]}"; do
-      [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" = 'install ok installed' ] || status=1
-    done
+    printf '%s\n' "$packages" | awk -F '\t' '
+      $1 ~ / (unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)$/ &&
+        $2 ~ /^(php([0-9]+([.][0-9]+)?)?($|[-:])|libapache2-mod-php)/ { bad=1 }
+      END { exit bad }
+    ' || status=$?
+    [ "$status" -le 1 ] || return 1
     if [ "$status" -eq 0 ]; then
       # Delete only this invocation's unstarted mktemp records; no backup or mutation occurred.
       rm -f -- "$directory/"{packages.before,target,branch,mapping,retained,install.packages,remove.packages,apache.remove,apache.package} || return 1
@@ -1756,15 +1760,29 @@ function upgrade_php_runtime_output_roles() {
 function upgrade_php_runtime_snapshot() {
 (
   umask 077
-  local directory=$1 roles kind service state status
-  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
-  if [ -e "$directory/services.before" ] || [ -L "$directory/services.before" ]; then
-    [ -f "$directory/services.before" ] && [ ! -L "$directory/services.before" ] && [ -r "$directory/services.before" ] &&
-      [ "$(stat -c '%a' -- "$directory/services.before")" = 600 ]
-    return $?
+  local directory=$1 roles kind service state status file
+  [ -d "$directory" ] && [ ! -L "$directory" ] && [ "$(stat -c '%u:%a' -- "$directory")" = 0:700 ] || {
+    echo 'dss:error: PHP runtime snapshot directory must be root-owned and private (700).' >&2; return 1
+  }
+  file="$directory/services.before"
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] && [ "$(stat -c '%u:%h' -- "$file")" = 0:1 ] || {
+      echo 'dss:error: Refusing an unsafe existing PHP runtime snapshot; review its owner/type/links.' >&2; return 1
+    }
+    # A default ACL can override umask; secure the original snapshot without replacing it.
+    chmod 600 -- "$file" || { echo 'dss:error: Cannot secure the existing PHP runtime snapshot.' >&2; return 1; }
+    return 0
   fi
   roles=$(upgrade_php_runtime_output_roles) || return 1
-  : > "$directory/services.before.new" || return 1
+  file="$directory/services.before.new"
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] && [ "$(stat -c '%u:%h' -- "$file")" = 0:1 ] || {
+      echo 'dss:error: Refusing an unsafe staged PHP runtime snapshot.' >&2; return 1
+    }
+  fi
+  : > "$file" && chmod 600 -- "$file" || {
+    echo 'dss:error: Cannot create a private PHP runtime snapshot.' >&2; return 1
+  }
   while IFS=$'\t' read -r kind service; do
     [ -n "$service" ] || continue
     if upgrade_php_runtime_service_is_active "$service"; then state=active
@@ -1775,9 +1793,9 @@ function upgrade_php_runtime_snapshot() {
         echo "dss:warn: Cannot establish pre-upgrade activity of $service; its runtime verification is incomplete." >&2
       fi
     fi
-    printf '%s\t%s\t%s\n' "$kind" "$service" "$state" >> "$directory/services.before.new" || return 1
+    printf '%s\t%s\t%s\n' "$kind" "$service" "$state" >> "$file" || return 1
   done <<< "$roles"
-  mv -- "$directory/services.before.new" "$directory/services.before"
+  mv -- "$file" "$directory/services.before"
 )
 }
 
@@ -2390,7 +2408,11 @@ function upgrade_check_crossgrade_package_blockers() {
 
 
 function upgrade_check_path() {
-  echo "dss:stage: Checking complete upgrade path $2 -> $3" >&2
+  if [ "${4:-requested}" = transition ]; then
+    echo "dss:stage: Rechecking $2 -> $3 before this release transition" >&2
+  else
+    echo "dss:stage: Checking complete requested upgrade path $2 -> $3" >&2
+  fi
   local family=$1 current=$2 target=$3 issues action rule boundary packages remedy arch crossgrade_release blocked=false
   local purge=${PURGE_INCOMPATIBLE_PACKAGES-false}
   local remove_obsolete=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} obsolete
@@ -3218,7 +3240,6 @@ function apt_get_install() {
 }
 
 function apt_get_f_install() {
-  echo "dss:stage: Checking package repair" >&2
   pause_check
   local tmplog signature
   signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
@@ -3226,6 +3247,7 @@ function apt_get_f_install() {
     echo "dss:trace:apt_get_f_install: dependency state already checked."
     return 0
   fi
+  printf 'dss:stage: Checking package dependencies%s\n' "${1:+ $1}" >&2
   apt_state_healthy=
   apt_state_upgraded=
   apt_state_dist_upgraded=
@@ -4344,7 +4366,7 @@ function crossgrade_debian() {
   local i=0 pkg
   for i in 0 1; do
     pause_check
-    apt_get_f_install crossgrade
+    apt_get_f_install "during the crossgrade"
     ret=$?
     [ $ret -eq 0 ] && break;
     # apt-get -f install=>
@@ -4516,7 +4538,7 @@ function crossgrade_debian() {
         if [  $lret -ne 0 ]; then
           echo "dss:warn: apt-get remove ${pkg}:i386 failed.  Trying an apt-get -f install.  Will continue irregardless."
           ret=$(($ret+1))
-          apt_get_f_install "after-${pkg}-remove"
+          apt_get_f_install "after removing $pkg"
         fi
       fi
     done
@@ -5343,7 +5365,7 @@ function upgrade_prepare_php_source_retry() {
   records=$(apt_sources_list) || return 1
   while IFS=$'\t' read -r _ _ provider type _ suite _ _; do
     if [ "$provider" = "$family" ] && [ "$type" = deb ] && [ "${suite%%[-/]*}" = "$target" ]; then
-      apt_get_update || return 1
+      apt_get_update "with $target sources already selected" || return 1
       record_config_state || return 1
       apt_get_install dpkg || return 1
       upgrade_migrate_php_packages "$target" || return 1
@@ -5369,7 +5391,7 @@ echo "dss:stage: Upgrading Debian $old_distro -> $new_distro"
 check_disk_space || return 1
 upgrade_prepare_nss_lookup
 
-upgrade_check_path debian "$old_distro" "$new_distro" || return $?
+upgrade_check_path debian "$old_distro" "$new_distro" transition || return $?
 if [ "$old_distro" = bookworm ] && [ "$new_distro" = trixie ]; then
   upgrade_crossgrade_before_release debian "$old_distro" "$new_distro" || return $?
 fi
@@ -5396,7 +5418,7 @@ fix_missing_lsb_release || return 1
 
 upgrade_prepare_php_source_retry debian "$new_distro" || return 1
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_upgrade:old:$old_distro:new:$new_distro"
-apt_get_upgrade
+apt_get_upgrade "on $old_distro before switching releases"
 local ret=$?
 if [ $ret -ne 0 ]; then
   echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_x_to_y:${old_distro}_to_${new_distro}"
@@ -5410,7 +5432,7 @@ if [ "$old_distro:$new_distro" = etch:lenny ] && command -v aptitude >/dev/null;
 fi
 
 apt_sources_upgrade debian "$old_distro" "$new_distro" || return 1
-apt_get_update || return 1
+apt_get_update "after switching sources to $new_distro" || return 1
 if [ "$old_distro:$new_distro" = etch:lenny ]; then
   # Upgrade APT itself before asking Etch's resolver to perform Lenny's full upgrade.
   apt_get_install apt || return 1
@@ -5422,7 +5444,7 @@ if ! is_distro_name_older "$new_distro" stretch; then
 fi
 
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
-apt_get_dist_upgrade
+apt_get_dist_upgrade "to $new_distro"
 ret=$?
 if [ $ret -eq 0 ]; then
   echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
@@ -5657,7 +5679,6 @@ function record_config_state() {
 }
 
 function apt_get_update() {
-  echo "dss:stage: Refreshing APT package indexes" >&2
 pause_check
 local tmplog signature completed inputs current_inputs warning_status
 signature=$(apt_state_output_signature repositories 2>/dev/null) || signature=
@@ -5667,6 +5688,7 @@ if [ -n "$signature" ] && [ "$signature" = "${apt_state_updated:-}" ]; then
   return 0
 fi
 inputs=$(apt_state_output_signature inputs 2>/dev/null) || inputs=
+printf 'dss:stage: Refreshing APT package indexes%s\n' "${1:+ $1}" >&2
 apt_state_updated=
 apt_state_upgraded=
 apt_state_dist_upgraded=
@@ -5690,6 +5712,7 @@ if [ "$ret" -ne 0 ]; then
     echo "dss:info: Retrying APT update with Suite aging accepted; other release metadata checks remain enabled."
     release_options=(-o Acquire::AllowReleaseInfoChange::Suite=true)
   fi
+  echo "dss:stage: Retrying index refresh over IPv4 after APT update failed (status $ret)" >&2
   apt-get -o Acquire::ForceIPv4=true -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false "${release_options[@]}" update 2>&1 | tee -a "$tmplog"
   ret=${PIPESTATUS[0]}
 fi
@@ -5735,13 +5758,12 @@ function apt_get_autoremove() {
 }
 
 function apt_get_upgrade() {
-  echo "dss:stage: Upgrading current packages" >&2
   pause_check
   [ ! -f /etc/debian_version ] && return 0
   [ -e /etc/redhat-release ] && return 0
   upgrade_precondition_checks || return $?
   apt_sources_archive || return 1
-  apt_get_update || return 1
+  apt_get_update "${2:-before upgrading packages}" || return 1
   upgrade_php_runtime_prepare || return 1
   local signature completed current operation_ret cacheable=true
   signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
@@ -5753,6 +5775,7 @@ function apt_get_upgrade() {
     fi
     return 0
   fi
+  printf 'dss:stage: Upgrading current packages%s\n' "${1:+ $1}" >&2
   apt_state_upgraded=
   apt_state_dist_upgraded=
   echo "dss:trace:apt_get_upgrade"
@@ -5761,7 +5784,7 @@ function apt_get_upgrade() {
     cacheable=false; apt_state_healthy=
   fi
   if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
-  apt_get_f_install || cacheable=false
+  apt_get_f_install "before the package upgrade" || cacheable=false
   echo "dss:info: running an apt-get upgrade"
   apt_state_healthy=
   apt_get_apply $APT_GET_INSTALL_OPTIONS upgrade
@@ -5773,9 +5796,9 @@ function apt_get_upgrade() {
     cacheable=false
   fi
   if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
-  apt_get_f_install || cacheable=false
+  apt_get_f_install "after package changes" || cacheable=false
   if [ "$operation_ret" -ne 0 ]; then
-    echo "dss:info: apt-get upgrade failed. trying a dist-upgrade..."
+    echo "dss:stage: Trying the full upgrade after the package upgrade failed (APT status $operation_ret)" >&2
     apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade
     operation_ret=$?
     if [ "$operation_ret" -eq 0 ]; then
@@ -5814,7 +5837,6 @@ function plesk_upgrade() {
 }
 
 function apt_get_dist_upgrade() {
-  echo "dss:stage: Performing full package upgrade" >&2
   pause_check
   [ ! -f /etc/debian_version ] && return 0
   upgrade_precondition_checks || return $?
@@ -5829,20 +5851,24 @@ function apt_get_dist_upgrade() {
     fi
     return 0
   fi
+  printf 'dss:stage: Preparing full package upgrade%s\n' "${1:+ $1}" >&2
   apt_state_dist_upgraded=
   echo "dss:trace:apt_get_dist_upgrade:pre_apt_get_upgrade:"
-  upgrade_php_runtime_defer_check=true apt_get_upgrade || return 1
+  upgrade_php_runtime_defer_check=true apt_get_upgrade "before the full upgrade" || return 1
   echo "dss:trace:apt_get_dist_upgrade"
-  apt_get_f_install || cacheable=false
+  apt_get_f_install "before the full upgrade" || cacheable=false
   apt_get_install dpkg || cacheable=false
   if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
+  printf 'dss:stage: Performing full package upgrade%s\n' "${1:+ $1}" >&2
   apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade
   first_ret=$?
   # Keep recovery retries unconditional after a failure, including immediate-configuration workarounds.
   if [ "$first_ret" -ne 0 ]; then
     cacheable=false; apt_state_healthy=
+    echo "dss:stage: Retrying the full upgrade after APT failed (status $first_ret)" >&2
     if apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
       apt_get_apply -f $APT_GET_INSTALL_OPTIONS install libc6-dev
+      echo "dss:stage: Retrying the full upgrade after an immediate-configuration failure, with immediate configuration disabled" >&2
       apt_get_apply dist-upgrade -f -o APT::Immediate-Configure=0 $APT_GET_INSTALL_OPTIONS
     fi
   fi
@@ -5856,6 +5882,7 @@ function apt_get_dist_upgrade() {
   if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
   apt-get -y autoclean || cacheable=false
   apt_state_healthy=
+  echo "dss:stage: Rechecking the full upgrade after the package configuration pass" >&2
   apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade
   ret=$?
   if [ "$ret" -eq 0 ]; then
@@ -5864,7 +5891,8 @@ function apt_get_dist_upgrade() {
   else
     cacheable=false
     echo "dss:warn: Got an error after an apt-get dist-upgrade. trying an apt-get -f install"
-    apt_get_f_install
+    apt_get_f_install "after the full upgrade failed (APT status $ret)"
+    echo "dss:stage: Retrying the full upgrade after the dependency repair attempt" >&2
     apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade
     ret=$?
     if [ "$ret" -ne 0 ]; then
@@ -5931,7 +5959,7 @@ function dist_upgrade_ubuntu_to_latest() {
     next=$(ubuntu_output_next_release "$current") || return 1
     if [ -z "$next" ]; then upgrade_php_runtime_verify; return $?; fi
     check_disk_space || return 1
-    upgrade_check_path ubuntu "$current" "$next" || return $?
+    upgrade_check_path ubuntu "$current" "$next" transition || return $?
     if [ "$current" = bionic ]; then
       upgrade_crossgrade_before_release ubuntu "$current" "$next" || return $?
     fi
@@ -5947,16 +5975,16 @@ function dist_upgrade_ubuntu_to_latest() {
     apt_sources_prepare || return 1
     if ! is_distro_name_older "$next" hirsute; then check_usrmerge || return 1; fi
     upgrade_prepare_php_source_retry ubuntu "$next" || return 1
-    apt_get_upgrade || return 1
+    apt_get_upgrade "on $current before switching releases" || return 1
     retain_etc_networking_naming_re_enX0
     upgrade_obsolete_prepare ubuntu "$current" "$next" || return 1
     apt_sources_upgrade ubuntu "$current" "$next" || return 1
-    apt_get_update || return 1
+    apt_get_update "after switching sources to $next" || return 1
     if ! is_distro_name_older "$next" xenial; then
       apt_get_install dpkg || return 1
       upgrade_migrate_php_packages "$next" || return 1
     fi
-    apt_get_dist_upgrade
+    apt_get_dist_upgrade "to $next"
     ret=$?
     if [ "$ret" -ne 0 ] || [ "$(distro_output_codename)" != "$next" ]; then
       echo "dss:error: Ubuntu upgrade from $current to $next failed." >&2

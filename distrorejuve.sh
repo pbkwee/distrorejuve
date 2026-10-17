@@ -89,6 +89,7 @@ Run with --remove-deprecated-packages to remove old packages
 Add --crossgrade to a release-upgrade command to permit i386 to amd64 conversion at the last
 release supporting native i386 (Debian 12 or Ubuntu 18.04), then continue to the requested target.
 A running x86_64 kernel is required. Ubuntu also requires ENABLE_UBUNTU_CROSSGRADE.
+Add --allow-crossgrade-blockers to attempt despite known package blockers; final native amd64 verification remains required.
 
 Run with --to-64bit to convert a 32 bit distro to 64 bit.  Works OK with Debian.  May work for Ubuntu < 18.04.
 
@@ -117,6 +118,10 @@ REMOVEX11 enables X11 removal; ENABLE_UBUNTU_CROSSGRADE permits experimental Ubu
 DAYS_UPGRADE_ONGOING sets the configuration-history lookback (default 7 days).
 PURGE_INCOMPATIBLE_PACKAGES=false blocks known config-breaking packages before release upgrades.
 Set it to literal true to back them up and purge them; reinstall and configure them manually afterward.
+PREFER_PACKAGED_USRMERGE_FILES=false stops on known executable collisions before a required /usr merge.
+Set it to literal true to privately archive only an unowned conflicting file and retain its packaged counterpart.
+REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=true removes verified obsolete crossgrade packages after backup.
+Set it to literal false to require their manual removal before starting.
 
 Use with --source if you just wish to have the distrorejuve functions available to you for testing
 
@@ -431,9 +436,18 @@ function apt_sources_process() {
     match(rest,/^[^ \t#]+/); suite=substr(rest,1,RLENGTH); rest=substr(rest,RLENGTH+1)
     comment=""; if (match(rest,/#.*/)) { comment=substr(rest,RSTART); rest=substr(rest,1,RSTART-1) }
     components=trim(rest)
-    architectures=""
-    if (match(prefix, /arch=[^] \t]+/)) { architectures=substr(prefix,RSTART+5,RLENGTH-5); gsub(/,/," ",architectures); architectures=architectures "||" }
-    if (prefix ~ /arch[+-]=/) architectures=prefix
+    architectures=""; basearch=""; addarch=""; removearch=""
+    if (match(prefix, /\[[^]]*\]/)) {
+      optiontext=substr(prefix,RSTART+1,RLENGTH-2)
+      noptions=split(optiontext,options,/[ \t]+/)
+      for (optionindex=1;optionindex<=noptions;optionindex++) {
+        option=options[optionindex]
+        if (option ~ /^arch=/) { basearch=substr(option,6); gsub(/,/," ",basearch) }
+        else if (option ~ /^arch\+=/) { addarch=substr(option,7); gsub(/,/," ",addarch) }
+        else if (option ~ /^arch-=/) { removearch=substr(option,7); gsub(/,/," ",removearch) }
+      }
+      architectures=basearch "|" addarch "|" removearch
+    }
     if (uri !~ /^[a-zA-Z][a-zA-Z0-9+.-]*:/) { error("invalid URI"); next }
     if (!suite || (!components && suite !~ /\/$/)) { error("missing suite or components"); next }
     if (mode == "list") list_record(type,uri,suite,components,architectures)
@@ -832,52 +846,44 @@ function upgrade_precondition_checks() {
   return $ret
 }
 
-function add_missing_ubuntu_keys() {
-  [ ! -f /etc/debian_version ] && return 0
-  [ ! -x /usr/bin/apt-key ] && return 0
-  print_distro_info | grep -qai ubuntu || return 0
-  # import the lts key
-
-  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 112695A0E562B32A
-
-  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 648ACFD622F3D138
-
-  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 0E98404D386FA1D9
-
-  return 0
+# Archive-keyring packages maintain distro trust; never import unrelated keyserver keys.
+# https://www.debian.org/doc/manuals/debian-handbook/sect.package-authentication.en.html
+function apt_ensure_archive_keyring() {
+  local package=$1 info status
+  if info=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null); then
+    case "$info" in *' ok installed') return 0;; esac
+  else
+    status=$?
+    [ "$status" -eq 1 ] || { echo "dss:error: Cannot inspect $package state." >&2; return "$status"; }
+  fi
+  echo "dss:stage: Installing/configuring the distribution archive keyring: $package" >&2
+  # apt_get_install reads this dynamically scoped string; do not weaken existing trust to bootstrap it.
+  # shellcheck disable=SC2034
+  local APT_GET_INSTALL_OPTIONS="$APT_GET_INSTALL_OPTIONS -o APT::Get::AllowUnauthenticated=false -o APT::Get::AutomaticRemove=false --no-remove"
+  if apt_get_install "$package"; then :
+  else
+    status=$?
+    echo "dss:error: Cannot install authenticated $package from configured indexes. Restore the distro keyring/trust using verified distro media or packages, then retry; no keyserver import was attempted." >&2
+    return "$status"
+  fi
+  info=$(dpkg-query -W -f='${Status}' "$package") || return 1
+  case "$info" in *' ok installed') return 0;; esac
+  echo "dss:error: $package remains unconfigured after installation." >&2
+  return 1
 }
 
-HAS_INSTALLED_KEYS=
+function add_missing_ubuntu_keys() {
+  [ -f /etc/debian_version ] || return 0
+  local current
+  current=$(distro_output_codename) || return 1
+  case " $ALL_UBUNTU " in *" $current "*) apt_ensure_archive_keyring ubuntu-keyring;; *) return 0;; esac
+}
+
 function add_missing_debian_keys() {
-  [ ! -f /etc/debian_version ] && return 0
-  [ ! -x /usr/bin/apt-key ] && return 0
-  print_distro_info | grep -qai debian || return 0
-  # only needs doing once
-  [ -n "$HAS_INSTALLED_KEYS" ] && return 0
-  echo "dss:info: checking debian keys"
-  # import the lts key
-  # sometimes its like '...AD62 4692 5553' other times its like '...AD6246925553'
-  if ! apt-key list | egrep -qai "4692.*5553"; then
-    echo "dss:info: installing the deb 7 2020 key"
-    if ! gpg --recv-key  8B48AD6246925553 ; then gpg --keyserver pgpkeys.mit.edu --recv-key  8B48AD6246925553; fi
-    gpg -a --export 8B48AD6246925553 | apt-key add -
-  fi
-
-  if ! apt-key list | egrep -qai "4730.*41FA"; then
-    # Debian Archive Automatic Signing Key (6.0/squeeze) <ftpmaster@debian.org>
-    echo "dss:info: installing the deb 6 key"
-    gpg --recv-key AED4B06F473041FA
-    gpg -a --export AED4B06F473041FA | apt-key add -
-  fi
-  if ! apt-key list | egrep D97A3AE911F63C51; then
-    #webmin key
-    echo "dss:info: installing webmin key"
-    gpg --keyserver pgpkeys.mit.edu --recv-key D97A3AE911F63C51
-    gpg -a --export D97A3AE911F63C51 | apt-key add -
-  fi
-  HAS_INSTALLED_KEYS=Y
-
-  return 0
+  [ -f /etc/debian_version ] || return 0
+  local current
+  current=$(distro_output_codename) || return 1
+  case " $ALL_DEBIAN " in *" $current "*) apt_ensure_archive_keyring debian-archive-keyring;; *) return 0;; esac
 }
 
 # Columns: family, first affected release, action, rule, package pattern, remedy.
@@ -1132,16 +1138,524 @@ function upgrade_output_incompatible_packages() {
   printf '%s\n' "$issues" | awk -F '\t' '$1 == "purge" { count=split($4, packages, " "); for (i=1; i<=count; i++) print packages[i] }' | sort -u
 }
 
+# shellcheck shell=bash
+# Follow Debian's default PHP packages; package maintscripts own Apache module changes.
+function upgrade_php_output_default_branch() {
+  local package dependencies branch
+  for package in php-cli libapache2-mod-php; do
+    dependencies=$(LC_ALL=C apt-cache depends "$package") || return 1
+    branch=$(printf '%s\n' "$dependencies" | awk '
+      $1 == "Depends:" && $2 ~ /^(php[0-9]+\.[0-9]+-cli|libapache2-mod-php[0-9]+\.[0-9]+)$/ {
+        sub(/^libapache2-mod-php|^php/, "", $2); sub(/-cli$/, "", $2)
+        if (found && found != $2) bad=1; found=$2
+      }
+      END { if (found && !bad) print found; else exit 1 }
+    ')
+    if [ -n "$branch" ]; then printf '%s\n' "$branch"; return 0; fi
+  done
+  echo 'dss:error: Cannot establish the default PHP branch from target APT dependencies.' >&2
+  return 1
+}
+
+# 0 genuine archive candidate, 1 unavailable, 2 failed query. Never use status-only versions.
+function upgrade_php_has_candidate() {
+  local policy rows version
+  policy=$(LC_ALL=C apt-cache policy "$1") || return 2
+  version=$(printf '%s\n' "$policy" | awk '$1 == "Candidate:" { print $2; exit }')
+  [ -n "$version" ] && [ "$version" != '(none)' ] || return 1
+  rows=$(LC_ALL=C apt-cache madison "$1") || return 2
+  printf '%s\n' "$rows" | awk -F '|' -v version="$version" '
+    { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2) }
+    $2 == version && $3 ~ /[[:space:]][a-z0-9][a-z0-9-]*[[:space:]]+Packages[[:space:]]*$/ { found=1 }
+    END { exit !found }
+  '
+}
+
+function upgrade_php_apache_module_is_enabled() {
+  local package=$1 files module load resolved status
+  files=$(dpkg-query -L "$package") || return 2
+  load="/etc/apache2/mods-enabled/php${package#libapache2-mod-php}.load"
+  [ -e "$load" ] || return 1
+  [ -f "$load" ] && [ -r "$load" ] || return 2
+  resolved=$(readlink -f "$load") || return 2
+  printf '%s\n' "$files" | grep -qxF "$resolved" || return 1
+  while IFS= read -r module; do
+    case "$module" in /*.so) :;; *) continue;; esac
+    [ -f "$module" ] && [ -r "$module" ] || return 2
+    awk -v module="$module" '
+      tolower($1) == "loadmodule" { path=$3; gsub(/["\047]/,"",path); if (path == module) found=1 }
+      END { exit !found }
+    ' "$load"
+    status=$?
+    case "$status" in 0) return 0;; 1) :;; *) return 2;; esac
+  done <<< "$files"
+  return 1
+}
+
+function upgrade_php_check_plan() {
+  local allowed=$1 plan=$2 removal_only=${3:-false} native=${4:-}
+  awk -v removal_only="$removal_only" -v native="$native" '
+    function key(name) {
+      if (native == "") sub(/:.*/, "", name)
+      else if (name !~ /:/) name=name ":" native
+      return name
+    }
+    FILENAME == ARGV[1] { allowed[key($1)]=1; next }
+    /^Purg / { bad=1 }
+    /^Remv / {
+      name=$2
+      if (!(key(name) in allowed) && !(native != "" && name !~ /:/ && ((name ":all") in allowed))) bad=1
+    }
+    /^Inst / { if (removal_only == "true") bad=1 }
+    END { exit bad }
+  ' "$allowed" "$plan"
+}
+
+function upgrade_php_output_pending_directory() {
+  local file directory found=''
+  for file in /root/distrorejuveinfo/*.php-migration/*/started /root/deghostinfo/*.php-migration/*/started; do
+    [ -f "$file" ] || continue
+    directory=${file%/*}
+    [ ! -f "$directory/completed" ] || continue
+    [ -z "$found" ] || { echo 'dss:error: Multiple unfinished PHP migrations require review.' >&2; return 2; }
+    found=$directory
+  done
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+# Keep Apache unable to serve PHP source between removal and activation of its handler.
+# An owned persistent mask remains on failures and across reboot for a safe retry.
+function upgrade_php_apache_control() {
+  local directory=$1 action=$2 state runtime=/run/systemd/system/apache2.service persistent=/etc/systemd/system/apache2.service file active
+  local helper_mask=/var/lib/systemd/deb-systemd-helper-masked/apache2.service
+  [ -d /run/systemd/system ] || { echo 'dss:error: PHP module migration requires a running systemd service manager.' >&2; return 1; }
+  case "$(readlink /proc/1/exe)" in */systemd|*/'systemd (deleted)') :;; *) echo 'dss:error: Cannot verify systemd PID1 for PHP migration.' >&2; return 1;; esac
+  for file in "$persistent" "$runtime"; do
+    if [ -e "$file" ] || [ -L "$file" ]; then
+      if [ ! -L "$file" ] || [ "$(readlink "$file")" != /dev/null ]; then
+        echo "dss:error: Custom Apache unit $file prevents automatic PHP service handoff." >&2; return 1
+      fi
+    fi
+  done
+  if [ "$action" = prepare ]; then
+    if [ -e "$helper_mask" ] || [ -L "$helper_mask" ]; then
+      echo 'dss:error: Debian service-helper mask state exists for Apache; review it before PHP handoff.' >&2
+      return 1
+    fi
+    if [ ! -f "$directory/apache.state" ]; then
+      state=$(systemctl show -p LoadState -p ActiveState -p UnitFileState apache2.service) || return 1
+      printf '%s\n' "$state" | grep -qx 'LoadState=loaded' || {
+        # An existing operator mask legitimately reports LoadState=masked.
+        printf '%s\n' "$state" | grep -qx 'LoadState=masked' || return 1
+      }
+      printf '%s\n' "$state" | grep -Eq '^ActiveState=(active|inactive)$' || return 1
+      if printf '%s\n' "$state" | grep -Eq '^UnitFileState=masked(-runtime)?$' || [ -L "$persistent" ] || [ -L "$runtime" ]; then
+        : > "$directory/apache.operator-mask" || return 1
+      fi
+      printf '%s\n' "$state" > "$directory/apache.state.new" && mv "$directory/apache.state.new" "$directory/apache.state" || return 1
+    fi
+    if [ ! -L "$persistent" ]; then : > "$directory/apache.mask-owned" || return 1; fi
+    systemctl mask apache2.service || return 1
+    [ -L "$persistent" ] && [ "$(readlink "$persistent")" = /dev/null ] || return 1
+    state=$(systemctl show -p LoadState apache2.service) || return 1
+    [ "$state" = LoadState=masked ] || { echo 'dss:error: systemd did not load the Apache mask; package changes stopped.' >&2; return 1; }
+    systemctl stop apache2.service || return 1
+    active=$(systemctl show -p ActiveState apache2.service) || return 1
+    [ "$active" = ActiveState=inactive ] || return 1
+  elif [ "$action" = finish ]; then
+    [ -f "$directory/apache.state" ] || return 1
+    if [ -f "$directory/apache.mask-owned" ]; then
+      systemctl unmask apache2.service || return 1
+      [ ! -e "$persistent" ] && [ ! -L "$persistent" ] || return 1
+    fi
+    if [ ! -f "$directory/apache.operator-mask" ] && grep -qx 'ActiveState=active' "$directory/apache.state"; then
+      if systemctl start apache2.service && active=$(systemctl show -p ActiveState apache2.service) && [ "$active" = ActiveState=active ]; then :
+      else
+        systemctl mask apache2.service
+        systemctl stop apache2.service
+        state=$(systemctl show -p LoadState apache2.service) || state=
+        if [ -L "$persistent" ] && [ "$(readlink "$persistent")" = /dev/null ] && [ "$state" = LoadState=masked ]; then
+          echo "dss:error: Apache failed to start; the owned persistent mask remains. Repair configuration and retry. State: $directory" >&2
+        else
+          echo "dss:error: Apache failed to start and its persistent mask could not be verified. Review immediately: $directory" >&2
+        fi
+        return 1
+      fi
+    fi
+  else return 1; fi
+}
+
+# Retain the original removal allowlist, but do not request names dpkg has forgotten.
+function upgrade_php_output_pending_removals() {
+  local manifest=$1 packages=$2
+  awk -F '\t' '
+    FILENAME == ARGV[1] {
+      if ($1 ~ / (installed|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)$/) {
+        sub(/:.*/, "", $2); present[$2 ":" $3]=1
+      }
+      next
+    }
+    $1 in present { print $1 }
+  ' <(printf '%s\n' "$packages") "$manifest"
+}
+
+# Preserve installed packages removed only by the smaller PHP install transaction.
+function upgrade_php_output_preserved_packages() {
+  local allowed=$1 plan=$2 packages=$3 native=$4
+  awk -F '\t' -v native="$native" '
+    function key(name) { if (name !~ /:/) name=name ":" native; return name }
+    FILENAME == ARGV[1] { allowed[key($1)]=1; next }
+    FILENAME == ARGV[2] {
+      if ($1 ~ / (installed|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)$/) {
+        name=$2; sub(/:.*/, "", name); present[name ":" $3]=1
+      }
+      next
+    }
+    /^Purg / { bad=1 }
+    /^Remv / {
+      split($0, fields, /[[:space:]]+/); package=fields[2]
+      if (package !~ /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9][a-z0-9-]*)?$/) { bad=1; next }
+      name=package; sub(/:.*/, "", name)
+      if ((key(package) in allowed) || (package !~ /:/ && ((name ":all") in allowed))) next
+      if (package !~ /:/) {
+        if ((name ":" native) in present) package=name ":" native
+        else if ((name ":all") in present) package=name ":all"
+        else { bad=1; next }
+      }
+      if (!(package in present)) { bad=1; next }
+      if (package ~ /:all$/) sub(/:all$/, "", package)
+      if (!seen[package]++) print package
+    }
+    END { exit bad }
+  ' "$allowed" <(printf '%s\n' "$packages") "$plan"
+}
+
+function upgrade_migrate_php_packages() {
+(
+  local package_umask
+  package_umask=$(umask) || return 1
+  umask 077
+  local target=$1 packages default baseline directory status package arch branch suffix replacement mode concrete
+  local kept='' apache='' audit file pending=false listed native preserved requested attempt
+  local -a installs=() removals=() modules=() arguments=() apt_options=() backups=()
+  case "$target" in ''|*[!a-z0-9]*) return 1;; esac
+  [ "$(id -u)" = 0 ] || return 1
+  read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
+  if directory=$(upgrade_php_output_pending_directory); then pending=true
+  else status=$?; [ "$status" -eq 1 ] || return 1; fi
+  packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
+  if ! $pending && ! printf '%s\n' "$packages" | awk -F '\t' '$1 == "install ok installed" && $2 ~ /^(php5($|-)|php[0-9]+\.[0-9]+($|-)|libapache2-mod-php[0-9])/ { found=1 } END { exit !found }'; then return 0; fi
+  default=$(umask "$package_umask" && upgrade_php_output_default_branch) || return 1
+  if $pending; then
+    if [ "$(cat "$directory/target")" != "$target" ] || [ "$(cat "$directory/branch")" != "$default" ]; then
+      echo "dss:error: Resume the recorded PHP migration before selecting another target/default branch: $directory" >&2; return 1;
+    fi
+  else
+    # Do not replace an administrator's newer PHP with this release's older default.
+    while IFS=$'\t' read -r status package arch _; do
+      [ "$status" = 'install ok installed' ] || continue
+      package=${package%%:*}
+      case "$package" in libapache2-mod-php*) branch=${package#libapache2-mod-php};; php*) branch=${package#php}; branch=${branch%%-*};; *) continue;; esac
+      [[ "$branch" = 5 || "$branch" =~ ^[0-9]+\.[0-9]+$ ]] || continue
+      if dpkg --compare-versions "$branch" gt "$default"; then
+        echo "dss:warn: Preserving PHP $branch, newer than target default $default; no automatic PHP migration attempted." >&2
+        return 0
+      fi
+    done <<< "$packages"
+    baseline=$(config_state_output_baseline) || { echo 'dss:error: PHP migration requires a recorded pre-upgrade comparison baseline.' >&2; return 1; }
+    mkdir -p "$baseline.php-migration" && chmod 700 "$baseline.php-migration" || return 1
+    directory=$(mktemp -d "$baseline.php-migration/$target.XXXXXX") || return 1
+    printf '%s\n' "$packages" > "$directory/packages.before" || return 1
+    printf '%s\n' "$target" > "$directory/target" || return 1
+    printf '%s\n' "$default" > "$directory/branch" || return 1
+    : > "$directory/mapping" || return 1
+    : > "$directory/retained" || return 1
+    while IFS=$'\t' read -r status package arch _; do
+      [ "$status" = 'install ok installed' ] || continue
+      package=${package%%:*}; mode=normal
+      case "$package" in
+        libapache2-mod-php5filter) branch=5; replacement=libapache2-mod-php; mode=apache;;
+        libapache2-mod-php[0-9]*) branch=${package#libapache2-mod-php}; replacement=libapache2-mod-php; mode=apache;;
+        php5|php5-*|php[0-9]*.[0-9]*)
+          branch=${package#php}; branch=${branch%%-*}; suffix=${package#php"$branch"}
+          case "$suffix" in
+            '') replacement=-; mode=meta;;
+            -common) replacement=php-common; mode=common;;
+            -mysqlnd) replacement=php-mysql;;
+            -sqlite) replacement=php-sqlite3;;
+            -*) replacement=php${suffix};;
+            *) continue;;
+          esac;;
+        *) continue;;
+      esac
+      [[ "$branch" = 5 || "$branch" =~ ^[0-9]+\.[0-9]+$ ]] || continue
+      if [ "$replacement" != - ]; then
+        if (umask "$package_umask" && upgrade_php_has_candidate "$replacement"); then :
+        else
+          status=$?; [ "$status" -eq 1 ] || return 1
+          # Some default roles, including opcache, have only a concrete branch package.
+          case "$replacement" in php-*)
+            concrete=php"$default"${replacement#php}
+            if (umask "$package_umask" && upgrade_php_has_candidate "$concrete"); then
+              replacement=$concrete; status=0
+            else status=$?; [ "$status" -eq 1 ] || return 1; fi;;
+          esac
+          if [ "$status" -ne 0 ]; then
+            kept="$kept $branch "
+            printf '%s\t%s\n' "$package:$arch" "$replacement" >> "$directory/retained" || return 1
+            echo "dss:warn: Preserving $package:$arch: no $replacement version in target indexes; its old common package is retained. Review unavailable functionality separately." >&2
+            continue
+          fi
+        fi
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\n' "$package" "$arch" "$branch" "$replacement" "$mode" >> "$directory/mapping" || return 1
+    done <<< "$packages"
+    : > "$directory/install.packages" && : > "$directory/remove.packages" && : > "$directory/apache.remove" || return 1
+    while IFS=$'\t' read -r package arch branch replacement mode; do
+      [ "$replacement" = - ] || printf '%s\n' "$replacement" >> "$directory/install.packages" || return 1
+      if [ "$mode" = apache ]; then
+        apache="libapache2-mod-php$default"
+        printf '%s\n' "$apache" > "$directory/apache.package" || return 1
+      fi
+      dpkg --compare-versions "$branch" lt "$default" || continue
+      if [ "$mode" = common ]; then case "$kept" in *" $branch "*) continue;; esac; fi
+      printf '%s\n' "$package:$arch" >> "$directory/remove.packages" || return 1
+      [ "$mode" != apache ] || printf '%s\n' "$package:$arch" >> "$directory/apache.remove" || return 1
+    done < "$directory/mapping"
+    sort -u "$directory/install.packages" -o "$directory/install.packages" || return 1
+    [ -s "$directory/install.packages" ] || return 0
+  fi
+  # Temporarily remove the installed Apache PHP meta so APT cannot upgrade its handler during removal.
+  # The normal install plan restores it; it must never enter the permanent removal list.
+  if [ -s "$directory/apache.remove" ]; then
+    listed=$(upgrade_php_output_pending_removals <(printf '%s\n' libapache2-mod-php:all) "$packages") || return 1
+    if [ -n "$listed" ]; then
+      grep -qxF libapache2-mod-php "$directory/install.packages" || return 1
+      printf '%s\n' "$listed" >> "$directory/apache.remove" || return 1
+      sort -u "$directory/apache.remove" -o "$directory/apache.remove" || return 1
+    fi
+  fi
+  while IFS= read -r package; do [ -z "$package" ] || installs+=("$package"); done < "$directory/install.packages"
+  listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
+  while IFS= read -r package; do [ -z "$package" ] || removals+=("$package"); done <<< "$listed"
+  listed=$(upgrade_php_output_pending_removals "$directory/apache.remove" "$packages") || return 1
+  while IFS= read -r package; do [ -z "$package" ] || modules+=("$package"); done <<< "$listed"
+  if [ -f "$directory/apache.package" ]; then apache=$(cat "$directory/apache.package") || return 1; fi
+  # A completed current-default role needs no reinstall. Untracked versioned roles gain a meta once.
+  if ! $pending && [ "${#removals[@]}" -eq 0 ]; then
+    status=0
+    for package in "${installs[@]}"; do
+      [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" = 'install ok installed' ] || status=1
+    done
+    if [ "$status" -eq 0 ]; then
+      # Delete only this invocation's unstarted mktemp records; no backup or mutation occurred.
+      rm -f -- "$directory/"{packages.before,target,branch,mapping,retained,install.packages,remove.packages,apache.remove,apache.package} || return 1
+      rmdir -- "$directory" || return 1
+      return 0
+    fi
+  fi
+  if [ -n "$apache" ]; then
+    if [ "${#modules[@]}" -gt 0 ] || $pending; then : > "$directory/apache.handoff" || return 1
+    elif upgrade_php_apache_module_is_enabled "$apache"; then :
+    else
+      status=$?; [ "$status" -eq 1 ] || return 1
+      : > "$directory/apache.handoff" || return 1
+    fi
+  fi
+  if ! $pending; then
+    for file in etc/php etc/php5 etc/apache2 var/lib/dpkg/status var/lib/apt/extended_states var/lib/ucf/hashfile var/lib/ucf/registry; do
+      [ ! -e "/$file" ] && [ ! -L "/$file" ] || backups+=("$file")
+    done
+    tar -C / -czpf "$directory/config-state.tar.gz" "${backups[@]}" || return 1
+  fi
+  arguments=("${installs[@]}")
+  [ -z "$apache" ] || arguments+=("$apache")
+  for package in "${removals[@]}"; do arguments+=("$package-"); done
+  native=$(dpkg --print-architecture) || return 1
+  [[ "$native" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+  if [ ! -f "$directory/normal-dist-upgrade.plan" ]; then
+    (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate dist-upgrade) > "$directory/normal-dist-upgrade.plan.new" 2>&1 || return 1
+    mv "$directory/normal-dist-upgrade.plan.new" "$directory/normal-dist-upgrade.plan" || return 1
+  fi
+  cat "$directory/remove.packages" > "$directory/install.allowed-removals.new" || return 1
+  awk '
+    /^Purg / { bad=1 }
+    /^Remv / {
+      if ($2 !~ /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9][a-z0-9-]*)?$/) bad=1
+      else print $2
+    }
+    END { exit bad }
+  ' "$directory/normal-dist-upgrade.plan" >> "$directory/install.allowed-removals.new" || return 1
+  mv "$directory/install.allowed-removals.new" "$directory/install.allowed-removals" || return 1
+  for ((attempt=0; attempt<8; attempt++)); do
+    (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate --reinstall install "${arguments[@]}") > "$directory/install.plan" 2>&1 || return 1
+    upgrade_php_check_plan "$directory/install.allowed-removals" "$directory/install.plan" false "$native" && break
+    [ "$attempt" -lt 7 ] || { echo "dss:error: PHP preservation exceeded eight simulations; inspect $directory/install.plan." >&2; return 1; }
+    preserved=$(upgrade_php_output_preserved_packages "$directory/install.allowed-removals" "$directory/install.plan" "$packages" "$native") || {
+      echo "dss:error: Cannot safely preserve packages in the PHP plan; inspect $directory/install.plan." >&2; return 1;
+    }
+    [ -n "$preserved" ] || return 1
+    while IFS= read -r package; do
+      for requested in "${installs[@]}" "$apache"; do
+        requested=${requested%:all}
+        if [ "$requested" = "$package" ] || [ "$requested:$native" = "$package" ]; then
+          echo "dss:error: PHP plan still removes explicitly requested $package; inspect $directory/install.plan." >&2; return 1
+        fi
+      done
+      (umask "$package_umask" && upgrade_php_has_candidate "$package") || {
+        echo "dss:error: No verified target candidate to preserve $package; inspect $directory/install.plan." >&2; return 1;
+      }
+      printf '%s\n' "$package" >> "$directory/install.packages" || return 1
+      installs+=("$package")
+      arguments+=("$package")
+    done <<< "$preserved"
+  done
+  if [ "${#modules[@]}" -gt 0 ]; then
+    (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate remove "${modules[@]}") > "$directory/remove.plan" 2>&1 || return 1
+    cat "$directory/remove.packages" "$directory/apache.remove" > "$directory/apache.allowed-removals" || return 1
+    upgrade_php_check_plan "$directory/apache.allowed-removals" "$directory/remove.plan" true "$native" || return 1
+  fi
+  (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --download-only --reinstall install "${arguments[@]}") || return 1
+  : > "$directory/started" || return 1
+  echo "dss:stage: Migrating installed PHP roles to Debian default $default; configs/inventory: $directory" >&2
+  if [ -f "$directory/apache.handoff" ]; then
+    upgrade_php_apache_control "$directory" prepare || return 1
+    if [ "${#modules[@]}" -gt 0 ]; then
+      (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false remove "${modules[@]}") || return 1
+      # Removing the old handler can also remove its no-conffile PHP metapackage.
+      packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
+      listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
+      arguments=("${installs[@]}")
+      [ -z "$apache" ] || arguments+=("$apache")
+      while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done <<< "$listed"
+    fi
+  fi
+  (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --no-download --reinstall install "${arguments[@]}") || return 1
+  for package in "${installs[@]}" "$apache"; do
+    [ -n "$package" ] || continue
+    [ "$(dpkg-query -W -f='${Status}' "$package")" = 'install ok installed' ] || return 1
+  done
+  if [ -n "$apache" ]; then
+    upgrade_php_apache_module_is_enabled "$apache" || { echo "dss:error: Package scripts did not enable $apache; inspect $directory before retrying." >&2; return 1; }
+  fi
+  audit=$(LC_ALL=C dpkg --audit 2>&1) || { printf '%s\n' "$audit" >&2; return 1; }
+  [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
+  (umask "$package_umask" && LC_ALL=C apt-get check) || return 1
+  if [ -f "$directory/apache.state" ]; then upgrade_php_apache_control "$directory" finish || return 1; fi
+  : > "$directory/completed" || return 1
+)
+}
+
+# Old nss-systemd can recurse through a D-Bus daemon retained across release upgrades.
+# Keep dynamic identities available through the same-namespace direct lookup path.
+function upgrade_prepare_nss_lookup() {
+  local info version manager_namespace self_namespace records owner probe status
+  [ "$(id -u)" = 0 ] || return 0
+  [ -z "${SYSTEMD_NSS_BYPASS_BUS:-}${SYSTEMD_NSS_DYNAMIC_BYPASS:-}" ] || return 0
+  if ! info=$(dpkg-query -W -f='${Status}\t${Version}\n' libnss-systemd 2>/dev/null); then
+    echo 'dss:trace: Cannot identify nss-systemd; retaining normal NSS lookups.' >&2
+    return 0
+  fi
+  case "$info" in
+    *$'\n'*) echo 'dss:trace: Cannot identify one nss-systemd version; retaining normal NSS lookups.' >&2; return 0;;
+    *" ok installed"$'\t'?*) version=${info##*$'\t'};;
+    *) echo 'dss:trace: Cannot verify installed nss-systemd; retaining normal NSS lookups.' >&2; return 0;;
+  esac
+  version=${version#*:}; version=${version%%[!0-9]*}
+  case "$version" in
+    23[2-9]|24[0-4]) :;;
+    '') echo 'dss:trace: Cannot verify nss-systemd version; retaining normal NSS lookups.' >&2; return 0;;
+    *) return 0;;
+  esac
+  if ! command -v timeout >/dev/null || ! command -v getent >/dev/null; then
+    echo 'dss:warn: Cannot bound the NSS lookup probe; retaining normal NSS lookups.' >&2
+    return 0
+  fi
+  manager_namespace=$(readlink /proc/1/ns/mnt) || manager_namespace=
+  self_namespace=$(readlink /proc/self/ns/mnt) || self_namespace=
+  records=/run/systemd/dynamic-uid
+  # No directory means no direct records yet; future records must remain visible here.
+  if [ ! -e "$records" ] && [ ! -L "$records" ]; then records=/run/systemd; fi
+  if [ -z "$manager_namespace" ] || [ "$manager_namespace" != "$self_namespace" ] ||
+      [ ! -d "$records" ] || [ -L "$records" ]; then
+    echo 'dss:warn: Cannot verify the systemd dynamic-user namespace; retaining normal NSS lookups.' >&2
+    return 0
+  fi
+  owner=$(stat -c %u "$records") || owner=
+  if [ "$owner" != 0 ]; then
+    echo 'dss:warn: Cannot verify root ownership of systemd dynamic-user records; retaining normal NSS lookups.' >&2
+    return 0
+  fi
+  probe="dss-nss-$$-$RANDOM"
+  if timeout -k 1 3 getent passwd "$probe" >/dev/null 2>&1; then status=0; else status=$?; fi
+  case "$status" in
+    2) return 0;;
+    124|137) :;;
+    *) echo 'dss:trace: NSS lookup did not demonstrate the old D-Bus timeout; retaining normal NSS lookups.' >&2; return 0;;
+  esac
+  if SYSTEMD_NSS_BYPASS_BUS=1 timeout -k 1 1 getent passwd "$probe" >/dev/null 2>&1; then status=0; else status=$?; fi
+  if [ "$status" != 2 ]; then
+    echo 'dss:warn: Direct NSS lookup was not a fast missing-user result; retaining normal NSS lookups.' >&2
+    return 0
+  fi
+  export SYSTEMD_NSS_BYPASS_BUS=1
+  echo 'dss:warn: Using direct systemd dynamic-user lookups for this upgrade process after an NSS D-Bus timeout.' >&2
+  return 0
+}
+
 # Automatic crossgrade planning.
-# Legacy foreign applications may remain; native tools and the service manager must be converted.
+# A completed crossgrade permits only amd64 and architecture-independent packages.
 # Keep the original conversion inventory until every recorded target has been verified.
 # APT_CONFIG loads before apt.conf.d and apt.conf: unchanged probes expose defaults.
 # Run before package inventory or any i386->amd64 mutation; never override user pins.
+# Architecture-specific preferences can contradict conversion even when both indexes are enabled.
+function crossgrade_check_apt_architecture_preferences() {
+  local main=$1 parts=$2 file name
+  local -a files=()
+  [ ! -f "$main" ] || files+=("$main")
+  for file in "$parts/"*; do
+    [ -f "$file" ] || continue
+    name=${file##*/}
+    case "$name" in .*|*[!a-zA-Z0-9_.-]*) continue;; *.*) case "$name" in *.pref) :;; *) continue;; esac;; esac
+    files+=("$file")
+  done
+  for file in "${files[@]}"; do
+    # Package/Pin/Pin-Priority stanzas: positive i386 pins and negative amd64 pins need review.
+    if ! awk '
+      function check( pintext,has_i386,has_amd64) {
+        pintext=tolower(pin); gsub(/["\047]/, "", pintext)
+        has_i386=(tolower(package) ~ /:i386([[:space:]]|$)/ || (pintext ~ /^[[:space:]]*release[[:space:]]+/ && pintext ~ /(^|[,[:space:]])b[[:space:]]*=[[:space:]]*i386([,[:space:]]|$)/))
+        has_amd64=(tolower(package) ~ /:amd64([[:space:]]|$)/ || (pintext ~ /^[[:space:]]*release[[:space:]]+/ && pintext ~ /(^|[,[:space:]])b[[:space:]]*=[[:space:]]*amd64([,[:space:]]|$)/))
+        if (priority ~ /^[+-]?[0-9]+$/ && ((has_i386 && priority+0 > 0) || (has_amd64 && priority+0 < 0))) {
+          printf "dss:error: Review architecture preference at %s:%d before crossgrade; adjust the 32-bit preference or amd64 exclusion manually. No preferences were changed.\n", FILENAME, first
+          bad=1
+        }
+        package=""; pin=""; priority=""; field=""; first=0
+      }
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*$/ { check(); next }
+      {
+        if (!first) first=FNR
+        value=$0
+        if ($0 ~ /^[^[:space:]][^:]*:/) {
+          field=tolower($0); sub(/:.*/, "", field); sub(/^[^:]*:[[:space:]]*/, "", value)
+        }
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        if (field == "package") package=package " " value
+        else if (field == "pin") pin=pin " " value
+        else if (field == "pin-priority") priority=value
+      }
+      END { check(); exit bad }
+    ' "$file" >&2; then return 1; fi
+  done
+}
+
 function crossgrade_check_apt_architecture_config() {
   (
-    local directory probe status
+    local directory probe status key value path apt_root=/ apt_etc=etc/apt apt_main=apt.conf apt_parts=apt.conf.d apt_preferences=preferences apt_preferenceparts=preferences.d
     if [ -n "${APT_CONFIG:-}" ]; then
-      printf '%s\n' 'dss:error: Existing APT_CONFIG prevents a reliable crossgrade architecture check; review and unset it first.' >&2
+      printf '%s\n' "dss:error: Existing APT_CONFIG=$APT_CONFIG prevents a reliable crossgrade architecture check; review that file and unset APT_CONFIG first." >&2
       return 1
     fi
     umask 077
@@ -1159,6 +1673,19 @@ function crossgrade_check_apt_architecture_config() {
       printf '%s\n' 'dss:error: Cannot read APT architecture configuration; crossgrade was not started.' >&2
       return "$status"
     fi
+    if ! awk 'tolower($1) == "rootdir" && split($0, quoted, /"/) == 3 && quoted[2] != "" { bad=1 } END { exit bad }' "$directory/dump"; then
+      echo 'dss:error: APT RootDir redirects configuration and package paths; review and unset this alternate-root setting before crossgrading. No configuration was changed.' >&2
+      return 1
+    fi
+    # apt-config has no source provenance; locate likely settings without printing configuration values.
+    while IFS=$'\t' read -r key value; do
+      case "$key" in dir) apt_root=$value;; dir::etc) apt_etc=$value;; dir::etc::main) apt_main=$value;; dir::etc::parts) apt_parts=$value;; dir::etc::preferences) apt_preferences=$value;; dir::etc::preferencesparts) apt_preferenceparts=$value;; esac
+    done < <(awk 'split($0, quoted, /"/) == 3 { key=tolower($1); if (key ~ /^dir($|::etc($|::(main|parts|preferences|preferencesparts)$))/) print key "\t" quoted[2] }' "$directory/dump")
+    case "$apt_etc" in /*) :;; *) apt_etc="${apt_root%/}/$apt_etc";; esac
+    case "$apt_main" in /*) :;; *) apt_main="$apt_etc/$apt_main";; esac
+    case "$apt_parts" in /*) :;; *) apt_parts="$apt_etc/$apt_parts";; esac
+    case "$apt_preferences" in /*) :;; *) apt_preferences="$apt_etc/$apt_preferences";; esac
+    case "$apt_preferenceparts" in /*) :;; *) apt_preferenceparts="$apt_etc/$apt_preferenceparts";; esac
     # Example dump: APT::Architecture "probe"; APT::Architectures:: "i386";
     # apt-config normalizes global lists; binary-specific lists also need both arches.
     if awk -v probe="$probe" '
@@ -1186,9 +1713,15 @@ function crossgrade_check_apt_architecture_config() {
         exit (!native || bad)
       }
     ' "$directory/dump"; then
-      return 0
+      crossgrade_check_apt_architecture_preferences "$apt_preferences" "$apt_preferenceparts"
+      return $?
     fi
     printf '%s\n' 'dss:error: Persistent APT architecture overrides block crossgrade. Remove APT::Architecture pins; explicit APT::Architectures lists must include i386 and amd64, including binary-specific settings.' >&2
+    printf '%s\n' "dss:error: Review $apt_main and $apt_parts; remove native architecture pins and make explicit architecture lists permit both i386 and amd64. Follow any #include directives. No configuration was changed." >&2
+    for path in "$apt_main" "$apt_parts/"*; do
+      if [ ! -f "$path" ] || [ ! -r "$path" ]; then continue; fi
+      awk 'tolower($0) ~ /architectures?|#include/ { printf "dss:error: Review architecture setting or include at %s:%d.\n", FILENAME, FNR }' "$path" >&2
+    done
     return 1
   )
 }
@@ -1212,6 +1745,19 @@ function crossgrade_bookworm_is_pending() {
   crossgrade_bookworm_output_pending_directory >/dev/null
 }
 
+# Active foreign packages include failed/interrupted states; residual configuration is harmless.
+function crossgrade_output_foreign_packages() {
+  local packages
+  packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n') || {
+    echo 'dss:error: Cannot inspect all package architectures; crossgrade completion is unconfirmed.' >&2; return 2;
+  }
+  printf '%s\n' "$packages" | awk -F '\t' '
+    NF && NF != 3 { bad=1; next }
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && $3 != "amd64" && $3 != "all" { print $2 ":" $3 " (" $1 ")" }
+    END { exit bad }
+  ' || return 2
+}
+
 function crossgrade_bookworm_check_native() {
   local native bits packages
   native=$(dpkg --print-architecture) || return 2
@@ -1230,11 +1776,31 @@ function crossgrade_bookworm_check_native() {
 }
 
 # shellcheck shell=bash
+# Both architectures must be enabled by every active binary source during conversion.
+function crossgrade_check_source_architectures() {
+  local records record file line type filters base added removed architecture
+  records=$(apt_sources_list) || return 1
+  while IFS= read -r record; do
+    IFS=$'\t' read -r file line _ type _ <<< "$record"
+    [ "$type" = deb ] || continue
+    # Components may be empty for flat repositories; read the architecture field from the end.
+    filters=${record##*$'\t'}
+    [ "$filters" != '*' ] || continue
+    IFS='|' read -r base added removed <<< "${filters//,/ }"
+    for architecture in i386 amd64; do
+      case " $removed " in *" $architecture "*) echo "dss:error: Source $file:$line excludes $architecture; enable both i386 and amd64 first." >&2; return 1;; esac
+      if [ -n "$base" ]; then
+        case " $base $added " in *" $architecture "*) :;; *) echo "dss:error: Source $file:$line excludes $architecture; enable both i386 and amd64 first." >&2; return 1;; esac
+      fi
+    done
+  done <<< "$records"
+}
+
 # Output the release at which an explicitly permitted architecture conversion must run.
 # Permission alone does not request conversion while the chosen release supports i386.
 function upgrade_output_crossgrade_release() {
   local family=$1 current=$2 target=$3 enabled=${UPGRADE_CROSSGRADE-false}
-  local native bits kernel boundary releases state pending=false
+  local native bits kernel boundary releases state foreign_packages pending=false
   case "$enabled" in true|false) :;; *) echo 'dss:error: Internal crossgrade permission must be true or false.' >&2; return 1;; esac
   case "$family" in
     debian) releases=$ALL_DEBIAN; boundary=bookworm;;
@@ -1256,6 +1822,11 @@ function upgrade_output_crossgrade_release() {
     amd64:64)
       if $pending; then state=1
       else crossgrade_bookworm_check_native; state=$?; fi
+      # Ordinary amd64 upgrades may keep multiarch libraries; requested conversions may not.
+      if [ "$state" -eq 0 ] && $enabled; then
+        foreign_packages=$(crossgrade_output_foreign_packages) || return 1
+        [ -z "$foreign_packages" ] || state=1
+      fi
       [ "$state" -ne 0 ] || return 0
       [ "$state" -eq 1 ] || return 1;;
     i386:32|i386:64|amd64:32) :;;
@@ -1290,6 +1861,7 @@ function upgrade_output_crossgrade_release() {
     return 1
   fi
   if [ "$family" = debian ]; then crossgrade_check_apt_architecture_config || return 1; fi
+  crossgrade_check_source_architectures || return 1
   printf '%s\n' "$boundary"
 }
 
@@ -1319,6 +1891,7 @@ function upgrade_crossgrade_before_release() {
   local family=$1 old=$2 target=$3 current checkpoint native bits
   current=$(distro_output_codename) || return 1
   [ "$current" = "$old" ] || return 0
+  if [ "$family:$old" = debian:bookworm ]; then crossgrade_bookworm_recover_bootstrap || return $?; fi
   checkpoint=$(upgrade_output_crossgrade_release "$family" "$current" "$target") || return 1
   [ -n "$checkpoint" ] || return 0
   if [ "$current" != "$checkpoint" ]; then
@@ -1346,16 +1919,58 @@ function upgrade_crossgrade_before_release() {
 # End automatic crossgrade planning.
 
 # Validate the complete requested path before any package/source mutation.
+# Predict only current package-policy blockers; future archive feasibility is checked later.
+function upgrade_check_crossgrade_package_blockers() {
+  local allow=${UPGRADE_CROSSGRADE_ALLOW_BLOCKERS-false} packages issues issue level=error
+  case "$allow" in
+    true|false) :;;
+    *) echo 'dss:error: UPGRADE_CROSSGRADE_ALLOW_BLOCKERS must be true or false.' >&2; return 1;;
+  esac
+  packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n') || {
+    echo 'dss:error: Cannot inspect package holds and architectures before crossgrading.' >&2; return 1;
+  }
+  issues=$(printf '%s\n' "$packages" | awk -F '\t' '
+    $1 ~ /^hold / { print "Held package: " $2 ":" ($3 == "" ? "unknown" : $3) }
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ &&
+      $3 != "i386" && $3 != "amd64" && $3 != "all" {
+      print "Unsupported foreign architecture: " $2 ":" ($3 == "" ? "unknown" : $3)
+    }
+  ') || return 1
+  [ -n "$issues" ] || return 0
+  if $allow; then level=warn; fi
+  while IFS= read -r issue; do printf 'dss:%s: %s\n' "$level" "$issue" >&2; done <<< "$issues"
+  if $allow; then
+    echo 'dss:warn: --allow-crossgrade-blockers permits this attempted conversion; final native amd64 package verification remains mandatory.' >&2
+    return 0
+  fi
+  echo 'dss:error: Resolve these package blockers before release changes, or use --allow-crossgrade-blockers to attempt the crossgrade.' >&2
+  return 1
+}
+
+
 function upgrade_check_path() {
   echo "dss:stage: Checking complete upgrade path $2 -> $3" >&2
   local family=$1 current=$2 target=$3 issues action rule boundary packages remedy arch crossgrade_release blocked=false
   local purge=${PURGE_INCOMPATIBLE_PACKAGES-false}
+  local remove_obsolete=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} obsolete
+  case "$remove_obsolete" in true|false) :;; *) echo 'dss:error: REMOVE_OBSOLETE_CROSSGRADE_PACKAGES must be true or false.' >&2; return 1;; esac
   case "$purge" in true|false) :;; *) echo 'dss:error: PURGE_INCOMPATIBLE_PACKAGES must be true or false.' >&2; return 1;; esac
   local releases
   case "$family" in debian) releases=$ALL_DEBIAN;; ubuntu) releases=$ALL_UBUNTU;; *) return 1;; esac
   case " $releases " in *" $current "*) :;; *) echo "dss:error: Unknown $family starting release: $current" >&2; return 1;; esac
   case " $releases " in *" $target "*) :;; *) echo "dss:error: Unknown $family target release: $target" >&2; return 1;; esac
+  usrmerge_check_upgrade_path "$family" "$current" "$target" || blocked=true
   if crossgrade_release=$(upgrade_output_crossgrade_release "$family" "$current" "$target"); then :; else blocked=true; fi
+  if [ -n "$crossgrade_release" ]; then
+    upgrade_check_crossgrade_package_blockers || blocked=true
+  fi
+  if [ "$family:$crossgrade_release" = debian:bookworm ]; then
+    obsolete=$(upgrade_output_crossgrade_obsolete_packages) || return 1
+    if [ -n "$obsolete" ] && ! $remove_obsolete; then
+      echo "dss:error: Known obsolete foreign packages will block the Bookworm crossgrade: ${obsolete//$'\n'/ }. Review removals and set REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=true to permit verified obsolete compiler/library/alias removal after backup." >&2
+      blocked=true
+    fi
+  fi
   if ! is_distro_name_older "$current" "$target"; then $blocked && return 1; return 0; fi
   arch=$(dpkg --print-architecture) || return 1
   if [ "$family" = debian ] && ! is_distro_name_older "$target" trixie; then
@@ -1391,6 +2006,16 @@ function upgrade_check_path() {
     echo "dss:error: Requested upgrade path $current -> $target blocked before changes. PURGE_INCOMPATIBLE_PACKAGES=true backs up and purges config-only blockers; manual migrations cannot be bypassed with it." >&2
     return 1
   fi
+  local repository_target='' release found=false
+  if [ "$family" = debian ]; then
+    for release in $ALL_DEBIAN; do
+      if $found; then repository_target=$release; break; fi
+      [ "$release" != "$current" ] || found=true
+    done
+  else repository_target=$(ubuntu_output_next_release "$current") || return 1; fi
+  [ -n "$repository_target" ] || return 1
+  apt_sources_check_releases_and_vendors "$repository_target" || return 1
+  usrmerge_recover_pending || return $?
   upgrade_check_incompatible_packages "$family" "$current" "$target"
 }
 
@@ -1427,6 +2052,7 @@ function upgrade_preflight_action() {
       done
     fi
   fi
+  if [ "$family" = debian ]; then crossgrade_bookworm_recover_bootstrap || return $?; fi
   upgrade_check_path "$family" "$current" "$target"
 }
 
@@ -1529,7 +2155,7 @@ function upgrade_check_incompatible_packages() {
     return 1
   fi
   mv -- "$backup/packages.requested" "$backup/packages.purged" || return 1
-  echo "dss:warn: Purged incompatible packages: ${packages[*]}. Backup: $backup. Reinstall manually after upgrading: apt-get install ${packages[*]}" >&2
+  echo "dss:warn: Purged incompatible packages: ${packages[*]}. Backup: $backup. Review current package names and availability before manual reinstall after upgrading." >&2
   return 0
 }
 
@@ -1679,20 +2305,164 @@ return $ret
 }
 
   
+# The packaged converter handles the actual merge; check known executable collisions first.
+function usrmerge_is_complete() {
+  local name directory expected
+  for name in bin sbin lib lib32 lib64 libx32; do
+    directory="/$name"; expected="/usr/$name"
+    case "$name" in lib32|lib64|libx32) [ -e "$directory" ] || [ -L "$directory" ] || continue;; esac
+    [ -L "$directory" ] && [ "$(readlink -f -- "$directory")" = "$expected" ] || return 1
+  done
+}
+
+# Exactly one configured package owner, no owner (1), or ambiguous/query failure (2).
+function usrmerge_output_file_owner() {
+  local path=$1 owners owner status
+  if owners=$(LC_ALL=C dpkg-query -S "$path" 2>/dev/null); then :
+  else status=$?; [ "$status" -eq 1 ] && return 1; return 2; fi
+  case "$owners" in *$'\n'*|*','*) return 2;; esac
+  case "$owners" in *": $path") owner=${owners%": $path"};; *) return 2;; esac
+  case "$owner" in ''|*[!a-z0-9.+:-]*) return 2;; esac
+  status=$(dpkg-query -W -f='${Status}' "$owner" 2>/dev/null) || return 2
+  case "$status" in *' ok installed') printf '%s\n' "$owner";; *) return 2;; esac
+}
+
+# Tab records: archive/manual, unowned/source path, packaged/destination path, owner/reason.
+# shortcut: inspect top-level /bin and /sbin only; library/nested collisions need manual converter recovery.
+function usrmerge_output_collisions() {
+  local name directory source target left right left_status right_status
+  for name in bin sbin; do
+    directory="/$name"
+    [ -L "$directory" ] && continue
+    [ -d "$directory" ] || continue
+    for source in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+      [ -e "$source" ] || [ -L "$source" ] || continue
+      target="/usr/$name/${source##*/}"
+      [ -e "$target" ] || [ -L "$target" ] || continue
+      case "$source$target" in *$'\n'*|*$'\t'*|*$'\r'*) echo 'dss:error: Unsupported control characters in usrmerge collision paths; inspect manually.' >&2; return 1;; esac
+      case "${source##*/}" in *[!a-zA-Z0-9._+-]*) printf 'manual\t%s\t%s\tunsupported executable name\n' "$source" "$target"; continue;; esac
+      # These aliases are accepted by convert-usrmerge; other symlink/type conflicts stay manual.
+      if [ -L "$source" ] && { [ "$(readlink -- "$source")" = "$target" ] || { [ -L "$target" ] && [ "$(readlink -- "$source")" = "$(readlink -- "$target")" ]; }; }; then continue; fi
+      if [ -L "$target" ] && [ "$(readlink -- "$target")" = "$source" ]; then continue; fi
+      if [ ! -f "$source" ] || [ -L "$source" ] || [ ! -f "$target" ] || [ -L "$target" ]; then
+        printf 'manual\t%s\t%s\tunsupported file types\n' "$source" "$target"; continue
+      fi
+      left=$(usrmerge_output_file_owner "$source"); left_status=$?
+      right=$(usrmerge_output_file_owner "$target"); right_status=$?
+      if [ "$left_status:$right_status" = 1:0 ]; then printf 'archive\t%s\t%s\t%s\n' "$source" "$target" "$right"
+      elif [ "$left_status:$right_status" = 0:1 ]; then printf 'archive\t%s\t%s\t%s\n' "$target" "$source" "$left"
+      else printf 'manual\t%s\t%s\townership ambiguous or neither/existing package-owned copies\n' "$source" "$target"; fi
+    done
+  done
+}
+
+function usrmerge_check_collisions() {
+  local prefer=${PREFER_PACKAGED_USRMERGE_FILES-false} collisions action source target owner blocked=false
+  case "$prefer" in true|false) :;; *) echo 'dss:error: PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
+  collisions=$(usrmerge_output_collisions) || return 1
+  while IFS=$'\t' read -r action source target owner; do
+    [ -n "$action" ] || continue
+    if [ "$action" = archive ] && $prefer; then
+      echo "dss:warn: usrmerge will archive unowned $source and retain $target ($owner)." >&2
+    else
+      echo "dss:error: usrmerge collision: $source and $target ($owner)." >&2
+      [ "$action" != archive ] || echo 'dss:error: Review the unowned executable; PREFER_PACKAGED_USRMERGE_FILES=true explicitly archives it and keeps the packaged counterpart.' >&2
+      blocked=true
+    fi
+  done <<< "$collisions"
+  ! $blocked
+}
+
+function usrmerge_check_upgrade_path() {
+  local family=$1 current=$2 target=$3 boundary
+  case "${PREFER_PACKAGED_USRMERGE_FILES-false}" in true|false) :;; *) echo 'dss:error: PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
+  case "$family" in debian) boundary=bookworm;; ubuntu) boundary=hirsute;; *) return 1;; esac
+  is_distro_name_older "$current" "$target" || return 0
+  is_distro_name_older "$target" "$boundary" && return 0
+  if { [ -e "/etc/unsupported-skip-usrmerge-conversion" ] || [ -L "/etc/unsupported-skip-usrmerge-conversion" ]; } && ! usrmerge_is_complete; then
+    echo 'dss:error: Requested path requires usrmerge, but /etc/unsupported-skip-usrmerge-conversion disables it; review that marker manually before upgrading.' >&2
+    return 1
+  fi
+  usrmerge_check_collisions
+}
+
+function usrmerge_archive_collisions() {
+(
+  umask 077
+  local collisions=$1 baseline parent directory action source target owner relative current status
+  [ -n "$collisions" ] || return 0
+  record_config_state >&2 || return 1
+  baseline=$(config_state_output_baseline) || return 1
+  parent="$baseline.usrmerge"
+  [ ! -L "$parent" ] || return 1
+  mkdir -p -- "$parent" && chmod u=rwx,go= -- "$parent" || return 1
+  directory=$(mktemp -d "$parent/files.XXXXXX") || return 1
+  echo "dss:warn: usrmerge collision backup/attempt directory: $directory" >&2
+  printf '%s\n' "$collisions" > "$directory/collisions.tsv" || return 1
+  dpkg-query -W -f='${Package}\t${Architecture}\t${Status}\t${Version}\n' > "$directory/packages.before" || return 1
+  while IFS=$'\t' read -r action source target owner; do
+    [ "$action" = archive ] || return 1
+    relative=${source#/}
+    printf '%s\0' "$relative" >> "$directory/archive-paths" || return 1
+  done <<< "$collisions"
+  tar --acls --xattrs -C / -cpf "$directory/files.tar" --null -T "$directory/archive-paths" || return 1
+  while IFS=$'\t' read -r action source target owner; do
+    [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$target" ] && [ ! -L "$target" ] || return 1
+    current=$(usrmerge_output_file_owner "$source"); status=$?
+    [ "$status" -eq 1 ] || return 1
+    current=$(usrmerge_output_file_owner "$target") && [ "$current" = "$owner" ] || return 1
+    relative=${source#/}
+    mkdir -p -- "$directory/originals/${relative%/*}" || return 1
+    mv --no-clobber -- "$source" "$directory/originals/$relative" || return 1
+    [ ! -e "$source" ] && [ ! -L "$source" ] && [ -f "$directory/originals/$relative" ] || return 1
+    printf '%s\t%s\n' "$source" "$directory/originals/$relative" >> "$directory/files.moved" || return 1
+  done <<< "$collisions"
+)
+}
+
 function check_usrmerge() {
-  [ -L /lib ] && return 0
-  echo "dss:warn: /usr not merged.  Trying to install usrmerge to resolve."
-  [ -e /etc/unsupported-skip-usrmerge-conversion ] && rm /etc/unsupported-skip-usrmerge-conversion
-  local duplicatefiles="$(comm -12 \
-  <(find /bin -maxdepth 1 -type f -printf '%f\n' | sort) \
-  <(find /usr/bin -maxdepth 1 -type f -printf '%f\n' | sort))"
-  local info="$(for file in $duplicatefiles; do dpkg -S /bin/$file ; dpkg -S /usr/bin/$file 2>&1 ; done | grep 'no path' | sed 's/.*matching pattern /rm /')"
-  [ ! -z "$info" ] && echo "dss:warn:usrmerge will fail due to file collisions.  You may wish to remove the following: $info"
-  apt_get_install usrmerge
-  local ret=$?
-  [ "$ret" -eq 0 ] && echo "dss:trace:check_usrmerge completed."
-  [ "$ret" -ne 0 ] && echo "dss:error:check usrmerge failed." >&2
-  return  $ret
+  local info status collisions files
+  case "${PREFER_PACKAGED_USRMERGE_FILES-false}" in true|false) :;; *) echo 'dss:error: PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
+  if info=$(dpkg-query -W -f='${Status}' usrmerge 2>/dev/null); then :
+  else status=$?; [ "$status" -eq 1 ] || return "$status"; info=; fi
+  if usrmerge_is_complete; then
+    case "$info" in *' ok unpacked'|*' ok half-configured') dpkg --configure usrmerge || return $?;; esac
+    return 0
+  fi
+  if [ -e "/etc/unsupported-skip-usrmerge-conversion" ] || [ -L "/etc/unsupported-skip-usrmerge-conversion" ]; then
+    echo 'dss:error: usrmerge conversion was explicitly disabled; review /etc/unsupported-skip-usrmerge-conversion manually.' >&2; return 1
+  fi
+  pause_check || return 1
+  usrmerge_check_collisions || return 1
+  collisions=$(usrmerge_output_collisions) || return 1
+  if [ -n "$collisions" ]; then
+    usrmerge_archive_collisions "$collisions" || { echo 'dss:error: usrmerge collision backup/move failed; no converter or APT operation attempted. Review the reported backup directory.' >&2; return 1; }
+  fi
+  if [ -x "/usr/lib/usrmerge/convert-usrmerge" ]; then
+    # Retry the packaged converter before APT can configure other packages on a partial merge.
+    files=$(dpkg-query -L usrmerge) || return 1
+    grep -Fxq -- "/usr/lib/usrmerge/convert-usrmerge" <<< "$files" || return 1
+    "/usr/lib/usrmerge/convert-usrmerge" || return $?
+    usrmerge_is_complete || { echo 'dss:error: usrmerge converter returned without canonical /bin, /sbin and /lib links; inspect manually before package work.' >&2; return 1; }
+    dpkg --configure usrmerge || return $?
+  else
+    case "$info" in *' ok installed'|*' ok unpacked'|*' ok half-configured') echo 'dss:error: Installed/partial usrmerge has no executable packaged converter; restore the package manually before further package work.' >&2; return 1;; esac
+    apt_get_install usrmerge || return $?
+  fi
+  usrmerge_is_complete || { echo 'dss:error: usrmerge did not establish canonical /bin, /sbin and /lib links; stop and inspect before package work.' >&2; return 1; }
+  echo 'dss:trace:check_usrmerge completed.' >&2
+}
+
+function usrmerge_recover_pending() {
+  local info status
+  case "${PREFER_PACKAGED_USRMERGE_FILES-false}" in true|false) :;; *) echo 'dss:error: PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
+  [ -f "/etc/debian_version" ] || return 0
+  if info=$(dpkg-query -W -f='${Status}' usrmerge 2>/dev/null); then :
+  else status=$?; [ "$status" -eq 1 ] && return 0; return "$status"; fi
+  case "$info" in *' ok unpacked'|*' ok half-configured') check_usrmerge;;
+    *' ok installed') usrmerge_is_complete || check_usrmerge;;
+    *) return 0;;
+  esac
 }
 
 function retain_etc_networking_naming_re_enX0() {
@@ -1845,6 +2615,7 @@ function apt_state_output_signature() {
   sources=$(apt_sources_files) || return 1
   {
     printf '%s\n' "$config" "$APT_GET_INSTALL_OPTIONS"
+    printf 'defer-autoremove:%s\n' "${apt_defer_autoremove:-false}"
     dpkg --print-architecture || exit 1
     dpkg --print-foreign-architectures || exit 1
     for binary in apt-get apt-cache apt-config dpkg; do
@@ -2068,65 +2839,30 @@ function dpkg_install() {
 }
 
 function check_systemd_install_matches_init() {
-  [  ! -f /etc/debian_version ] && return 0
-  [ -x /usr/bin/dpkg ] || return 0
-  local psservicemanager=
-  local dpkgservicemanager=
-
-  # lsof -p 1 since ps may have an 'init' when its actually systemd
-  # root         1  0.0  0.0 204588  6864 ?        Ss   Nov30   0:29 /sbin/init
-  #root@pingability:~# ls -l /sbin/init
-  #lrwxrwxrwx 1 root root 20 Dec  3  2017 /sbin/init -> /lib/systemd/systemd
-  #root@pingability:~# lsof -p 1
-  #COMMAND PID USER   FD      TYPE             DEVICE SIZE/OFF       NODE NAME
-  #systemd   1 root  cwd       DIR              202,1     4096          2 /
-  #systemd   1 root  rtd       DIR              202,1     4096          2 /
-  #systemd   1 root  txt       REG              202,1  1141448     238139 /lib/systemd/systemd
-
-  if ps auxf | egrep -qai '^root +1 +.*init'; then
-    if ! lsof -p 1 | grep -qai systemd; then
-      psservicemanager="${psservicemanager}sysvinit"
-    fi
+  [ -f "/etc/debian_version" ] || return 0
+  local running selected running_family selected_family
+  running=$(readlink "/proc/1/exe") || { echo 'dss:error: Cannot read the running PID 1 executable; inspect init before crossgrading.' >&2; return 1; }
+  # Package upgrades can unlink the running binary; its old path still identifies the init family.
+  running=${running%" (deleted)"}
+  selected=$(readlink -f "/sbin/init") || { echo 'dss:error: Cannot resolve /sbin/init; inspect the selected init before crossgrading.' >&2; return 1; }
+  if [ ! -f "/sbin/init" ] || [ ! -x "/sbin/init" ]; then
+    echo 'dss:error: /sbin/init does not select an executable file; inspect init before crossgrading.' >&2; return 1
   fi
-  ps auxf | egrep -qai '^root +1 +.*systemd' && psservicemanager="${psservicemanager}systemd"
-  [ -z "$psservicemanager" ] && lsof -p 1 | grep -qai systemd && psservicemanager="${psservicemanager}systemd"
-
-  # packages will sometimes be
-  # systemd:i386
-  # or
-  # systemd
-
-  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | egrep -qai '^sysvinit(:|$)' && dpkgservicemanager="${dpkgservicemanager}sysvinit"
-  dpkg -l | egrep '^.i|^iU' | awk '{print $2}' | grep -v '^lib' | egrep -qai '^systemd(:|$)' && dpkgservicemanager="${dpkgservicemanager}systemd"
-
-  [ "$psservicemanager" != "$dpkgservicemanager" ] && echo "dss:warn:sysvinit / systemd conflict (between running init/systemd process, and installed packages).  Reboot (and rerun distrorejuve) required? controlling process is '$psservicemanager' (per lsof -p 1), packages are '$dpkgservicemanager'.  Sometimes running $0 --remove-cruft can remove older sysvinit packages to resolve this issue." 2>&1 && return 1
+  case "$running" in
+    /lib/systemd/systemd|/usr/lib/systemd/systemd) running_family=systemd;;
+    /sbin/init|/usr/sbin/init) running_family=init;;
+    *) echo "dss:error: Unknown running PID 1 executable: $running. Inspect init before crossgrading." >&2; return 1;;
+  esac
+  case "$selected" in
+    /lib/systemd/systemd|/usr/lib/systemd/systemd) selected_family=systemd;;
+    /sbin/init|/usr/sbin/init) selected_family=init;;
+    *) echo "dss:error: Unknown executable selected by /sbin/init: $selected. Inspect init before crossgrading." >&2; return 1;;
+  esac
+  if [ "$running_family" != "$selected_family" ]; then
+    echo "dss:error: Running PID 1 is $running_family ($running), but /sbin/init selects $selected_family ($selected). Complete the init transition and boot with the selected init before crossgrading." >&2
+    return 1
+  fi
   return 0
-
-  # sysv wheezy
-  # ps auxf | egrep '^root +1 +'
-  # root         1  0.0  0.0   2320  1340 ?        Ss   Oct08   2:32 init [2]
-  # root         1  0.0  0.0   2320  1340 ?        Ss   Oct08   2:32 init [2]
-  # dpkg -l | grep sysv
-  # ii  sysv-rc                            2.88dsf-41+deb7u1                all          System-V-like runlevel change mechanism
-  # ii  sysvinit                           2.88dsf-41+deb7u1                i386         System-V-like init utilities
-  # ii  sysvinit-utils                     2.88dsf-41+deb7u1                i386         System-V-like utilities
-
-  # dpkg -l | grep systemd
-  # ii  libsystemd-login0:i386             44-11+deb7u5                     i386         systemd login utility library
-
-  # systemd jessie
-  # root@debian:~# ps auxf | egrep '^root +1 +'
-  # root         1  0.3  0.4 204580  7176 ?        Ss   01:59   0:09 /lib/systemd/systemd --system --deserialize 22
-  # root@debian:~# dpkg -l | grep sysv
-  # ii  systemd-sysv                    232-25+deb9u6                amd64        system and service manager - SysV links
-  # ii  sysv-rc                         2.88dsf-59.9                 all          System-V-like runlevel change mechanism
-  # ii  sysvinit-utils                  2.88dsf-59.9                 amd64        System-V-like utilities
-  # root@debian:~# dpkg -l | grep systemd
-  # ii  libpam-systemd:amd64            232-25+deb9u6                amd64        system and service manager - PAM module
-  # ii  libsystemd0:amd64               232-25+deb9u6                amd64        systemd utility library
-  # ii  systemd                         232-25+deb9u6                amd64        system and service manager
-  # ii  systemd-sysv                    232-25+deb9u6                amd64        system and service manager - SysV links
-
 }
 
 # shellcheck shell=bash
@@ -2146,63 +2882,148 @@ function crossgrade_bookworm_output_candidate() {
   printf '%s\n' "$version"
 }
 
-# Every removal must have its amd64 replacement in this same plan or already installed.
+# Every executed removal needs its native replacement or a verified obsolete-package opt-in.
+# Bootstrap only downloads; raw dpkg
+# never applies the simulated removals of the two installed architecture-all task selectors.
 function crossgrade_bookworm_check_plan() {
-  local plan=$1 targets=$2 installed=$3
-  awk -F '\t' '
+  local plan=$1 targets=$2 installed=$3 phase=${4:-remaining} obsolete=${5:-/dev/null}
+  awk -F '\t' -v phase="$phase" '
     FILENAME == ARGV[1] { wanted[$1]=1; if ($3 == "same") coinstall[$1]=1; next }
-    FILENAME == ARGV[2] { if ($1 == "install ok installed" && $3 == "amd64") native[$2]=1; next }
+    FILENAME == ARGV[2] {
+      if ($1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/) {
+        if ($3 == "amd64") native[$2]=1
+        if ($3 == "i386") foreign[$2]=1
+        if ($4 == "yes") essential[$2]=1
+        if ($1 == "install ok installed" && $3 == "all" && $2 ~ /^(tasksel|tasksel-data)$/) bootstrap_all[$2]=1
+      }
+      next
+    }
+    FILENAME == ARGV[3] { approved[$1]=1; next }
     {
       line=$0; split(line, field, /[[:space:]]+/); name=field[2]; sub(/:.*/, "", name)
       if (field[1] == "Inst") {
-        if (field[2] ~ /:i386$/ || line ~ /\[i386\]\)$/) { if (!(name in coinstall)) bad=1 }
+        if (field[2] ~ /:i386$/ || line ~ /\[i386\]\)$/) { if (phase == "cleanup" || !(name in coinstall)) bad=1 }
         else replaced[name]=1
       }
       if (field[1] == "Remv" || field[1] == "Purg") {
+        if (phase == "cleanup" && name in essential) { bad=1; next }
+        if (phase == "bootstrap" && field[1] == "Remv" && name in bootstrap_all &&
+            (field[2] == name || field[2] == name ":all")) next
+        if ((phase == "remaining" || phase == "cleanup") && field[1] == "Remv" && name in approved && name in foreign &&
+            !(name in native) && (field[2] == name || field[2] == name ":i386")) next
         if (field[1] == "Purg" || field[2] ~ /:amd64$/ || (!(field[2] ~ /:/) && name in native) || !(name in wanted)) bad=1
         removed[name]=1
       }
     }
     END { for (name in removed) if (!(name in replaced) && !(name in native)) bad=1; exit bad }
-  ' "$targets" "$installed" "$plan"
+  ' "$targets" "$installed" "$obsolete" "$plan"
 }
 
 # Download to an empty private cache, check the simulated removals, then inspect every archive.
 function crossgrade_bookworm_download() {
-  local directory=$1 targets=$2 installed=$3 phase=$4 file package version arch cache
-  local -a apt_options=()
+  local directory=$1 targets=$2 installed=$3 phase=$4 file package version arch cache candidates status retries=0 progress
+  local -a apt_options=() learned=() essential_options=(--allow-remove-essential)
   shift 4
   read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
+  if [ "$phase" = cleanup ]; then
+    essential_options=(-o APT::Get::allow-remove-essential=false -o APT::Force-LoopBreak=false)
+  fi
   cache=$(mktemp -d "$directory/$phase.XXXXXX") || return 1
   mkdir "$cache/partial" || return 1
   printf '%s\n' "$cache" > "$directory/$phase.cache" || return 1
-  LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
-    -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false --allow-remove-essential --fix-broken --simulate install "$@" \
-    > "$directory/$phase.plan" 2>&1 || return 1
-  crossgrade_bookworm_check_plan "$directory/$phase.plan" "$targets" "$installed" || {
+  while :; do
+    printf '%s\n' "$@" > "$directory/$phase.arguments.new" || return 1
+    if LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
+      -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false "${essential_options[@]}" --fix-broken --simulate install "$@" \
+      > "$directory/$phase.plan" 2>&1; then break; fi
+    # APT 2.6 can omit new direct dependencies while repairing a broken crossgrade.
+    [ "$phase" = remaining ] && [ "$retries" -lt 8 ] || return 1
+    retries=$((retries+1))
+    # English APT rows: "owner : Depends: child ...", followed by indented Depends rows.
+    candidates=$(awk '
+      FILENAME == ARGV[1] {
+        if ($0 ~ /^[a-z0-9][a-z0-9+.-]*:amd64(=[^[:space:]]+)?$/) {
+          name=$0; sub(/:amd64(=.*)?$/, "", name); requested[name]=1
+        }
+        next
+      }
+      {
+        text=$0
+        if (text ~ /^[[:space:]]*[^[:space:]]+[[:space:]]+:[[:space:]]+/) {
+          sub(/^[[:space:]]*/, "", text); owner=text; sub(/[[:space:]].*/, "", owner)
+          if (owner ~ /:/ && owner !~ /:amd64$/) owner=""
+          sub(/:amd64$/, "", owner)
+          sub(/^[^[:space:]]+[[:space:]]+:[[:space:]]+/, "", text)
+        } else if (text !~ /^[[:space:]]+(Pre-?Depends|Depends):/) { owner=""; next }
+        sub(/^[[:space:]]*/, "", text)
+        if (!(owner in requested) || text !~ /^(Pre-?Depends|Depends):[[:space:]]+/) next
+        sub(/^[^:]+:[[:space:]]+/, "", text); name=text; sub(/[[:space:]].*/, "", name)
+        if (name !~ /^[a-z0-9][a-z0-9+.-]*(:amd64)?$/) next
+        sub(/:amd64$/, "", name)
+        if (!(name in requested) && !(name in seen)) { seen[name]=1; print name }
+      }
+    ' "$directory/$phase.arguments.new" "$directory/$phase.plan") || return 1
+    progress=false
+    while IFS= read -r package; do
+      [ -n "$package" ] || continue
+      if version=$(crossgrade_bookworm_output_candidate "$package"); then :
+      else status=$?; [ "$status" -eq 1 ] && continue; return 1; fi
+      [ "${#learned[@]}" -lt 64 ] || return 1
+      set -- "$@" "$package:amd64=$version"
+      learned+=("$package")
+      progress=true
+      echo "dss:info: Selecting required native dependency $package:amd64=$version for crossgrade." >&2
+    done <<< "$candidates"
+    if ! $progress; then
+      echo "dss:error: Cannot resolve native dependencies safely; inspect $directory/$phase.plan before retrying." >&2
+      return 1
+    fi
+  done
+  crossgrade_bookworm_check_plan "$directory/$phase.plan" "$targets" "$installed" "$phase" "${crossgrade_obsolete_approved:-/dev/null}" || {
     echo "dss:error: Crossgrade plan would remove a protected package or reverse architecture; inspect $directory/$phase.plan." >&2
     return 1
   }
   LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
     -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false -o Dir::Cache::archives="$cache" \
-    --allow-remove-essential --fix-broken --download-only install "$@" || return 1
+    "${essential_options[@]}" --fix-broken --download-only install "$@" || return 1
   : > "$directory/$phase.archives" || return 1
   for file in "$cache/"*.deb; do
     [ -f "$file" ] || continue
     package=$(dpkg-deb -f "$file" Package) && version=$(dpkg-deb -f "$file" Version) && arch=$(dpkg-deb -f "$file" Architecture) || return 1
     case "$arch" in
       amd64|all) :;;
-      i386) awk -F '\t' -v package="$package" '$1 == package && $3 == "same" { found=1 } END { exit !found }' "$targets" || {
+      i386) if [ "$phase" = cleanup ] || ! awk -F '\t' -v package="$package" '$1 == package && $3 == "same" { found=1 } END { exit !found }' "$targets"; then
         echo "dss:error: Unapproved i386 archive: $file" >&2; return 1;
-      };;
+      fi;;
       *) echo "dss:error: Unexpected $arch archive: $file" >&2; return 1;;
     esac
     printf '%s\t%s\t%s\t%s\n' "$package" "$version" "$arch" "$file" >> "$directory/$phase.archives" || return 1
   done
+  # Retain auto-mark intent if installation succeeds but a later recovery step fails.
+  : > "$directory/$phase.dependencies.new" || return 1
+  if [ -f "$directory/$phase.dependencies" ]; then
+    cat "$directory/$phase.dependencies" > "$directory/$phase.dependencies.new" || return 1
+  fi
+  for package in "${learned[@]}"; do
+    if awk -F '\t' -v package="$package" '$1 ~ / installed$/ { name=$2; sub(/:.*/, "", name); if (name == package) found=1 } END { exit !found }' "$directory/original.packages"; then :
+    else
+      status=$?; [ "$status" -eq 1 ] || return 1
+      printf '%s:amd64\n' "$package" >> "$directory/$phase.dependencies.new" || return 1
+    fi
+  done
+  LC_ALL=C sort -u "$directory/$phase.dependencies.new" -o "$directory/$phase.dependencies.new" || return 1
+  mv "$directory/$phase.dependencies.new" "$directory/$phase.dependencies" &&
+    mv "$directory/$phase.arguments.new" "$directory/$phase.arguments" || return 1
 }
 
 function crossgrade_bookworm_check_completion() {
-  local directory=$1 audit package version status plan
+  local directory=$1 audit package version status plan records
+  records=$(crossgrade_output_foreign_packages) || return 1
+  if [ -n "$records" ]; then
+    printf '%s\n' "$records" >&2
+    echo 'dss:error: Crossgrade incomplete: active packages must all be amd64 or all. Replace or remove the packages above before continuing; residual configuration-only records are allowed.' >&2
+    return 1
+  fi
   crossgrade_bookworm_check_native || { echo 'dss:error: Crossgrade core package architecture check failed.' >&2; return 1; }
   [ "$(/usr/bin/dpkg --print-architecture)" = amd64 ] || { echo 'dss:error: Crossgrade incomplete: dpkg native architecture is not amd64.' >&2; return 1; }
   [ "$(apt-config dump | awk '$1 == "APT::Architecture" { gsub(/[";]/,"",$2); print $2; exit }')" = amd64 ] || {
@@ -2234,9 +3055,429 @@ function crossgrade_bookworm_check_completion() {
   fi
 }
 
+# Keep Apache stopped while its executable and loadable modules change architecture.
+# The original target inventory and service state remain valid across partial retries.
+function crossgrade_bookworm_apache_handoff() {
+  local directory=$1 action=$2 package state file
+  case "$action" in
+    prepare)
+      if [ ! -f "$directory/apache.state" ]; then
+        if awk -F '\t' '$1 ~ /^(apache2(-bin)?|libapache2-mod-.*)$/ { found=1 } END { exit !found }' "$directory/targets"; then :
+        else state=$?; [ "$state" -eq 1 ] && return 0; return 1; fi
+      fi
+      if [ ! -f "$directory/apache.php-enabled" ]; then
+        if [ -f "$directory/apache.state" ]; then
+          echo "dss:error: Original PHP enablement inventory is missing; review $directory before resuming Apache handoff." >&2
+          return 1
+        fi
+        file=$(mktemp "$directory/apache.php-enabled.XXXXXX") || return 1
+        if (
+          while IFS=$'\t' read -r package _; do
+            case "$package" in libapache2-mod-php[0-9]*)
+              if upgrade_php_apache_module_is_enabled "$package"; then
+                printf '%s\n' "$package" || exit 1
+              else state=$?; [ "$state" -eq 1 ] || exit 1; fi
+              ;;
+            esac
+          done < "$directory/targets"
+        ) > "$file" && mv -f -- "$file" "$directory/apache.php-enabled"; then :
+        else
+          rm -f -- "$file"
+          echo "dss:error: Cannot record original PHP handler enablement; Apache handoff has not started. Review $directory." >&2
+          return 1
+        fi
+      fi
+      upgrade_php_apache_control "$directory" prepare || return 1
+      ;;
+    finish)
+      [ -f "$directory/apache.state" ] || return 0
+      while IFS= read -r package; do
+        [ -n "$package" ] || continue
+        state=$(dpkg-query -W -f='${Status}\t${Architecture}' "$package:amd64") || return 1
+        if [ "$state" != $'install ok installed\tamd64' ] || ! upgrade_php_apache_module_is_enabled "$package"; then
+          echo "dss:error: Native PHP handler $package is not configured and enabled; Apache remains stopped. Review $directory before retrying." >&2
+          return 1
+        fi
+      done < "$directory/apache.php-enabled" || return 1
+      upgrade_php_apache_control "$directory" finish || return 1
+      ;;
+    *) return 1;;
+  esac
+  return 0
+}
+
+# Recovery compares contents; package-created timestamps do not invalidate it.
+function crossgrade_bookworm_bootstrap_configuration() {
+(
+  local path
+  [ -z "${APT_CONFIG:-}${DPKG_ADMINDIR:-}${DPKG_ROOT:-}" ] || return 1
+  case "$APT_GET_INSTALL_OPTIONS" in *Dir::*|*--admindir*|*--root*|*--simulate*|*--download-only*|*--print-uris*) return 1;; esac
+  set -o pipefail
+  {
+    printf 'options:%s\n' "$APT_GET_INSTALL_OPTIONS"
+    for path in /etc/apt /usr/share/keyrings; do
+      if [ -e "$path" ]; then
+        find -L "$path" -maxdepth 2 -type f -exec sha256sum -- {} + || exit 1
+      else printf 'absent:%s\n' "$path"; fi
+    done
+  } | LC_ALL=C sort | sha256sum
+)
+}
+
+# Record authenticated archives and their exact plan before any raw package mutation.
+function crossgrade_bookworm_record_archives() {
+  local directory=$1 phase=$2 package version arch file
+  local -a archives=()
+  case "$phase" in bootstrap|remaining) :;; *) return 1;; esac
+  while IFS=$'\t' read -r package version arch file; do archives+=("$file"); done < "$directory/$phase.archives" || return 1
+  [ "${#archives[@]}" -gt 0 ] || return 1
+  (
+    umask 077
+    cp "$directory/installed" "$directory/$phase.installed" &&
+      cp "$directory/targets" "$directory/$phase.targets" || exit 1
+    : > "$directory/$phase.obsolete" || exit 1
+    if [ "$phase" = remaining ] && [ -f "${crossgrade_obsolete_approved:-/dev/null}" ]; then
+      cp "$crossgrade_obsolete_approved" "$directory/$phase.obsolete" || exit 1
+    fi
+    if [ "$phase" = remaining ]; then
+      cat "$directory/remaining.dependencies" > "$directory/remaining.dependencies.new" || exit 1
+      awk -F '\t' '
+        FILENAME == ARGV[1] { if ($1 ~ / installed$/) { sub(/:.*/, "", $2); original[$2]=1 }; next }
+        FILENAME == ARGV[2] { explicit[$1]=1; next }
+        ($3 == "amd64" || $3 == "all") && !($1 in original) && !($1 in explicit) { print $1 ":amd64" }
+      ' "$directory/original.packages" "$directory/targets" "$directory/remaining.archives" >> "$directory/remaining.dependencies.new" || exit 1
+      LC_ALL=C sort -u "$directory/remaining.dependencies.new" -o "$directory/remaining.dependencies.new" &&
+        mv "$directory/remaining.dependencies.new" "$directory/remaining.dependencies" || exit 1
+    fi
+    sha256sum -- "${archives[@]}" > "$directory/$phase.sha256.new" &&
+      mv "$directory/$phase.sha256.new" "$directory/$phase.sha256" || exit 1
+    crossgrade_bookworm_bootstrap_configuration > "$directory/$phase.configuration.new" &&
+      mv "$directory/$phase.configuration.new" "$directory/$phase.configuration" || exit 1
+    sha256sum -- "$directory/$phase.archives" "$directory/$phase.cache" "$directory/$phase.arguments" \
+      "$directory/$phase.plan" "$directory/$phase.installed" "$directory/$phase.targets" \
+      "$directory/$phase.obsolete" "$directory/$phase.configuration" "$directory/$phase.sha256" \
+      > "$directory/$phase.metadata.sha256.new" &&
+      mv "$directory/$phase.metadata.sha256.new" "$directory/$phase.metadata.sha256" || exit 1
+    : > "$directory/$phase.started"
+  )
+}
+
+# One inventory per pass; retry only archives not configured at their exact saved version.
+function crossgrade_bookworm_output_pending_archives() {
+  local directory=$1 phase=$2 records
+  records=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
+  printf '%s\n' "$records" | awk -F '\t' '
+    FILENAME == ARGV[1] { count++; name[count]=$1; version[count]=$2; arch[count]=$3; file[count]=$4; next }
+    $1 == "install ok installed" { sub(/:.*/, "", $2); configured[$2 SUBSEP $3]=$4 }
+    END { for (row=1; row<=count; row++) if (configured[name[row] SUBSEP arch[row]] != version[row]) print file[row] }
+  ' "$directory/$phase.archives" -
+}
+
+function crossgrade_bookworm_check_package_tools() {
+  local configuration shell
+  crossgrade_bookworm_check_native || return 1
+  for shell in /bin/sh /bin/bash; do
+    [ "$(od -An -tu1 -j4 -N1 "$shell" 2>/dev/null | tr -d ' ')" = 2 ] || {
+      echo "dss:error: $shell is not a verified native ELF shell; repair it from a trusted console before continuing." >&2; return 1;
+    }
+    "$shell" -c ':' || { echo "dss:error: Cannot execute $shell; its binary or ELF loader needs repair from a trusted console." >&2; return 1; }
+  done
+  [ "$(/usr/bin/dpkg --print-architecture)" = amd64 ] || return 1
+  configuration=$(apt-config dump) || return 1
+  printf '%s\n' "$configuration" | awk '$1 == "APT::Architecture" { gsub(/[";]/, "", $2); if ($2 == "amd64") found=1 } END { exit !found }' || return 1
+  apt-get --version >/dev/null
+}
+
+# Replay only the exact authenticated archive set; simulated removals are never executed.
+function crossgrade_bookworm_apply_archives() {
+  local directory=$1 phase=$2 prepare=${3:-false} cache package version arch file hashes configuration status installed targets obsolete pending attempt previous success=false
+  local -a archives=() retry=()
+  case "$phase" in bootstrap|remaining) :;; *) return 1;; esac
+  cache=$(cat "$directory/$phase.cache") || return 1
+  case "$cache" in "$directory/$phase".*) :;; *) return 1;; esac
+  [ -d "$cache" ] && [ ! -L "$cache" ] || return 1
+  installed="$directory/installed"; targets="$directory/targets"; obsolete=/dev/null
+  if [ -f "$directory/$phase.metadata.sha256" ]; then
+    sha256sum --check --status "$directory/$phase.metadata.sha256" || {
+      echo "dss:error: Saved $phase archive metadata changed; no package recovery attempted." >&2; return 1;
+    }
+    installed="$directory/$phase.installed"; targets="$directory/$phase.targets"; obsolete="$directory/$phase.obsolete"
+  elif [ "$phase" = remaining ]; then
+    echo 'dss:error: Remaining crossgrade archives have no verified replay metadata; use a trusted console to inspect or restore the system.' >&2; return 1
+  fi
+  configuration=$(crossgrade_bookworm_bootstrap_configuration) || return 1
+  [ "$configuration" = "$(cat "$directory/$phase.configuration")" ] || {
+    echo 'dss:error: APT configuration or source contents changed after package conversion started; review cached recovery manually.' >&2; return 1;
+  }
+  crossgrade_bookworm_check_plan "$directory/$phase.plan" "$targets" "$installed" "$phase" "$obsolete" || return 1
+  while IFS=$'\t' read -r package version arch file; do
+    case "$file" in "$cache/"*.deb) :;; *) return 1;; esac
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    archives+=("$file")
+  done < "$directory/$phase.archives" || return 1
+  [ "${#archives[@]}" -gt 0 ] || return 1
+  hashes=$(sha256sum -- "${archives[@]}") || return 1
+  [ "$hashes" = "$(cat "$directory/$phase.sha256")" ] || {
+    echo "dss:error: Cached $phase archive hashes changed or are missing; no package recovery attempted." >&2; return 1;
+  }
+  while IFS=$'\t' read -r package version arch file; do
+    [ "$(dpkg-deb -f "$file" Package)" = "$package" ] &&
+      [ "$(dpkg-deb -f "$file" Version)" = "$version" ] &&
+      [ "$(dpkg-deb -f "$file" Architecture)" = "$arch" ] || return 1
+    case "$arch" in amd64|all) :;; i386)
+      awk -F '\t' -v package="$package" '$1 == package && $3 == "same" { found=1 } END { exit !found }' "$targets" || return 1;;
+      *) return 1;;
+    esac
+  done < "$directory/$phase.archives" || return 1
+  if [ "$phase" = bootstrap ]; then
+    for package in dpkg tar apt; do
+      awk -F '\t' -v package="$package" '$1 == package && $3 == "amd64" { found=1 } END { exit !found }' "$directory/$phase.archives" || return 1
+    done
+  fi
+  if [ "$prepare" = true ]; then crossgrade_bookworm_apache_handoff "$directory" prepare || return 1; fi
+  if [ "$phase" = bootstrap ]; then
+    if ! dpkg --force-confnew --force-confmiss --refuse-downgrade --install "${archives[@]}"; then
+      dpkg --force-confnew --force-confmiss --refuse-downgrade --install "${archives[@]}" || return 1
+    fi
+  else
+    retry=("${archives[@]}"); previous=${#retry[@]}
+    for attempt in 1 2 3 4 5 6 7 8; do
+      status=0
+      dpkg --force-confnew --force-confmiss --refuse-downgrade --abort-after="$((2*${#archives[@]}+50))" --install "${retry[@]}" || status=$?
+      pending=$(crossgrade_bookworm_output_pending_archives "$directory" "$phase") || return 1
+      if [ -z "$pending" ]; then
+        [ "$status" -eq 0 ] || return 1
+        success=true; break
+      fi
+      retry=()
+      while IFS= read -r file; do retry+=("$file"); done <<< "$pending"
+      if [ "$attempt" -ge 2 ] && [ "${#retry[@]}" -ge "$previous" ]; then
+        echo 'dss:error: Raw package conversion stopped making progress; verified archives and the Apache maintenance mask were retained.' >&2; return 1
+      fi
+      previous=${#retry[@]}
+    done
+    $success || { echo 'dss:error: Raw package conversion reached its eight-pass limit; inspect the retained package state from a trusted console.' >&2; return 1; }
+  fi
+  [ "$(dpkg --print-architecture)" = amd64 ] || return 1
+  apt-config dump >/dev/null && apt-get --version >/dev/null || return 1
+  if [ "$phase" = remaining ]; then crossgrade_bookworm_check_package_tools || return 1; fi
+  for package in tasksel tasksel-data; do
+    if awk -F '\t' -v package="$package" '$1 == "install ok installed" && $2 == package && $3 == "all" { found=1 } END { exit !found }' "$installed"; then
+      status=$(dpkg-query -W -f='${Status}\t${Architecture}' "$package:all") || return 1
+      [ "$status" = $'install ok installed\tall' ] || {
+        echo "dss:error: Package conversion did not preserve configured $package:all; inspect package state before resuming." >&2; return 1;
+      }
+    else status=$?; [ "$status" -eq 1 ] || return 1; fi
+  done
+  (umask 077; : > "$directory/$phase.completed") || return 1
+}
+
+function crossgrade_bookworm_apply_bootstrap() {
+  crossgrade_bookworm_apply_archives "$1" bootstrap "${2:-false}"
+}
+
+function crossgrade_bookworm_recover_bootstrap() {
+  local permission=${1:-${UPGRADE_CROSSGRADE:-false}} context=${2:-caller} directory status file native phase
+  if directory=$(crossgrade_bookworm_output_pending_directory); then :
+  else status=$?; [ "$status" -eq 1 ] && return 0; return "$status"; fi
+  phase=bootstrap
+  if [ -f "$directory/remaining.archives" ] && [ ! -f "$directory/remaining.started" ] && [ ! -f "$directory/remaining.completed" ] &&
+    ! { [ -f "$directory/remaining.preparing" ] && [ ! -L "$directory/remaining.preparing" ] &&
+      [ ! -L "$directory" ] && [ "$(stat -c '%u:%a' -- "$directory")" = 0:700 ] &&
+      [ "$(stat -c %u -- "$directory/remaining.preparing")" = 0 ]; }; then
+    echo 'dss:error: A legacy remaining transaction has no verified raw-replay marker; inspect or restore it from a trusted console before package work.' >&2; return 1
+  fi
+  if [ -f "$directory/remaining.started" ] && [ ! -f "$directory/remaining.completed" ]; then phase=remaining
+  elif [ -f "$directory/bootstrap.started" ] && [ ! -f "$directory/bootstrap.completed" ]; then :
+  else
+    [ "$context" != packages ] && return 0
+    echo 'dss:error: A Bookworm crossgrade is unfinished. Run --to-64bit to finish verified conversion and cleanup, then retry the package command.' >&2; return 1
+  fi
+  if [ "$permission" != true ]; then
+    echo 'dss:error: An interrupted Bookworm package conversion needs explicit crossgrade recovery. Run --to-64bit, or retry the release command with --crossgrade, before other package work.' >&2; return 1
+  fi
+  [ "$(id -u)" = 0 ] && [ "$(uname -m)" = x86_64 ] && [ "$(distro_output_codename)" = bookworm ] || return 1
+  [ ! -L "$directory" ] && [ "$(stat -c '%u:%a' -- "$directory")" = 0:700 ] || return 1
+  for file in original.i386 "$phase.started" "$phase.cache" "$phase.archives" "$phase.sha256" "$phase.configuration" "$phase.plan" targets installed; do
+    [ -f "$directory/$file" ] && [ ! -L "$directory/$file" ] && [ "$(stat -c %u -- "$directory/$file")" = 0 ] || return 1
+  done
+  if [ "$phase" = remaining ]; then
+    for file in remaining.metadata.sha256 remaining.arguments remaining.targets remaining.installed remaining.obsolete; do
+      [ -f "$directory/$file" ] && [ ! -L "$directory/$file" ] && [ "$(stat -c %u -- "$directory/$file")" = 0 ] || return 1
+    done
+  fi
+  pause_check && check_disk_space && check_systemd_install_matches_init || return 1
+  if ! native=$(dpkg --print-architecture); then
+    echo 'dss:error: Cached package conversion recovery requires working dpkg; use a verified rescue environment to repair the package tools.' >&2; return 1
+  fi
+  case "$native" in i386|amd64) :;; *) return 1;; esac
+  apt_sources_check_releases_and_vendors bookworm || return 1
+  echo "dss:stage: Replaying verified interrupted Bookworm $phase archives before APT checks." >&2
+  crossgrade_bookworm_apply_archives "$directory" "$phase" true || return 1
+  [ "$context" != packages ] && return 0
+  echo 'dss:error: Verified package replay finished. Run --to-64bit to complete crossgrade cleanup, then retry the package command.' >&2
+  return 1
+}
+
+# Old priorities survive package renames; inspect the payload before retaining a remnant.
+function crossgrade_bookworm_can_retain_legacy() {
+  local package=$1 essential=$2 priority=$3 multi_arch=$4 original=$5 files file evidence=false existing_library=false missing_library=false
+  case "$essential:$package" in
+    yes:*|*:dpkg|*:apt|*:apt-utils|*:bash|*:coreutils|*:tar|*:perl-base|*:systemd|*:systemd-sysv|*:udev|*:init|*:init-system-helpers|*:sysvinit-core|*:sysvinit-utils|*:libc6|*:libc-bin|*:libgcc-s1|*:libstdc++6|*:libapt-pkg6.0|*:openssh-server|*:ifupdown|*:iproute2|*:apache2|*:apache2-bin|*:postfix|*:dovecot-core|*:mariadb-server*) return 1;;
+  esac
+  case "$priority" in required|important) :;; *) return 0;; esac
+  files=$(dpkg-query -L "$package:i386") || return 2
+  if [ "$package" = sysvinit ]; then
+    case "$(readlink /proc/1/exe)" in */systemd|*/'systemd (deleted)') :;; *) return 1;; esac
+    case "$(readlink -f /sbin/init)" in */systemd) :;; *) return 1;; esac
+    awk -F '\t' '$1 == "install ok installed" && $2 == "systemd-sysv" { found=1 } END { exit !found }' "$original" || return 1
+  fi
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    [ ! -d "$file" ] || continue
+    case "$file" in
+      /usr/share/doc/*|/usr/share/lintian/overrides/*) :;;
+      /usr/share/locale/*/LC_MESSAGES/libapt-*.mo)
+        case "$package" in libapt-inst1.5|libapt-pkg4.12) :;; *) return 1;; esac;;
+      /usr/lib/ssl/engines/*.so) [ "$package" = libssl0.9.8 ] || return 1;;
+      /usr/lib/i386-linux-gnu/openssl-1.0.0/engines/*.so) [ "$package" = libssl1.0.0 ] || return 1;;
+      /lib/sysvinit/init|/lib/sysvinit/telinit) [ "$package" = sysvinit ] || return 1;;
+      /lib/*.so.[0-9]*|/usr/lib/*.so.[0-9]*)
+        case "$package:$multi_arch" in lib*:*|*:same) :;; *) return 1;; esac
+        # A stale dpkg alias is harmless only while another owned library remains.
+        if [ ! -f "$file" ]; then missing_library=true; continue; fi
+        existing_library=true;;
+      *) return 1;;
+    esac
+    [ -f "$file" ] || [ -L "$file" ] || return 1
+    evidence=true
+  done <<< "$files"
+  if $missing_library && ! $existing_library; then return 1; fi
+  $evidence
+}
+
+# Only known retired packages are predictable before future-release indexes are active.
+function upgrade_output_crossgrade_obsolete_packages() {
+  local packages
+  packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n') || return 1
+  printf '%s\n' "$packages" | awk -F '\t' '
+    $1 == "install ok installed" && $3 == "i386" &&
+      ($2 ~ /^gcc-(4\.[0-9]+|[5-9]|10)$/ || $2 ~ /^(liblensfun0|liblvm2cmd2\.02|mysql-client)$/) { print $2 }
+  '
+}
+
+# Default removal still requires verified compiler roles, library/doc payloads and a backup.
+function crossgrade_bookworm_prepare_obsolete() {
+  local directory=$1 blockers=$2 remove=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} package dependency reason packages
+  case "$remove" in true|false) :;; *) echo 'dss:error: REMOVE_OBSOLETE_CROSSGRADE_PACKAGES must be true or false.' >&2; return 1;; esac
+  [ -n "$blockers" ] || return 0
+  while IFS=$'\t' read -r package dependency reason; do
+    echo "dss:warn: $package:i386 requires verified removal: $dependency; $reason." >&2
+  done <<< "$blockers"
+  if ! $remove; then
+    echo 'dss:error: Automatic obsolete-package removal is disabled. Remove or migrate these packages manually before crossgrading, or unset REMOVE_OBSOLETE_CROSSGRADE_PACKAGES to permit verified backed-up removal.' >&2
+    return 1
+  fi
+  packages=$(printf '%s\n' "$blockers" | cut -f1 | LC_ALL=C sort -u) || return 1
+  while IFS= read -r package; do
+    [[ "$package" =~ ^[a-z0-9][a-z0-9+.-]*$ ]] || return 1
+    awk -F '\t' -v package="$package" '$1 == package { found=1 } END { exit !found }' "$directory/retained-i386" || return 1
+    awk -F '\t' -v package="$package" '$1 == "install ok installed" && $2 == package && $3 == "i386" && $5 != "yes" { found=1 } END { exit !found }' "$directory/original.packages" || return 1
+    if [[ "$package" =~ ^gcc-[0-9]+([.][0-9]+)?$ ]]; then
+      # A versioned compiler can retire only when its current default role is converted.
+      awk -F '\t' '$1 == "gcc" { found=1 } END { exit !found }' "$directory/targets" || return 1
+    else
+      # Force payload inspection even for old optional packages; unknown executables stay manual.
+      crossgrade_bookworm_can_retain_legacy "$package" no required no "$directory/original.packages" || {
+        echo "dss:error: Obsolete package $package has an unverified payload; remove or migrate it manually." >&2; return 1;
+      }
+    fi
+  done <<< "$packages"
+  if [ ! -s "$directory/pre-crossgrade.tar.gz" ] || [ -L "$directory/pre-crossgrade.tar.gz" ] || ! tar -tzf "$directory/pre-crossgrade.tar.gz" >/dev/null; then
+    echo 'dss:error: Verified original configuration/package backup is required before obsolete package removal.' >&2
+    return 1
+  fi
+  (
+    umask 077
+    printf '%s\n' "$blockers" > "$directory/obsolete.dependencies.new" || exit 1
+    : > "$directory/obsolete.approved.new" || exit 1
+    if [ -f "$directory/obsolete.approved" ]; then cat "$directory/obsolete.approved" > "$directory/obsolete.approved.new" || exit 1; fi
+    printf '%s\n' "$packages" >> "$directory/obsolete.approved.new" || exit 1
+    LC_ALL=C sort -u "$directory/obsolete.approved.new" -o "$directory/obsolete.approved.new" || exit 1
+    mv "$directory/obsolete.dependencies.new" "$directory/obsolete.dependencies" &&
+      mv "$directory/obsolete.approved.new" "$directory/obsolete.approved" || exit 1
+  ) || return 1
+  echo "dss:warn: Verified obsolete foreign package removal: ${packages//$'\n'/ }. Original configuration/package backup: $directory/pre-crossgrade.tar.gz." >&2
+}
+
+function print_crossgrade_obsolete_package_changes() {
+  local directory="$1.crossgrade-bookworm" package status
+  [ -f "$directory/obsolete.approved" ] || return 0
+  while IFS= read -r package; do
+    [ -n "$package" ] || continue
+    if status=$(dpkg-query -W -f='${Status}' "$package:i386" 2>/dev/null); then :
+    else status=$?; [ "$status" -eq 1 ] || return "$status"; status=absent; fi
+    case "$status" in *' installed'|*' unpacked'|*' half-configured'|*' half-installed'|*' triggers-awaited'|*' triggers-pending')
+      echo "dss:warn: Obsolete removal requested for $package:i386; completion unconfirmed. Original backup: $directory/pre-crossgrade.tar.gz.";;
+      *) echo "dss:warn: Obsolete package removed during crossgrade: $package:i386. Review a supported replacement if still needed. Original backup: $directory/pre-crossgrade.tar.gz.";;
+    esac
+  done < "$directory/obsolete.approved"
+}
+
+# Co-installable extensions may still depend on a runtime that must change architecture.
+function crossgrade_bookworm_output_foreign_replacements() {
+  local targets=$1 retained=${2-} packages
+  packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Multi-Arch}\t${Pre-Depends}\t${Depends}\n') || return 1
+  printf '%s\n' "$packages" | awk -F '\t' -v retained_mode="${retained:+true}" '
+    function incompatible(name, qualifier, value, kind) {
+      if (name in all_mode) { value=all_mode[name]; kind="Architecture: all" }
+      else if (name in requested) { value=mode[name]; kind="requested amd64 replacement" }
+      else return 0
+      if (value == "") value="no"
+      if ((qualifier == "" && ((kind == "Architecture: all" && value != "foreign") ||
+              (kind != "Architecture: all" && value != "same" && value != "foreign"))) ||
+          (qualifier == "i386" && (kind == "Architecture: all" || value != "same")) ||
+          (qualifier == "any" && value != "allowed" && value != "foreign")) {
+        reason=name " (" kind ", Multi-Arch: " value ")"; return 1
+      }
+      return 0
+    }
+    FILENAME == ARGV[1] { requested[$1]=1; mode[$1]=$3; next }
+    FILENAME == ARGV[2] { retained[$1]=1; next }
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ {
+      if ($3 == "all") all_mode[$2]=$4
+      if ($3 == "i386") { foreign_mode[$2]=$4; dependencies[$2]=$5 "," $6 }
+    }
+    END {
+      for (package in dependencies) {
+        if (retained_mode ? !(package in retained) : (foreign_mode[package] != "same" || !(package in requested))) continue
+        groups=split(dependencies[package], group, /,/)
+        for (part=1; part<=groups; part++) {
+          text=group[part]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", text)
+          if (text == "") continue
+          alternatives=split(text, alternative, /[|]/); blocked=0; details=""
+          for (choice=1; choice<=alternatives; choice++) {
+            name=alternative[choice]; gsub(/\([^)]*\)/, "", name)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+            qualifier=""; if (name ~ /:/) { qualifier=name; sub(/^[^:]*:/, "", qualifier); sub(/:.*/, "", name) }
+            if (incompatible(name, qualifier)) {
+              blocked++; details=details (details == "" ? "" : "; ") reason
+              if (!retained_mode) replace[package]=1
+            }
+          }
+          if (retained_mode && blocked == alternatives) print package "\t" text "\t" details
+        }
+      }
+      if (!retained_mode) for (package in replace) print package
+    }
+  ' "$targets" "${retained:-/dev/null}" -
+}
+
 function crossgrade_debian_bookworm() {
-  local apt_state_cache_disabled=true current native architecture records file line type filters base added removed
-  local baseline directory package installed_version essential priority multi_arch candidate status audit version oldmark held cache attempt
+  local apt_state_cache_disabled=true current native file
+  local baseline directory package installed_version essential priority multi_arch candidate status audit version oldmark held cache attempt foreign_replacements retained_blockers obsolete_removals foreign_packages removed_obsolete
+  # The download checker reads only the removals verified for this invocation.
+  local crossgrade_obsolete_approved=/dev/null
   local -a arguments=() bootstrap=() backups=() archives=() apt_options=()
   read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
   pause_check || return 1
@@ -2245,6 +3486,7 @@ function crossgrade_debian_bookworm() {
   [ "$(uname -m)" = x86_64 ] || { echo 'dss:error: Boot a verified x86_64 kernel before crossgrading.' >&2; return 1; }
   [ "$(id -u)" = 0 ] || return 1
   check_disk_space || return 1
+  crossgrade_bookworm_recover_bootstrap true backend || return $?
   native=$(dpkg --print-architecture) || return 1
   case "$native" in i386|amd64) :;; *) return 1;; esac
   if directory=$(crossgrade_bookworm_output_pending_directory); then :
@@ -2253,6 +3495,11 @@ function crossgrade_debian_bookworm() {
     [ "$status" -eq 1 ] || { echo 'dss:error: Cannot select an unambiguous pending Bookworm crossgrade.' >&2; return 1; }
     if [ "$native" = amd64 ]; then
       crossgrade_bookworm_check_native || { echo 'dss:error: Mixed native packages without an original crossgrade inventory require manual review.' >&2; return 1; }
+      foreign_packages=$(crossgrade_output_foreign_packages) || return 1
+      [ -z "$foreign_packages" ] || {
+        printf '%s\n' "$foreign_packages" >&2
+        echo 'dss:error: Active foreign packages without an original crossgrade inventory require manual migration; success requires amd64/all only.' >&2; return 1;
+      }
       echo 'dss:stage: Bookworm native amd64 conversion is already complete.' >&2
       return 0
     fi
@@ -2260,18 +3507,8 @@ function crossgrade_debian_bookworm() {
   crossgrade_check_apt_architecture_config || return 1
   check_systemd_install_matches_init || return 1
   apt_sources_check_releases_and_vendors bookworm || return 1
-  records=$(apt_sources_list) || return 1
-  while IFS=$'\t' read -r file line _ type _ _ _ filters; do
-    [ "$type" = deb ] || continue
-    [ "$filters" != '*' ] || continue
-    IFS='|' read -r base added removed <<< "${filters//,/ }"
-    for architecture in i386 amd64; do
-      case " $removed " in *" $architecture "*) echo "dss:error: Source $file:$line excludes $architecture; enable both i386 and amd64 first." >&2; return 1;; esac
-      if [ -n "$base" ]; then
-        case " $base $added " in *" $architecture "*) :;; *) echo "dss:error: Source $file:$line excludes $architecture; enable both i386 and amd64 first." >&2; return 1;; esac
-      fi
-    done
-  done <<< "$records"
+  crossgrade_check_source_architectures || return 1
+  upgrade_check_crossgrade_package_blockers || return 1
   if [ -z "$directory" ]; then
     baseline=$(config_state_output_baseline) || {
       record_config_state || return 1
@@ -2280,6 +3517,7 @@ function crossgrade_debian_bookworm() {
     directory="$baseline.crossgrade-bookworm"
   fi
   if [ ! -f "$directory/original.i386" ]; then
+    upgrade_migrate_php_packages bookworm || return 1
     [ "$native" = i386 ] || { echo 'dss:error: No original crossgrade inventory; inspect this mixed system manually before resuming.' >&2; return 1; }
     audit=$(LC_ALL=C dpkg --audit 2>&1) || return 1
     [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
@@ -2298,19 +3536,29 @@ function crossgrade_debian_bookworm() {
   echo "dss:stage: Bookworm crossgrade inventory/backups: $directory" >&2
   if [ "$native" = i386 ]; then dpkg --add-architecture amd64 || return 1; fi
   apt_get_update || return 1
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n' > "$directory/installed" || return 1
+  removed_obsolete=''
+  if [ -f "$directory/obsolete.approved" ]; then
+    removed_obsolete=$(awk -F '\t' '
+      FILENAME == ARGV[1] { approved[$1]=1; next }
+      $3 == "i386" && $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ { active[$2]=1 }
+      END { for (package in approved) if (!(package in active)) print package }
+    ' "$directory/obsolete.approved" "$directory/installed") || return 1
+  fi
   : > "$directory/targets.new" || return 1
   : > "$directory/retained-i386.new" || return 1
   while IFS=$'\t' read -r package installed_version essential priority multi_arch; do
     [ -n "$package" ] || continue
+    # Previously reviewed removals need no vanished payload inspection on completion retries.
+    case $'\n'"$removed_obsolete"$'\n' in *$'\n'"$package"$'\n'*) continue;; esac
     if candidate=$(crossgrade_bookworm_output_candidate "$package"); then status=0; else status=$?; fi
     [ "$status" -ne 2 ] || { echo "dss:error: Cannot inspect APT availability for $package:amd64." >&2; return 1; }
     if [ -n "$candidate" ] && dpkg --compare-versions "$candidate" ge "$installed_version"; then
       printf '%s\t%s\t%s\n' "$package" "$candidate" "${multi_arch:-no}" >> "$directory/targets.new" || return 1
     else
-      case "$essential:$priority:$package" in
-        yes:*|*:required:*|*:important:*|*:dpkg|*:apt|*:bash|*:coreutils|*:tar|*:systemd|*:udev|*:openssh-server|*:ifupdown|*:iproute2|*:apache2|*:apache2-bin|*:postfix|*:dovecot-core|*:mariadb-server*)
-          echo "dss:error: No suitable archive amd64 replacement for critical package $package; manual migration required." >&2; return 1;;
-      esac
+      crossgrade_bookworm_can_retain_legacy "$package" "$essential" "$priority" "$multi_arch" "$directory/original.packages" || {
+        echo "dss:error: No suitable archive amd64 replacement for protected or unverified package $package; manual migration required." >&2; return 1;
+      }
       printf '%s\t%s\n' "$package" "$installed_version" >> "$directory/retained-i386.new" || return 1
       case "$package" in libapache2-mod-*)
         upgrade_compatibility_apache_module_enabled "$package"; status=$?
@@ -2320,7 +3568,7 @@ function crossgrade_debian_bookworm() {
           *) echo "dss:error: Cannot inspect Apache module configuration for $package." >&2; return 1;;
         esac;;
       esac
-      echo "dss:warn: Preserving unavailable legacy foreign package $package:i386 ($installed_version); review it manually." >&2
+      echo "dss:warn: No native replacement for $package:i386 ($installed_version); verifying safe removal before conversion." >&2
     fi
   done < "$directory/original.i386"
   mv "$directory/targets.new" "$directory/targets" && mv "$directory/retained-i386.new" "$directory/retained-i386" || return 1
@@ -2331,11 +3579,33 @@ function crossgrade_debian_bookworm() {
       printf '%s\t%s\tno\n' "$package" "$candidate" >> "$directory/targets" || return 1
     fi
   done
-  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n' > "$directory/installed" || return 1
+  retained_blockers=$(crossgrade_bookworm_output_foreign_replacements "$directory/targets" "$directory/retained-i386") || return 1
+  # Every unavailable package must be removed with proof, even if its old dependencies still work.
+  retained_blockers=$(printf '%s\n' "$retained_blockers" | awk -F '\t' '
+    FILENAME == ARGV[1] { if (NF >= 3) { seen[$1]=1; print }; next }
+    !($1 in seen) { print $1 "\tunavailable native package\tamd64/all completion required" }
+  ' - "$directory/retained-i386") || return 1
+  crossgrade_bookworm_prepare_obsolete "$directory" "$retained_blockers" || return 1
+  if [ "${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true}" = true ] && [ -f "$directory/obsolete.approved" ]; then
+    crossgrade_obsolete_approved="$directory/obsolete.approved"
+  fi
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n' > "$directory/installed" || return 1
+  foreign_replacements=$(crossgrade_bookworm_output_foreign_replacements "$directory/targets") || return 1
   while IFS=$'\t' read -r package candidate multi_arch; do
     arguments+=("$package:amd64=$candidate")
-    [ "$multi_arch" = same ] || arguments+=("$package:i386-")
+    case $'\n'"$foreign_replacements"$'\n' in
+      *$'\n'"$package"$'\n'*) arguments+=("$package:i386-");;
+      *) [ "$multi_arch" = same ] || arguments+=("$package:i386-");;
+    esac
   done < "$directory/targets"
+  # A previous transaction may have removed an obsolete name that current indexes no longer know.
+  obsolete_removals=$(awk -F '\t' '
+    FILENAME == ARGV[1] { approved[$1]=1; next }
+    $3 == "i386" && $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && $2 in approved { print $2 }
+  ' "$crossgrade_obsolete_approved" "$directory/installed") || return 1
+  while IFS= read -r package; do
+    [ -z "$package" ] || arguments+=("$package:i386-")
+  done <<< "$obsolete_removals"
   if [ "$native" = i386 ]; then
     bootstrap=(dpkg:amd64 tar:amd64 apt:amd64 dpkg:i386- tar:i386- apt:i386-)
     if awk -F '\t' '$2 == "apt-utils" && $1 == "install ok installed" { found=1 } END { exit !found }' "$directory/original.packages"; then
@@ -2349,26 +3619,79 @@ function crossgrade_debian_bookworm() {
     done
     while IFS=$'\t' read -r package version status file; do archives+=("$file"); done < "$directory/bootstrap.archives"
     [ "${#archives[@]}" -gt 0 ] || { echo 'dss:error: No verified bootstrap archives downloaded.' >&2; return 1; }
-    # A second pass can satisfy pre-dependencies configured by the first grouped pass.
-    if ! dpkg --force-confnew --force-confmiss --install "${archives[@]}"; then
-      dpkg --force-confnew --force-confmiss --install "${archives[@]}" || return 1
-    fi
-    [ "$(/usr/bin/dpkg --print-architecture)" = amd64 ] || return 1
+    crossgrade_bookworm_record_archives "$directory" bootstrap || return 1
+    crossgrade_bookworm_apply_bootstrap "$directory" true || return 1
     apt_get_update || return 1
   fi
-  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n' > "$directory/installed" || return 1
-  crossgrade_bookworm_download "$directory" "$directory/targets" "$directory/installed" remaining "${arguments[@]}" || return 1
-  # One transaction keeps systemd and udev together and preserves recorded service packages.
-  cache=$(cat "$directory/remaining.cache") || return 1
+  if [ ! -f "$directory/remaining.completed" ]; then
+    # No raw mutation can precede .started; interrupted preparation may be safely replanned.
+    (umask 077; : > "$directory/remaining.preparing") || return 1
+    dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n' > "$directory/installed" || return 1
+    crossgrade_bookworm_download "$directory" "$directory/targets" "$directory/installed" remaining "${arguments[@]}" || return 1
+    crossgrade_bookworm_record_archives "$directory" remaining || return 1
+    crossgrade_bookworm_apply_archives "$directory" remaining true || return 1
+  fi
+  crossgrade_bookworm_check_package_tools || return 1
+  # Rebuild a fresh cleanup plan; never execute the raw download plan or its removal requests.
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n' > "$directory/installed" || return 1
+  arguments=()
+  while IFS=$'\t' read -r package candidate multi_arch; do
+    arguments+=("$package:amd64=$candidate")
+  done < "$directory/targets"
+  obsolete_removals=$(awk -F '\t' '
+    FILENAME == ARGV[1] { wanted[$1]=1; next }
+    FILENAME == ARGV[2] { approved[$1]=1; next }
+    $1 == "install ok installed" && ($3 == "amd64" || $3 == "all") { native[$2]=1 }
+    $3 == "i386" && $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ { foreign[$2]=1 }
+    END {
+      for (package in foreign) {
+        if ((package in wanted && package in native) || package in approved) print package
+        else { print "dss:error: Cannot remove foreign package without a configured native replacement or verified obsolete payload: " package ":i386" > "/dev/stderr"; bad=1 }
+      }
+      exit bad
+    }
+  ' "$directory/targets" "$crossgrade_obsolete_approved" "$directory/installed") || return 1
+  while IFS= read -r package; do
+    [ -z "$package" ] || arguments+=("$package:i386-")
+  done <<< "$obsolete_removals"
+  crossgrade_bookworm_download "$directory" "$directory/targets" "$directory/installed" cleanup "${arguments[@]}" || return 1
+  arguments=()
+  while IFS= read -r package; do
+    [ -n "$package" ] || return 1
+    arguments+=("$package")
+  done < "$directory/cleanup.arguments" || return 1
+  [ "${#arguments[@]}" -gt 0 ] || return 1
+  cache=$(cat "$directory/cleanup.cache") || return 1
+  crossgrade_bookworm_apache_handoff "$directory" prepare || return 1
   LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
     -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false -o Dir::Cache::archives="$cache" \
-    --allow-remove-essential --fix-broken install "${arguments[@]}" || return 1
+    -o APT::Get::allow-remove-essential=false -o APT::Force-LoopBreak=false \
+    --no-download --fix-broken install "${arguments[@]}" || return 1
+  # Restore converted native packages in one APT load; leave foreign/all marks unchanged.
+  local auto_marks
+  local -a converted_auto=()
+  auto_marks=$(awk -F '\t' '
+    FILENAME == ARGV[1] { converted[$1]=1; next }
+    { package=$0; sub(/:i386$/, "", package); if (package in converted) print package ":amd64" }
+  ' "$directory/targets" "$directory/original.auto") || return 1
   while IFS= read -r oldmark; do
-    package=${oldmark%:i386}
-    if awk -F '\t' -v package="$package" '$1 == package { found=1 } END { exit !found }' "$directory/targets"; then
-      apt-mark auto "$package:amd64" || return 1
-    fi
-  done < "$directory/original.auto"
+    [ -z "$oldmark" ] || converted_auto+=("$oldmark")
+  done <<< "$auto_marks"
+  if [ -s "$directory/remaining.dependencies" ]; then
+    auto_marks=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n') || return 1
+    auto_marks=$(printf '%s\n' "$auto_marks" | awk -F '\t' '
+      FILENAME == ARGV[1] { name=$0; sub(/:amd64$/, "", name); learned[name]=1; next }
+      $1 == "install ok installed" && ($3 == "amd64" || $3 == "all") {
+        sub(/:.*/, "", $2); if ($2 in learned) print $2 ":" $3
+      }
+    ' "$directory/remaining.dependencies" -) || return 1
+    while IFS= read -r oldmark; do
+      [ -z "$oldmark" ] || converted_auto+=("$oldmark")
+    done <<< "$auto_marks"
+  fi
+  if [ "${#converted_auto[@]}" -gt 0 ]; then
+    apt-mark auto "${converted_auto[@]}" || return 1
+  fi
   if [ "$(od -An -tu1 -j4 -N1 /proc/1/exe 2>/dev/null | tr -d ' ')" != 2 ]; then
     systemctl daemon-reexec || return 1
     for attempt in 1 2 3 4 5; do
@@ -2377,6 +3700,7 @@ function crossgrade_debian_bookworm() {
     done
   fi
   crossgrade_bookworm_check_completion "$directory" || return 1
+  crossgrade_bookworm_apache_handoff "$directory" finish || return 1
   (umask 077; : > "$directory/completed") || return 1
   echo 'dss:stage: Bookworm native amd64 packages, package state and 64-bit PID1 verified.' >&2
 }
@@ -2393,8 +3717,11 @@ function crossgrade_debian() {
 
   [ -z "$ENABLE_UBUNTU_CROSSGRADE" ] && lsb_release -a 2>/dev/null | egrep -qai 'ubuntu' && echo "dss:error: Ubuntu cross grades have not been successful.  To ignore this warning and attempt one at your own peril: export ENABLE_UBUNTU_CROSSGRADE=Y" 2>&1 && return 1
 
+  crossgrade_check_apt_architecture_config || return 1
+  upgrade_check_crossgrade_package_blockers || return 1
+
   if ! check_systemd_install_matches_init; then
-    echo "dss:error: system needs a reboot prior to cross grading to fully switch to systemd." 2>&1
+    echo 'dss:error: Running and selected init must be verified and agree before crossgrading; review the diagnostic above.' >&2
     return 1
   fi
 
@@ -2813,6 +4140,19 @@ function crossgrade_debian() {
     echo "dss:info:no 32 bit packages remain (good)"
   fi
 
+
+  # A successful legacy conversion must meet the same package-architecture contract.
+  local foreign_packages
+  if [ "$(dpkg --print-architecture)" != amd64 ] ||
+    [ "$(od -An -tu1 -j4 -N1 /bin/bash 2>/dev/null | tr -d ' ')" != 2 ] ||
+    ! /bin/bash -c '[ "$(getconf LONG_BIT)" = 64 ]'; then
+    echo 'dss:error: Crossgrade incomplete: native dpkg and a freshly executed 64-bit Bash/userspace are required.' >&2; return 1
+  fi
+  foreign_packages=$(crossgrade_output_foreign_packages) || return 1
+  if [ -n "$foreign_packages" ]; then
+    printf '%s\n' "$foreign_packages" >&2
+    echo 'dss:error: Crossgrade incomplete: active packages must all be amd64 or all. Replace or remove the remaining foreign packages before continuing.' >&2; return 1
+  fi
   echo "dss:info: Cross grade has completed."
   return 0
 
@@ -2881,53 +4221,212 @@ function remove_cruft_packages() {
 }
 
 # Report from existing indexes only; this deliberately does not use the mutating cruft helpers.
+# Existing indexes only: package, query architecture, version, URI, suite/component.
+function apt_packages_output_archives() {
+  local inventory=$1 native=$2 directory=$3 architecture package arch status _ architectures
+  architectures=$(awk -F '\t' -v native="$native" '$1 ~ / installed$/ { print ($3 == "all" ? native : $3) }' "$inventory" | LC_ALL=C sort -u) || return 1
+  for architecture in $architectures; do
+    : > "$directory/query" || return 1
+    while IFS=$'\t' read -r status package arch _; do
+      case "$status" in *' installed') :;; *) continue;; esac
+      [ "$arch" != all ] || arch=$native
+      [ "$arch" = "$architecture" ] || continue
+      if [ "$arch" = "$native" ]; then printf '%s\0' "$package"; else printf '%s\0' "$package:$arch"; fi
+    done < "$inventory" > "$directory/query" || return 1
+    LC_ALL=C xargs -0 -r -n 256 apt-cache -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= madison \
+      < "$directory/query" > "$directory/madison" || return 1
+    awk -F '|' -v OFS='\t' -v architecture="$architecture" '
+      { text=$3; gsub(/^[ \t]+|[ \t]+$/, "", text); count=split(text, fields, /[ \t]+/)
+        if (fields[count] != "Packages" || fields[count-1] != architecture) next
+        name=$1; version=$2; gsub(/^[ \t]+|[ \t]+$/, "", name); gsub(/^[ \t]+|[ \t]+$/, "", version)
+        sub(/:.*/, "", name); print name, architecture, version, fields[1], fields[2]
+      }
+    ' "$directory/madison" || return 1
+  done
+}
+
+# An exact installed version must occur only at matching active official sources.
+function upgrade_obsolete_output_provenance() {
+  local family=$1 release=$2 native=$3 sources=$4 inventory=$5 archive_records=$6
+  awk -F '\t' -v OFS='\t' -v family="$family" -v release="$release" -v native="$native" '
+    FILENAME == ARGV[1] {
+      if ($3 == family && $4 == "deb" && ($6 == release || index($6, release "-") == 1 || index($6, release "/") == 1)) {
+        uri=$5; sub(/\/$/, "", uri); official[uri SUBSEP $6]=1
+      }; next
+    }
+    FILENAME == ARGV[2] {
+      if ($1 ~ / installed$/) {
+        key=$2 SUBSEP ($3 == "all" ? native : $3); version[key]=$4; arch[key]=$3
+      }; next
+    }
+    {
+      key=$1 SUBSEP $2; if (!(key in version) || $3 != version[key]) next
+      uri=$4; sub(/\/$/, "", uri); suite=$5; sub(/\/[^\/]*$/, "", suite)
+      if ((uri SUBSEP suite) in official) found[key]=1; else ambiguous[key]=1
+    }
+    END { for (key in found) if (!(key in ambiguous)) { split(key, part, SUBSEP); print part[1], arch[key], version[key] } }
+  ' "$sources" "$inventory" "$archive_records"
+}
+
+function upgrade_obsolete_prepare() {
+(
+  umask 077
+  set -o pipefail
+  local family=$1 from=$2 to=$3 baseline directory native
+  case "$family:$from:$to" in debian:*:*|ubuntu:*:*) :;; *) return 1;; esac
+  case "$from$to" in ''|*[!a-z0-9]*) return 1;; esac
+  [ -n "$from" ] && [ -n "$to" ] && [ "$from" != "$to" ] && [ "$(id -u)" = 0 ] || return 1
+  baseline=$(config_state_output_baseline) || { record_config_state || return 1; baseline=$(config_state_output_baseline) || return 1; }
+  directory="$baseline.obsolete-packages/$family-$from-to-$to"
+  [ ! -L "$baseline.obsolete-packages" ] && [ ! -L "$directory" ] || return 1
+  if [ -f "$directory/prepared" ]; then return 0; fi
+  mkdir -p "$directory" && chmod 700 "$baseline.obsolete-packages" "$directory" || return 1
+  native=$(dpkg --print-architecture) || return 1
+  printf '%s\n' "$native" > "$directory/native" || return 1
+  apt_sources_list > "$directory/sources.before" || return 1
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\n' > "$directory/packages.before" || return 1
+  apt_packages_output_archives "$directory/packages.before" "$native" "$directory" > "$directory/archives.before" || return 1
+  upgrade_obsolete_output_provenance "$family" "$from" "$native" "$directory/sources.before" "$directory/packages.before" "$directory/archives.before" \
+    > "$directory/provenance" || return 1
+  : > "$directory/prepared"
+)
+}
+
+# Reject all package installation/configuration and every unapproved removal.
+function upgrade_obsolete_output_removals() {
+  local plan=$1 allowed=$2 native=$3
+  awk -F '\t' -v native="$native" '
+    FILENAME == ARGV[1] { allowed[$1 ":" $2]=1; next }
+    /^(Inst|Conf|Purg) / { bad=1 }
+    /^Remv / {
+      split($0, field, /[ \t]+/); name=field[2]
+      if (name !~ /:/) {
+        if ((name ":" native) in allowed) name=name ":" native
+        else if ((name ":all") in allowed) name=name ":all"
+      }
+      if (!(name in allowed)) bad=1
+      if (!seen[name]++) print name
+    }
+    END { exit bad }
+  ' "$allowed" "$plan"
+}
+
+function upgrade_remove_obsolete_packages() {
+(
+  local package_umask
+  package_umask=$(umask) || return 1
+  umask 077
+  set -o pipefail
+  local family=$1 from=$2 to=$3 baseline directory native attempt package files file audit removals query_package signature current_signature
+  local -a options=() obsolete=() selected=()
+  case "$family:$from:$to" in debian:*:*|ubuntu:*:*) :;; *) return 1;; esac
+  case "$from$to" in ''|*[!a-z0-9]*) return 1;; esac
+  [ -n "$from" ] && [ -n "$to" ] && [ "$from" != "$to" ] && [ "$(id -u)" = 0 ] || return 1
+  if ! baseline=$(config_state_output_baseline); then
+    echo "dss:warn: No original distro provenance for $family $from -> $to; preserving packages and skipping obsolete cleanup." >&2; return 0
+  fi
+  directory="$baseline.obsolete-packages/$family-$from-to-$to"
+  if [ ! -f "$directory/prepared" ] || [ ! -s "$directory/provenance" ] || [ -L "$directory" ]; then
+    echo "dss:warn: No original distro provenance for $family $from -> $to; preserving packages and skipping obsolete cleanup." >&2; return 0
+  fi
+  native=$(dpkg --print-architecture) || return 1
+  [ "$native" = "$(cat "$directory/native")" ] || return 1
+  attempt=$(mktemp -d "$directory/cleanup.XXXXXX") || return 1
+  signature=$(apt_state_output_signature packages) || return 1
+  [ -n "$signature" ] || return 1
+  apt_sources_list > "$attempt/sources" || return 1
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\n' > "$attempt/packages" || return 1
+  apt_packages_output_archives "$attempt/packages" "$native" "$attempt" > "$attempt/archives" || return 1
+  upgrade_obsolete_output_provenance "$family" "$to" "$native" "$attempt/sources" "$attempt/packages" "$attempt/archives" > "$attempt/provenance" || return 1
+  # Current official dependencies may autoremove; absent names need their original exact proof.
+  awk -F '\t' -v OFS='\t' -v native="$native" '
+    FILENAME == ARGV[1] { original[$1 SUBSEP $2]=$3; next }
+    FILENAME == ARGV[2] { current[$1 SUBSEP $2]=$3; next }
+    FILENAME == ARGV[3] { available[$1 SUBSEP $2]=1; next }
+    $1 == "install ok installed" && $5 != "yes" && $6 != "required" && $6 != "important" {
+      key=$2 SUBSEP $3
+      if ($4 == current[key] || ((key in original) && $4 == original[key] && !(($2 SUBSEP ($3 == "all" ? native : $3)) in available))) print $2, $3, $4
+    }
+  ' "$directory/provenance" "$attempt/provenance" "$attempt/archives" "$attempt/packages" > "$attempt/eligible" || return 1
+  awk -F '\t' -v native="$native" '
+    FILENAME == ARGV[1] { original[$1 SUBSEP $2]=$3; next }
+    FILENAME == ARGV[2] { available[$1 SUBSEP $2]=1; next }
+    $1 ~ / installed$/ && $4 == original[$2 SUBSEP $3] && !(($2 SUBSEP ($3 == "all" ? native : $3)) in available) { print $2 ":" $3 }
+  ' "$directory/provenance" "$attempt/archives" "$attempt/packages" > "$attempt/obsolete" || return 1
+  while IFS= read -r package; do
+    [ -n "$package" ] || continue
+    case "${package##*:}" in "$native"|all) obsolete+=("${package%:*}");; *) obsolete+=("$package");; esac
+  done < "$attempt/obsolete"
+  read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
+  umask "$package_umask"
+  pause_check || return 1
+  LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
+    -o APT::Get::AutomaticRemove=true --simulate remove "${obsolete[@]}" > "$attempt/plan" 2>&1 || return 1
+  removals=$(upgrade_obsolete_output_removals "$attempt/plan" "$attempt/eligible" "$native") || {
+    echo "dss:error: Obsolete/autoremove plan includes protected or unknown packages or non-removal work. Review $attempt/plan; no cleanup attempted." >&2; return 1;
+  }
+  [ -n "$removals" ] || return 0
+  while IFS= read -r package; do
+    case "${package%:*}" in
+      linux-*|grub*|lilo|init*|systemd*|udev*|network*|ifupdown*|netplan.io|resolvconf|dhcpcd*|isc-dhcp-client|iproute*|iptables*|nftables*|apt*|dpkg*|sudo|passwd|login|util-linux|openssh*|apache2*|libapache2-mod-*|nginx*|php*|mysql*|mariadb*|postgresql*|dovecot*|postfix*|exim*|sendmail*|fail2ban*|bind9*|rabbitmq*|slapd*|mailman*|redis*|caddy*|cron*|rsyslog*)
+        echo "dss:error: Obsolete/autoremove plan includes service or system package $package; migrate it manually. Review $attempt/plan; no cleanup attempted." >&2; return 1;;
+    esac
+    query_package=$package
+    case "${package##*:}" in "$native"|all) query_package=${package%:*};; esac
+    files=$(dpkg-query -L "$query_package") || return 1
+    while IFS= read -r file; do
+      case "$file" in /etc/init.d/?*|/etc/init/?*|/etc/cron*|/etc/systemd/system/?*|/etc/systemd/user/?*|/lib/systemd/system/?*|/lib/systemd/user/?*|/usr/lib/systemd/system/?*|/usr/lib/systemd/user/?*|/etc/network/?*|/etc/netplan/?*|/etc/NetworkManager/?*|/etc/kernel/?*|/boot/?*|/var/lib/?*|/var/spool/?*|/srv/?*|/home/?*|/var/www/?*)
+        echo "dss:error: Package $package owns service/data path $file; preserve it and migrate manually. Review $attempt/plan; no cleanup attempted." >&2; return 1;;
+      esac
+    done <<< "$files"
+    selected+=("$query_package")
+  done <<< "$removals"
+  # Recheck exact explicit removals with autoremove disabled before allowing package changes.
+  LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
+    -o APT::Get::AutomaticRemove=false --simulate remove "${selected[@]}" > "$attempt/final.plan" 2>&1 || return 1
+  upgrade_obsolete_output_removals "$attempt/final.plan" <(printf '%s\n' "$removals" | tr ':' '\t') "$native" > "$attempt/removals.requested" || return 1
+  [ "$(LC_ALL=C sort "$attempt/removals.requested")" = "$(printf '%s\n' "$removals" | LC_ALL=C sort)" ] || return 1
+  (umask 077; tar -C / -czpf "$attempt/configuration.tar.gz" etc) || return 1
+  current_signature=$(apt_state_output_signature packages) || return 1
+  if [ -z "$current_signature" ] || [ "$current_signature" != "$signature" ]; then
+    echo 'dss:error: Package, source or index state changed during cleanup planning; no removal attempted. Retry with stable package state.' >&2; return 1
+  fi
+  LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
+    -o APT::Get::AutomaticRemove=false --no-download remove "${selected[@]}" 2>&1 | tee "$attempt/removal.log" || return 1
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\n' > "$attempt/packages.after" || return 1
+  awk -F '\t' '
+    FILENAME == ARGV[1] { selected[$1]=1; next }
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && (($2 ":" $3) in selected) { bad=1 }
+    END { exit bad }
+  ' "$attempt/removals.requested" "$attempt/packages.after" || return 1
+  audit=$(LC_ALL=C dpkg --audit 2>&1) || return 1
+  [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
+  LC_ALL=C apt-get check || return 1
+  (umask 077; cp "$attempt/removals.requested" "$attempt/packages.removed" && : > "$attempt/completed") || return 1
+  echo "dss:info: Removed obsolete distro packages and unused dependencies without purging configs. Inventory, removal log and config backup: $attempt." >&2
+)
+}
+
 function print_installed_packages_without_available_versions() {
 (
   [ -f /etc/debian_version ] || return 0
   umask 077
   set -o pipefail
-  local directory native architecture package _installed_arch _version query_arch
+  local directory native
   native=$(dpkg --print-architecture) || return 1
   directory=$(mktemp -d) || return 1
   trap 'rm -rf -- "$directory"' EXIT
   dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n' > "$directory/status" || return 1
-  # package<TAB>installed architecture<TAB>version<TAB>query architecture; 'all' uses native indexes.
-  awk -F '\t' -v OFS='\t' -v native="$native" '
-    $1 ~ / installed$/ { print $2, $3, $4, ($3 == "all" ? native : $3) }
-  ' "$directory/status" > "$directory/installed" || return 1
-  : > "$directory/available" || return 1
-  local architectures
-  architectures=$(awk -F '\t' '{ print $4 }' "$directory/installed" | sort -u) || return 1
-  for architecture in $architectures; do
-    : > "$directory/query" || return 1
-    while IFS=$'\t' read -r package _installed_arch _version query_arch; do
-      [ "$query_arch" = "$architecture" ] || continue
-      if [ "$architecture" = "$native" ]; then
-        printf '%s\0' "$package"
-      else
-        printf '%s\0' "$package:$architecture"
-      fi
-    done < "$directory/installed" > "$directory/query" || return 1
-    # Bound argv size; cache files remain untouched. Madison may also print Sources rows.
-    if ! LC_ALL=C xargs -0 -r -n 256 apt-cache -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= madison < "$directory/query" > "$directory/madison"; then
-      echo "dss:error: Cannot assess installed package availability from existing APT indexes; no packages were changed." >&2
-      return 1
-    fi
-    # Madison example: package:i386 | version | URI suite/component i386 Packages
-    awk -F '|' -v OFS='\t' -v architecture="$architecture" '
-      $3 ~ / Packages[ \t]*$/ {
-        name=$1; gsub(/^[ \t]+|[ \t]+$/, "", name); sub(/:.*/, "", name)
-        if (name != "") print name, architecture
-      }
-    ' "$directory/madison" >> "$directory/available" || return 1
-  done
-  # A missing name/architecture is a migration hint, not a support or vulnerability assessment.
-  awk -F '\t' '
+  if ! apt_packages_output_archives "$directory/status" "$native" "$directory" > "$directory/available"; then
+    echo 'dss:error: Cannot assess installed package availability from existing APT indexes; no packages were changed.' >&2
+    return 1
+  fi
+  awk -F '\t' -v native="$native" '
     FILENAME == ARGV[1] { available[$1 SUBSEP $2]=1; next }
-    !(($1 SUBSEP $4) in available) {
-      print "dss:warn: Installed package " $1 ":" $2 " (" $3 ") has no versions in active APT indexes. Review manually and migrate if needed; package preserved."
+    $1 ~ / installed$/ && !(($2 SUBSEP ($3 == "all" ? native : $3)) in available) {
+      print "dss:warn: Installed package " $2 ":" $3 " (" $4 ") has no versions in active APT indexes. Review manually and migrate if needed; package preserved."
     }
-  ' "$directory/available" "$directory/installed"
+  ' "$directory/available" "$directory/status"
 )
 }
 
@@ -3208,12 +4707,33 @@ function debian_check_release_completion() {
   return 0
 }
 
+# A failed hop may leave target indexes active while the installed release is still old.
+function upgrade_prepare_php_source_retry() {
+  local family=$1 target=$2 records provider type suite _
+  case "$family" in
+    debian) is_distro_name_older "$target" stretch && return 0;;
+    ubuntu) is_distro_name_older "$target" xenial && return 0;;
+    *) return 1;;
+  esac
+  records=$(apt_sources_list) || return 1
+  while IFS=$'\t' read -r _ _ provider type _ suite _ _; do
+    if [ "$provider" = "$family" ] && [ "$type" = deb ] && [ "${suite%%[-/]*}" = "$target" ]; then
+      apt_get_update || return 1
+      record_config_state || return 1
+      apt_get_install dpkg || return 1
+      upgrade_migrate_php_packages "$target" || return 1
+      return 0
+    fi
+  done <<< "$records"
+  return 0
+}
+
 function dist_upgrade_x_to_y() {
 pause_check
 [ ! -f /etc/debian_version ] && return 0
 echo "dss:trace:dist_upgrade_x_to_y:checking:olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 
-local current apt_sources_transition_target=$new_distro
+local current apt_sources_transition_target=$new_distro apt_defer_autoremove=true
 current=$(distro_output_codename) || return 1
 if [ "$current" != "$old_distro" ]; then
   echo "dss:info: Installed release is $current; skipping $old_distro to $new_distro."
@@ -3222,6 +4742,7 @@ fi
 
 echo "dss:stage: Upgrading Debian $old_distro -> $new_distro"
 check_disk_space || return 1
+upgrade_prepare_nss_lookup
 
 upgrade_check_path debian "$old_distro" "$new_distro" || return $?
 if [ "$old_distro" = bookworm ] && [ "$new_distro" = trixie ]; then
@@ -3238,7 +4759,7 @@ if [ "$new_distro" = trixie ]; then
 fi
 
 if [ "$old_distro" == "lenny" ]; then
-  add_missing_debian_keys
+  add_missing_debian_keys || return $?
   [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
 fi
 
@@ -3248,6 +4769,7 @@ if [ "$new_distro" = bookworm ] || [ "$new_distro" = trixie ]; then check_usrmer
 retain_etc_networking_naming_re_enX0
 fix_missing_lsb_release || return 1
 
+upgrade_prepare_php_source_retry debian "$new_distro" || return 1
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_upgrade:old:$old_distro:new:$new_distro"
 apt_get_upgrade
 local ret=$?
@@ -3256,19 +4778,23 @@ if [ $ret -ne 0 ]; then
   return 1
 fi
 apt-get clean
-apt-get $APT_GET_INSTALL_OPTIONS autoremove
+upgrade_obsolete_prepare debian "$old_distro" "$new_distro" || return 1
 
 apt_sources_upgrade debian "$old_distro" "$new_distro" || return 1
 apt_get_update || return 1
+if ! is_distro_name_older "$new_distro" stretch; then
+  apt_get_install dpkg || return 1
+  upgrade_migrate_php_packages "$new_distro" || return 1
+fi
 
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 apt_get_dist_upgrade
 ret=$?
 if [ $ret -eq 0 ]; then
-  apt-get $APT_GET_INSTALL_OPTIONS autoremove
   echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
 	if lsb_release -a 2>/dev/null| egrep -qai "${new_distro}|${new_ver:-xxxxx}"; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
+	  upgrade_remove_obsolete_packages debian "$old_distro" "$new_distro" || return 1
 	  echo "dss:info: dist-upgrade from ${old_distro} to ${new_distro} appears to have worked."
 	  return 0;
 	else
@@ -3365,6 +4891,7 @@ function print_config_state_changes() {
   # no prior changes just yet.
   [  ! -f  "$fromfile" ] && return "$availability_ret"
   print_incompatible_package_changes "$fromfile"
+  print_crossgrade_obsolete_package_changes "$fromfile" || availability_ret=$?
   # dpkg-new is used on unpack prior to choosing dpkg-dist or overwriting.
   echo "dss:info: Config changes to check.  e.g. different processes after upgrade.  e.g. different ports.  e.g. different apache status output.  e.g. changes to dpkg-old/dpkg-dist files.  dpkg-old = your files that were not used.  dpkg-dist = distro files that were not used."
   print_minimal_config_diff "$fromfile" "/root/distrorejuveinfo/postupgrade.dpkg.$now" | awk '{print "dss:configdiff:statechanges:" $0}'
@@ -3413,7 +4940,7 @@ function config_state_output_baseline() {
 }
 
 function print_incompatible_package_changes() {
-  local baseline=$1 manifest package backup confirmed
+  local baseline=$1 manifest package backup confirmed reminder advice status
   for manifest in "$baseline.purged-incompatible/"*/packages.purged "$baseline.purged-incompatible/"*/packages.requested; do
     [ -f "$manifest" ] || continue
     backup=${manifest%/*}
@@ -3423,10 +4950,23 @@ function print_incompatible_package_changes() {
       *) [ -f "$backup/packages.purged" ] && continue;;
     esac
     while IFS= read -r package; do
+      [ -n "$package" ] || continue
       if $confirmed; then
-        echo "dss:warn: Package purged before upgrading: $package. Backup: $backup. Reinstall manually if needed: apt-get install $package"
+        reminder="dss:warn: Package purged before upgrading: $package. Backup: $backup."
+        advice='Reinstall manually if needed:'
       else
-        echo "dss:warn: Purge completion unconfirmed for selected package: $package. Backup/attempt directory: $backup. Review package state before manual reinstall: apt-get install $package"
+        reminder="dss:warn: Purge completion unconfirmed for selected package: $package. Backup/attempt directory: $backup."
+        advice='Review package state before manual reinstall:'
+      fi
+      if upgrade_php_has_candidate "$package"; then
+        echo "$reminder $advice apt-get install $package"
+      else
+        status=$?
+        if [ "$status" -eq 1 ]; then
+          echo "$reminder Original package is unavailable in current APT archives; review its current package name before reinstalling."
+        else
+          echo "$reminder Current archive availability is unknown (APT query failed); review current package names before reinstalling."
+        fi
       fi
     done < "$manifest"
   done
@@ -3533,6 +5073,16 @@ rm -f "$tmplog"
 return $ret
 }
 
+# Release hops run their checked obsolete/dependency cleanup after the target is configured.
+function apt_get_autoremove() {
+  case "${apt_defer_autoremove:-false}" in
+    true) return 0;;
+    false) :;;
+    *) echo 'dss:error: Internal autoremove policy must be true or false.' >&2; return 1;;
+  esac
+  apt-get $APT_GET_INSTALL_OPTIONS autoremove
+}
+
 function apt_get_upgrade() {
   echo "dss:stage: Upgrading current packages" >&2
   pause_check
@@ -3555,7 +5105,7 @@ function apt_get_upgrade() {
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
   fi
-  if ! apt-get $APT_GET_INSTALL_OPTIONS autoremove; then cacheable=false; apt_state_healthy=; fi
+  if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
   apt_get_f_install || cacheable=false
   echo "dss:info: running an apt-get upgrade"
   apt_state_healthy=
@@ -3567,7 +5117,7 @@ function apt_get_upgrade() {
   else
     cacheable=false
   fi
-  if ! apt-get $APT_GET_INSTALL_OPTIONS autoremove; then cacheable=false; apt_state_healthy=; fi
+  if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
   apt_get_f_install || cacheable=false
   if [ "$operation_ret" -ne 0 ]; then
     echo "dss:info: apt-get upgrade failed. trying a dist-upgrade..."
@@ -3620,7 +5170,7 @@ function apt_get_dist_upgrade() {
   echo "dss:trace:apt_get_dist_upgrade"
   apt_get_f_install || cacheable=false
   apt_get_install dpkg || cacheable=false
-  if ! apt-get $APT_GET_INSTALL_OPTIONS autoremove; then cacheable=false; apt_state_healthy=; fi
+  if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
   apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
   first_ret=$?
   # Keep recovery retries unconditional after a failure, including immediate-configuration workarounds.
@@ -3638,7 +5188,7 @@ function apt_get_dist_upgrade() {
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
   fi
-  if ! apt-get $APT_GET_INSTALL_OPTIONS autoremove; then cacheable=false; apt_state_healthy=; fi
+  if ! apt_get_autoremove; then cacheable=false; apt_state_healthy=; fi
   apt-get -y autoclean || cacheable=false
   apt_state_healthy=
   apt-get $APT_GET_INSTALL_OPTIONS dist-upgrade
@@ -3692,7 +5242,7 @@ function ubuntu_output_next_release() {
 function dist_upgrade_ubuntu_to_latest() {
   pause_check
   [ -f /etc/debian_version ] || return 0
-  local remaining=${1:-1000} current next arch ret apt_sources_transition_target=
+  local remaining=${1:-1000} current next arch ret apt_sources_transition_target='' apt_defer_autoremove=true
   current=$(distro_output_codename) || return 1
   case " $ALL_UBUNTU " in *" $current "*) :;; *) return 0;; esac
   local planned=$current steps=$remaining
@@ -3718,19 +5268,28 @@ function dist_upgrade_ubuntu_to_latest() {
       return 1
     fi
     echo "dss:stage: Upgrading Ubuntu $current -> $next"
+    upgrade_prepare_nss_lookup
     apt_sources_transition_target=$next
     upgrade_precondition_checks "$next" || return 1
     apt_sources_prepare || return 1
+    if ! is_distro_name_older "$next" hirsute; then check_usrmerge || return 1; fi
+    upgrade_prepare_php_source_retry ubuntu "$next" || return 1
     apt_get_upgrade || return 1
     retain_etc_networking_naming_re_enX0
+    upgrade_obsolete_prepare ubuntu "$current" "$next" || return 1
     apt_sources_upgrade ubuntu "$current" "$next" || return 1
     apt_get_update || return 1
+    if ! is_distro_name_older "$next" xenial; then
+      apt_get_install dpkg || return 1
+      upgrade_migrate_php_packages "$next" || return 1
+    fi
     apt_get_dist_upgrade
     ret=$?
     if [ "$ret" -ne 0 ] || [ "$(distro_output_codename)" != "$next" ]; then
       echo "dss:error: Ubuntu upgrade from $current to $next failed." >&2
       return 1
     fi
+    upgrade_remove_obsolete_packages ubuntu "$current" "$next" || return 1
     echo "dss:info: Ubuntu upgrade from $current to $next completed."
     remaining=$((remaining-1))
   done
@@ -3908,6 +5467,9 @@ return 0
 }
 
 function packages_upgrade() {
+crossgrade_bookworm_recover_bootstrap "${UPGRADE_CROSSGRADE:-false}" packages || return $?
+usrmerge_recover_pending || return $?
+upgrade_prepare_nss_lookup
 upgrade_precondition_checks || return $?
 
 apt_sources_prepare || return 1
@@ -3922,6 +5484,24 @@ improve_yum_setup || return $?
 add_missing_debian_keys || return $?
 
 upgrade_precondition_checks || return $?
+
+# A retry may already report the new release while old PHP packages remain installed.
+if [ -f /etc/debian_version ]; then
+  local current php_migration=false
+  current=$(distro_output_codename) || return 1
+  case " $ALL_DEBIAN " in *" $current "*)
+    is_distro_name_older "$current" stretch || php_migration=true;;
+  esac
+  case " $ALL_UBUNTU " in *" $current "*)
+    is_distro_name_older "$current" xenial || php_migration=true;;
+  esac
+  if $php_migration; then
+    apt_get_update || return 1
+    record_config_state || return 1
+    apt_get_install dpkg || return 1
+    upgrade_migrate_php_packages "$current" || return 1
+  fi
+fi
 
 echo "dss:trace:packages_upgrade:pre_apt_get_upgrade:"
 apt_get_upgrade || return $?
@@ -4302,7 +5882,7 @@ function manifest_website() {
   esac
   if [ "$server" = apache ] && $manifest_apache_php_available; then
     if [ "$runtime" = php_handler_version_unknown ] || { [ "$runtime" = unknown ] && manifest_has_php_document_root "$document_root"; }; then
-      runtime=apache-mod-php; runtime_version=$manifest_apache_php_version; runtime_package=$manifest_apache_php_package
+      runtime='apache-mod-php'; runtime_version=$manifest_apache_php_version; runtime_package=$manifest_apache_php_package
       runtime_source=enabled_module_inferred_for_php_site
     fi
   fi
@@ -4800,16 +6380,22 @@ fi
 
 function distrorejuve_run() {
   local argument action LOG_VERBOSE=false LOG_TRACE=false UPGRADE_CROSSGRADE=false
+  local UPGRADE_CROSSGRADE_ALLOW_BLOCKERS=false
   local -a arguments=()
   for argument in "$@"; do
     case "$argument" in
       --verbose) LOG_VERBOSE=true;;
       --trace) LOG_TRACE=true;;
       --crossgrade) UPGRADE_CROSSGRADE=true;;
+      --allow-crossgrade-blockers) UPGRADE_CROSSGRADE_ALLOW_BLOCKERS=true;;
       *) arguments+=("$argument");;
     esac
   done
   action=${ACTION:-${arguments[0]:-}}
+  if $UPGRADE_CROSSGRADE_ALLOW_BLOCKERS && ! $UPGRADE_CROSSGRADE && [ "$action" != --to-64bit ]; then
+    echo 'dss:error: --allow-crossgrade-blockers requires a release upgrade with --crossgrade, or --to-64bit.' >&2
+    return 1
+  fi
   if $UPGRADE_CROSSGRADE; then
     case "$action" in
       --dist-upgrade|--to-debian-release|--to-latest-debian|--to-latest-lts|--to-next-ubuntu|--to-squeeze|--to-wheezy|--to-jessie) :;;

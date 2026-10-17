@@ -40,6 +40,7 @@ sudo bash distrorejuve.sh --dist-upgrade
 | `--to-latest-lts` | Upgrade Ubuntu to the latest supported LTS. |
 | `--to-next-ubuntu` | Upgrade Ubuntu to its next release, or next LTS when starting from an LTS. |
 | `--crossgrade` | Add to a release upgrade to permit i386 → amd64 conversion at the last native i386 release, then continue. Requires a running x86_64 kernel. |
+| `--allow-crossgrade-blockers` | Attempt despite known package blockers with `--crossgrade` or `--to-64bit`. Final native 64-bit verification is still required. |
 | `--to-64bit` | Attempt an experimental crossgrade from 32-bit to 64-bit. |
 | `--manifest` / `--manifest-json` | Report applications and services as text or JSON. Add `--no-dns` to skip DNS checks. |
 | `--show-changes` | Report differences from the pre-upgrade configuration and system state. |
@@ -67,6 +68,8 @@ sudo env MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --dist-upgrade
 | `MIN_FREE_DISK_MIB` | `5120`; minimum available MiB on each checked filesystem. Use a positive integer. |
 | `SKIP_DISK_SPACE_CHECK` | `false`; set to `true` to bypass disk-space checks after review. |
 | `PURGE_INCOMPATIBLE_PACKAGES` | `false`; set to `true` to back up and purge known config-only upgrade blockers. Reinstall manually afterward. |
+| `PREFER_PACKAGED_USRMERGE_FILES` | `false`; set to `true` after review to back up an unowned `/usr` merge conflict and keep the packaged file. |
+| `REMOVE_OBSOLETE_CROSSGRADE_PACKAGES` | `true`; remove verified obsolete compiler, library and transitional packages after backup during a crossgrade. Set to `false` to require manual removal. |
 | `IGNOREKERNEL` | Unset; bypass the old-kernel precondition. |
 | `IGNOREX11` | Unset; bypass the X11 precondition when `REMOVEX11` is unset. |
 | `IGNOREBACKPORTS` | Unset; permit active backports during preflight. |
@@ -78,7 +81,7 @@ sudo env MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --dist-upgrade
 | `DAYS_UPGRADE_ONGOING` | `7`; days to look back for the pre-upgrade comparison baseline. |
 | `UCF_FORCE_CONFFOLD` | Unset; retain the caller's explicit ucf keep-old-configuration policy. |
 
-`SKIP_DISK_SPACE_CHECK`, `PURGE_INCOMPATIBLE_PACKAGES` and `MANIFEST_MAIL_METRICS` accept only `true` or `false`.
+`SKIP_DISK_SPACE_CHECK`, `PURGE_INCOMPATIBLE_PACKAGES`, `PREFER_PACKAGED_USRMERGE_FILES`, `REMOVE_OBSOLETE_CROSSGRADE_PACKAGES` and `MANIFEST_MAIL_METRICS` accept only `true` or `false`.
 For the `IGNORE*` variables, `REMOVEX11` and `ENABLE_UBUNTU_CROSSGRADE`, any nonempty value enables
 the control, including `false` or `0`. Use `unset` to disable one of these controls.
 

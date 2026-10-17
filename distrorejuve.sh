@@ -48,14 +48,13 @@ Example usage to download the latest version of the script, then dist upgrade to
 
 wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
-sudo nohup bash -x distrorejuve.sh --dist-upgrade 2>&1 | tee -a distrorejuve.log | egrep -v '^\+'
+sudo bash distrorejuve.sh --dist-upgrade
 
 Uses:
 - Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
 - Dist upgrade Ubuntu distros to the next LTS version.  Then from LTS version to LTS version.
 - On completion provides information on config changes (modified config files, changed ports, changed packages, changed running processes)
 - Install missing Debian keys
-- Handles a few common Apache config issues after a distro upgrade.
 - Designed to run unattended without lots of prompting.
 - Burgeoning support to cross grade 32 bit distros to 64 bit
 - Show/remove cruft to permit tidy up of packages installed from non-current (old) repositories
@@ -72,6 +71,13 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-update to update packages on the current distro version (no distro version change).
 
+Run with --manifest or --manifest-json to collect a read-only application/service inventory.
+Add --no-dns to skip bounded DNS lookups. MANIFEST_MAIL_METRICS=false skips mail size/count probes.
+
+Upgrade commands automatically retain private detailed logs in /root/distrorejuveinfo/runs.
+Use --verbose to show command output too, or --trace to write a separate Bash trace.
+DISTROREJUVE_LOG_DIR changes the log parent directory. Terminal colours respect NO_COLOR.
+
 Run with --show-changes to report the differences pre/post upgrading (packages installed, config files, ports, etc).
 
 Run with --show-cruft to see packages that do not belong to the current distro.  e.g. leftover packages from older distros.  And to see 32 bit packages installed on 64 bit distros.
@@ -79,6 +85,10 @@ Run with --show-cruft to see packages that do not belong to the current distro. 
 Run with --remove-cruft to remove old packages and 32 bit applications on 64 bit distros.
 
 Run with --remove-deprecated-packages to remove old packages
+
+Add --crossgrade to a release-upgrade command to permit i386 to amd64 conversion at the last
+release supporting native i386 (Debian 12 or Ubuntu 18.04), then continue to the requested target.
+A running x86_64 kernel is required. Ubuntu also requires ENABLE_UBUNTU_CROSSGRADE.
 
 Run with --to-64bit to convert a 32 bit distro to 64 bit.  Works OK with Debian.  May work for Ubuntu < 18.04.
 
@@ -870,31 +880,554 @@ function add_missing_debian_keys() {
   return 0
 }
 
-# Output installed/unpacked blockers only; removed packages with residual configs do not block.
-function upgrade_output_incompatible_packages() {
-  local family=$1 current=$2 target=$3 dovecot=false fail2ban=false packages
-  case "$family" in
-    debian)
-      if is_distro_name_older "$current" wheezy && ! is_distro_name_older "$target" wheezy; then dovecot=true; fi
-      if is_distro_name_older "$current" stretch && ! is_distro_name_older "$target" stretch; then fail2ban=true; fi
-      [ "$target" = trixie ] && [ -z "$IGNORE_DOVECOT_ERROR" ] && dovecot=true
-      ;;
-    ubuntu)
-      if is_distro_name_older "$current" xenial && ! is_distro_name_older "$target" xenial; then dovecot=true; fi
-      if is_distro_name_older "$current" bionic && ! is_distro_name_older "$target" bionic; then fail2ban=true; fi
-      if is_distro_name_older "$current" questing && ! is_distro_name_older "$target" questing && [ -z "$IGNORE_DOVECOT_ERROR" ]; then
-        dovecot=true
-      fi
-      ;;
-    *) return 1;;
+# Columns: family, first affected release, action, rule, package pattern, remedy.
+# Only purge rules may remove packages; manual rules protect service data and access.
+function upgrade_output_compatibility_rules() {
+  cat <<'RULES'
+debian	wheezy	purge	dovecot-2	^dovecot($|-)	Dovecot 1.x configuration needs migration to 2.x.
+debian	stretch	purge	fail2ban-09	^fail2ban$	Fail2ban 0.9 changes jail configuration.
+debian	buster	purge	dovecot-23	^dovecot($|-)	Migrate obsolete Dovecot settings/plugins removed in 2.3.
+debian	trixie	purge	dovecot-24	^dovecot($|-)	Dovecot 2.4 requires configuration migration.
+ubuntu	precise	purge	dovecot-2	^dovecot($|-)	Dovecot 1.x configuration needs migration to 2.x.
+ubuntu	xenial	purge	fail2ban-09	^fail2ban$	Fail2ban 0.9 changes jail configuration.
+ubuntu	focal	purge	dovecot-23	^dovecot($|-)	Migrate obsolete Dovecot settings/plugins removed in 2.3.
+ubuntu	questing	purge	dovecot-24	^dovecot($|-)	Dovecot 2.4 requires configuration migration.
+debian	trixie	manual	dovecot-replication	^dovecot($|-)	Dovecot 2.4 removes replicator-based replication; migrate this service before upgrading.
+ubuntu	questing	manual	dovecot-replication	^dovecot($|-)	Dovecot 2.4 removes replicator-based replication; migrate this service before upgrading.
+ubuntu	questing	manual	dovecot-armhf	^dovecot($|-)	Dovecot is unavailable on armhf in this target; migrate the mail service or architecture first.
+debian	wheezy	manual	sasl-sql	^libsasl2-modules-sql$	Migrate SASL SQL plugin names and realm-dependent queries before upgrading.
+debian	bullseye	manual	mailman-2	^mailman$	Migrate Mailman 2 lists and archives to Mailman 3 before upgrading.
+debian	bullseye	manual	lilo	^lilo$	Migrate and verify the active bootloader before upgrading; LILO is removed.
+debian	bullseye	manual	xfs-barrier	.*	Remove obsolete barrier/nobarrier XFS mount options from fstab.
+debian	bookworm	manual	ldap-backends	^slapd$	Migrate removed OpenLDAP backends and external ppolicy/nssov configuration before upgrading.
+ubuntu	jammy	manual	ldap-backends	^slapd$	Migrate removed OpenLDAP backends and external ppolicy/nssov configuration before upgrading.
+debian	bookworm	manual	bind-map	^bind9$	Convert BIND map-format zones using the old tools before upgrading.
+ubuntu	jammy	manual	bind-map	^bind9$	Convert BIND map-format zones using the old tools before upgrading.
+debian	trixie	manual	rabbitmq	^rabbitmq-server$	Migrate RabbitMQ through supported intermediate versions and queue types before upgrading.
+ubuntu	jammy	manual	rabbitmq	^rabbitmq-server$	Migrate RabbitMQ through supported intermediate versions and feature flags before upgrading.
+ubuntu	noble	manual	rabbitmq	^rabbitmq-server$	Migrate RabbitMQ through supported intermediate versions and feature flags before upgrading.
+ubuntu	resolute	manual	rabbitmq	^rabbitmq-server$	Migrate RabbitMQ through supported intermediate versions and feature flags before upgrading.
+ubuntu	noble	manual	pam-lastlog	.*	Migrate mandatory PAM references to removed pam_lastlog.so before upgrading.
+ubuntu	plucky	manual	ldap-tls	^slapd$	Convert OpenLDAP GnuTLS cipher strings to OpenSSL syntax before upgrading.
+ubuntu	noble	manual	rrd-armhf	^(rrdtool|rrdcached|librrd[0-9-]|librrds-perl|python[0-9.-]*-rrdtool)	On armhf export RRD databases to XML with the old tools before the time_t transition.
+ubuntu	resolute	manual	cgroup-v1	.*	Remove boot options forcing cgroup v1 and verify unified cgroup v2 support before upgrading.
+debian	buster	warn	ssh-rsa-list	^openssh-server$	Review SSH algorithm allow-lists and test a second login with RSA SHA-2 before upgrading.
+debian	trixie	warn	sysctl-conf	.*	Move active /etc/sysctl.conf settings to /etc/sysctl.d; trixie no longer reads that file.
+ubuntu	vivid	warn	upstart-jobs	.*	Review custom Upstart jobs and replace them with native systemd units.
+debian	trixie	manual	crossgrade-rrd	^(rrdtool|rrdcached|librrd[0-9-]|librrds-perl|python[0-9.-]*-rrdtool)	Export architecture-dependent RRD data to XML with the old tools and plan its native restore before crossgrading.
+debian	trixie	manual	crossgrade-postgresql	^postgresql-[0-9]+$	Plan a logical PostgreSQL dump/restore; existing 32-bit clusters cannot simply be opened by 64-bit binaries.
+debian	trixie	manual	crossgrade-ldap	^slapd$	Plan an OpenLDAP logical export/import for the architecture change; preserve directory data before crossgrading.
+ubuntu	focal	manual	crossgrade-rrd	^(rrdtool|rrdcached|librrd[0-9-]|librrds-perl|python[0-9.-]*-rrdtool)	Export architecture-dependent RRD data to XML with the old tools and plan its native restore before crossgrading.
+ubuntu	focal	manual	crossgrade-postgresql	^postgresql-[0-9]+$	Plan a logical PostgreSQL dump/restore; existing 32-bit clusters cannot simply be opened by 64-bit binaries.
+ubuntu	focal	manual	crossgrade-ldap	^slapd$	Plan an OpenLDAP logical export/import for the architecture change; preserve directory data before crossgrading.
+RULES
+}
+
+# Inspect text only. Never load customer shell/application configuration as code.
+# Return 0 for a match, 1 when clear, 2 when a required file cannot be inspected.
+function upgrade_compatibility_config_matches() {
+  local pattern=$1 file found=false status
+  shift
+  for file in "$@"; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    [ -f "$file" ] && [ -r "$file" ] || return 2
+    awk -v pattern="$pattern" '
+      { sub(/#.*/, ""); gsub(/["\047]/, ""); if (tolower($0) ~ pattern) matched=1 }
+      END { exit !matched }
+    ' "$file"
+    status=$?
+    case "$status" in 0) found=true;; 1) :;; *) return 2;; esac
+  done
+  $found
+}
+
+# Follow conventional active config entrypoints and explicit includes, never backup files.
+function upgrade_compatibility_output_config_files() {
+  local kind=$1 file included requirement text size status index=0 seen=''
+  local -a queue=()
+  case "$kind" in
+    ldap)
+      upgrade_compatibility_config_matches '^[[:space:]]*slapd_conf[[:space:]]*=[[:space:]]*[^[:space:]]|(^|[[:space:]])-[fF][[:space:]]' /etc/default/slapd /etc/systemd/system/slapd.service /etc/systemd/system/slapd.service.d/*.conf
+      status=$?
+      [ "$status" -eq 1 ] || return 2
+      [ ! -f /etc/ldap/slapd.conf ] || queue+=(/etc/ldap/slapd.conf)
+      if [ -d /etc/ldap/slapd.d ]; then
+        text=$(find /etc/ldap/slapd.d -maxdepth 8 \( -type f -o -type l \) -name '*.ldif' -print) || return 2
+        while IFS= read -r file; do [ -z "$file" ] || queue+=("$file"); done <<< "$text"
+      fi;;
+    bind) queue=(/etc/bind/named.conf);;
+    dovecot)
+      upgrade_compatibility_config_matches '(^|[=[:space:]])-c[[:space:]]|--config([=[:space:]]|$)' /etc/default/dovecot /etc/systemd/system/dovecot.service /etc/systemd/system/dovecot.service.d/*.conf
+      status=$?
+      [ "$status" -eq 1 ] || return 2
+      queue=(/etc/dovecot/dovecot.conf);;
+    *) return 2;;
   esac
-  $dovecot || $fail2ban || return 0
+  [ "${#queue[@]}" -gt 0 ] || return 2
+  while [ "$index" -lt "${#queue[@]}" ]; do
+    file=${queue[index]}; index=$((index+1))
+    case "|$seen|" in *"|$file|"*) continue;; esac
+    seen="$seen|$file"
+    [ "$index" -le 200 ] && [ -f "$file" ] && [ -r "$file" ] || return 2
+    size=$(stat -c %s -- "$file") || return 2
+    [ "$size" -le 1048576 ] || return 2
+    printf '%s\n' "$file"
+    text=$(awk -v kind="$kind" '
+      /^[[:space:]]*#/ { next }
+       kind == "bind" {
+        line=$0; sub(/#.*/, "", line); sub(/\/\/.*/, "", line)
+        while (match(line, /(^|[;{}[:space:]])include[[:space:]]+"[^"]+"[[:space:]]*;/)) {
+          value=substr(line,RSTART,RLENGTH); sub(/^[^"]*"/, "", value); sub(/".*$/, "", value)
+          print "required|" value; line=substr(line,RSTART+RLENGTH)
+        }
+        if (line ~ /(^|[;{}[:space:]])include([[:space:]]|$)/) exit 2
+      }
+      kind != "bind" && /^[[:space:]]*!?include(_try)?[[:space:]]+/ {
+        line=$0; sub(/^[[:space:]]*!?include(_try)?[[:space:]]+/, "", line); sub(/[[:space:]]+#.*/, "", line)
+        gsub(/^["\047]|["\047][[:space:]]*$/, "", line); print ($0 ~ /!include_try/ ? "optional|" : "required|") line
+      }
+    ' "$file") || return 2
+    while IFS='|' read -r requirement included; do
+      [ -n "$included" ] || continue
+      case "$included" in *'$'*|*'%'*|*'..'*|*'|'*) return 2;; esac
+      case "$included" in /*) :;; *) included="${file%/*}/$included";; esac
+      # Expand only config include globs; never execute or source the contents.
+      local expanded matched=false
+      while IFS= read -r expanded; do
+        [ -n "$expanded" ] || continue
+        queue+=("$expanded"); matched=true
+      done < <(compgen -G "$included")
+      if ! $matched; then
+        # Dovecot !include_try explicitly permits missing optional files.
+        if [ "$requirement" = optional ]; then continue; fi
+        return 2
+      fi
+    done <<< "$text"
+  done
+}
+
+# Check package-owned module filenames without loading Apache or application code.
+function upgrade_compatibility_apache_module_enabled() {
+  local package=$1 modules module file status found=false
+  modules=$(dpkg-query -L "$package") || return 2
+  while IFS= read -r module; do
+    case "$module" in *.so) module=${module##*/};; *) continue;; esac
+    for file in /etc/apache2/apache2.conf /etc/apache2/mods-enabled/*.load /etc/apache2/conf-enabled/*.conf /etc/apache2/sites-enabled/*.conf; do
+      [ -e "$file" ] || [ -L "$file" ] || continue
+      [ -f "$file" ] && [ -r "$file" ] || return 2
+      awk -v module="$module" '
+        tolower($1) == "loadmodule" { path=$3; gsub(/["\047]/,"",path); sub(/^.*\//,"",path); if (path == module) found=1 }
+        END { exit !found }
+      ' "$file"
+      status=$?
+      case "$status" in 0) found=true;; 1) :;; *) return 2;; esac
+    done
+  done <<< "$modules"
+  $found
+}
+
+function upgrade_compatibility_rule_applies() {
+  local rule=$1 arch=${2:-} file files text help
+  local -a paths=()
+  case "$rule" in
+    dovecot-2|dovecot-24|fail2ban-*|mailman-2|lilo|rabbitmq) return 0;;
+    dovecot-23|dovecot-replication)
+      files=$(upgrade_compatibility_output_config_files dovecot) || return 2
+      while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+      if [ "$rule" = dovecot-23 ]; then
+        upgrade_compatibility_config_matches '^[[:space:]]*(ssl_protocols|ssl_parameters|director_doveadm_port|director_consistent_hashing|mdbox_purge_preserve_alt)[[:space:]]*=|^[[:space:]]*mail_plugins[[:space:]]*=[[:space:]]*([^#]*[[:space:]])?(stats|imap_stats)([[:space:]]|$)' "${paths[@]}"
+      else
+        upgrade_compatibility_config_matches '^[[:space:]]*(mail_replica[[:space:]]*=[[:space:]]*["\047]?[^[:space:]#"\047]|service[[:space:]]+(replicator|director)[[:space:]]*\{|mail_plugins[[:space:]]*=[[:space:]]*([^#]*[[:space:]])?replication([[:space:]]|$))' "${paths[@]}"
+      fi;;
+    dovecot-armhf) [ "$arch" = armhf ];;
+    crossgrade-rrd|crossgrade-postgresql|crossgrade-ldap)
+      [ -n "${crossgrade_release:-}" ] && [ "$arch" = i386 ];;
+    sasl-sql)
+      upgrade_compatibility_config_matches '^[[:space:]]*auxprop_plugin:[[:space:]]*(mysql|pgsql|sqlite)' /etc/sasl2/*.conf /etc/postfix/sasl/*.conf;;
+    xfs-barrier)
+      [ -r /etc/fstab ] || return 2
+      awk '$0 !~ /^[[:space:]]*#/ && $3 == "xfs" && $4 ~ /(^|,)(no)?barrier(=[^,]+)?(,|$)/ { bad=1 } END { exit !bad }' /etc/fstab;;
+    ldap-backends|ldap-tls)
+      files=$(upgrade_compatibility_output_config_files ldap) || return 2
+      while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+      if [ "$rule" = ldap-backends ]; then
+        upgrade_compatibility_config_matches '^[[:space:]]*(database[[:space:]]+|olcdatabase:[[:space:]]*(\{[0-9]+\})?)(bdb|hdb|shell)([[:space:]]|$)|^[[:space:]]*(include|olcinclude:).*ppolicy|^[[:space:]]*(dn:[[:space:]]*cn=|cn:[[:space:]]*)(\{[0-9]+\})?ppolicy(,|[[:space:]]|$)|^[[:space:]]*(overlay[[:space:]]+|olcoverlay:[[:space:]]*(\{[0-9]+\})?)nssov|^[[:space:]]*(olcmoduleload:|moduleload[[:space:]]).*nssov' "${paths[@]}"
+      else
+        upgrade_compatibility_config_matches '^[[:space:]]*(olctlsciphersuite:|tls_cipher_suite[[:space:]]).*([%+!]|normal|secure[0-9]|performance)' "${paths[@]}"
+      fi;;
+    bind-map)
+      # Canonicalize active includes without plugins (-c), redacting secrets (-x).
+      command -v named-checkconf >/dev/null 2>&1 || return 2
+      upgrade_compatibility_config_matches '(^|[=[:space:]])-[ct][[:space:]]' /etc/default/named /etc/default/bind9
+      [ "$?" -eq 1 ] || return 2
+      # Older BIND lacks -c: inspect bounded static includes instead of loading modules.
+      help=$(LC_ALL=C named-checkconf -h 2>&1)
+      if printf '%s\n' "$help" | grep -Eq '\[-[A-Za-z]*c[A-Za-z]*\]|(^|[[:space:]])-c([[:space:],]|$)'; then
+        text=$(named-checkconf -p -x -c 2>/dev/null) || return 2
+      else
+        files=$(upgrade_compatibility_output_config_files bind) || return 2
+        while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+        upgrade_compatibility_config_matches '(^|[;{}[:space:]])(plugin|dyndb|dlz)([[:space:]]|$)' "${paths[@]}"
+        [ "$?" -eq 1 ] || return 2
+        text=$(cat -- "${paths[@]}") || return 2
+      fi
+      printf '%s\n' "$text" | awk '
+        {
+          line=$0; sub(/#.*/, "", line); sub(/\/\/.*/, "", line)
+          while (length(line)) {
+            if (comment) {
+              if (match(line, /\*\//)) { line=substr(line,RSTART+2); comment=0 } else break
+            } else if (match(line, /\/\*/)) {
+              all=all " " substr(line,1,RSTART-1); line=substr(line,RSTART+2); comment=1
+            } else { all=all " " line; break }
+          }
+        }
+        END { exit !(all ~ /(^|[;{}[:space:]])masterfile-format[[:space:]]+"?map"?[[:space:]]*;/) }
+      ';;
+    pam-lastlog)
+      upgrade_compatibility_config_matches '^[[:space:]]*-?(auth|account|password|session)[[:space:]]+(required|requisite|\[[^]]*default=(die|bad)[^]]*\])[[:space:]]+[^[:space:]]*pam_lastlog\.so' /etc/pam.d/*;;
+    rrd-armhf) [ "$arch" = armhf ];;
+    cgroup-v1)
+      upgrade_compatibility_config_matches '(^|[[:space:]])(systemd\.unified_cgroup_hierarchy=(0|false|no)|systemd\.legacy_systemd_cgroup_controller(=1|=yes|=true)?)([[:space:]]|$)' /proc/cmdline;;
+    ssh-rsa-list)
+      upgrade_compatibility_config_matches '^[[:space:]]*(pubkeyacceptedkeytypes|hostbasedacceptedkeytypes)[[:space:]]' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf;;
+    sysctl-conf) upgrade_compatibility_config_matches '^[[:space:]]*[^[:space:]#;]+[[:space:]]*=' /etc/sysctl.conf;;
+    upstart-jobs)
+      upgrade_compatibility_config_matches '^[[:space:]]*(exec|script|start on)[[:space:]]' /etc/init/*.conf;;
+    *) echo "dss:error: Unknown compatibility rule: $rule" >&2; return 2;;
+  esac
+}
+
+# Machine records: action<TAB>rule<TAB>boundary<TAB>packages<TAB>remedy.
+function upgrade_output_compatibility_issues() {
+  local family=$1 current=$2 target=$3 wanted_family boundary action rule pattern remedy packages selected arch status
+  case "$family" in debian|ubuntu) :;; *) return 1;; esac
   packages=$(dpkg-query -W -f='${Status}\t${Package}\n') || return 1
-  # Status example: install ok installed<TAB>dovecot-imapd. Include half-configured packages.
-  printf '%s\n' "$packages" | awk -F '\t' -v dovecot="$dovecot" -v fail2ban="$fail2ban" '
-    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ &&
-      ((dovecot == "true" && $2 ~ /^dovecot($|-)/) || (fail2ban == "true" && $2 == "fail2ban")) { print $2 }
+  arch=$(dpkg --print-architecture) || return 1
+  while IFS=$'\t' read -r wanted_family boundary action rule pattern remedy; do
+    [ "$family" = "$wanted_family" ] || continue
+    if ! is_distro_name_older "$current" "$boundary" || is_distro_name_older "$target" "$boundary"; then continue; fi
+    [ "$rule" = dovecot-24 ] && [ -n "$IGNORE_DOVECOT_ERROR" ] && continue
+    if [ "$pattern" = ".*" ]; then selected=system
+    else selected=$(printf '%s\n' "$packages" | awk -F '\t' -v pattern="$pattern" '
+      $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && $2 ~ pattern { print $2 }
+    ') || return 1
+    fi
+    [ -n "$selected" ] || continue
+    selected=${selected//$'\n'/ }
+    upgrade_compatibility_rule_applies "$rule" "$arch"
+    status=$?
+    [ "$status" -eq 1 ] && continue
+    if [ "$status" -ne 0 ]; then
+      action=manual
+      remedy="Cannot verify relevant configuration; inspect it before upgrading. $remedy"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$action" "$rule" "$boundary" "$selected" "$remedy"
+  done < <(upgrade_output_compatibility_rules)
+}
+
+function upgrade_output_incompatible_packages() {
+  local issues
+  issues=$(upgrade_output_compatibility_issues "$@") || return 1
+  printf '%s\n' "$issues" | awk -F '\t' '$1 == "purge" { count=split($4, packages, " "); for (i=1; i<=count; i++) print packages[i] }' | sort -u
+}
+
+# Automatic crossgrade planning.
+# Legacy foreign applications may remain; native tools and the service manager must be converted.
+# Keep the original conversion inventory until every recorded target has been verified.
+# APT_CONFIG loads before apt.conf.d and apt.conf: unchanged probes expose defaults.
+# Run before package inventory or any i386->amd64 mutation; never override user pins.
+function crossgrade_check_apt_architecture_config() {
+  (
+    local directory probe status
+    if [ -n "${APT_CONFIG:-}" ]; then
+      printf '%s\n' 'dss:error: Existing APT_CONFIG prevents a reliable crossgrade architecture check; review and unset it first.' >&2
+      return 1
+    fi
+    umask 077
+    directory=$(mktemp -d) || return 1
+    trap 'rm -rf -- "$directory"' EXIT
+    probe="distrorejuve-${directory##*/}"
+    # Suppress dpkg foreign defaults after #clear; this probe never changes packages.
+    if ! printf 'APT::Architecture "%s";\n#clear APT::Architectures;\nAPT::Architectures { "%s"; };\nDir::Bin::dpkg "/bin/true";\n' "$probe" "$probe" > "$directory/probe.conf"; then
+      return 1
+    fi
+    if APT_CONFIG="$directory/probe.conf" apt-config dump > "$directory/dump"; then
+      :
+    else
+      status=$?
+      printf '%s\n' 'dss:error: Cannot read APT architecture configuration; crossgrade was not started.' >&2
+      return "$status"
+    fi
+    # Example dump: APT::Architecture "probe"; APT::Architectures:: "i386";
+    # apt-config normalizes global lists; binary-specific lists also need both arches.
+    if awk -v probe="$probe" '
+      {
+        name=tolower($1)
+        if (name !~ /^(apt|binary::[^:]+::apt)::architectures?($|::)/) next
+        if (split($0, quoted, /"/) != 3) { bad=1; next }
+        value=quoted[2]
+        if (name == "apt::architecture") {
+          native=1
+          if (value != probe) bad=1
+        } else if (name ~ /::architecture($|::)/) bad=1
+        else {
+          scope=name; sub(/::architectures.*/, "", scope)
+          if (name == scope "::architectures") { if (value != "") bad=1; next }
+          entry=name; sub(/^.*::architectures::/, "", entry)
+          if (entry ~ /:/ || value == "") { bad=1; next }
+          if (value != probe) changed[scope]=1
+          if (value == "i386") i386[scope]=1
+          if (value == "amd64") amd64[scope]=1
+        }
+      }
+      END {
+        for (scope in changed) if (!i386[scope] || !amd64[scope]) bad=1
+        exit (!native || bad)
+      }
+    ' "$directory/dump"; then
+      return 0
+    fi
+    printf '%s\n' 'dss:error: Persistent APT architecture overrides block crossgrade. Remove APT::Architecture pins; explicit APT::Architectures lists must include i386 and amd64, including binary-specific settings.' >&2
+    return 1
+  )
+}
+
+function crossgrade_bookworm_output_pending_directory() {
+  local directory found=''
+  # Conversion recovery outlives the normal pre-upgrade comparison window.
+  for directory in /root/distrorejuveinfo/*.crossgrade-bookworm /root/deghostinfo/*.crossgrade-bookworm; do
+    if [ ! -f "$directory/original.i386" ] || [ -f "$directory/completed" ]; then continue; fi
+    if [ -n "$found" ]; then
+      echo 'dss:error: Multiple unfinished crossgrade inventories require manual review before continuing.' >&2
+      return 2
+    fi
+    found=$directory
+  done
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+function crossgrade_bookworm_is_pending() {
+  crossgrade_bookworm_output_pending_directory >/dev/null
+}
+
+function crossgrade_bookworm_check_native() {
+  local native bits packages
+  native=$(dpkg --print-architecture) || return 2
+  bits=$(getconf LONG_BIT) || return 2
+  [ "$native:$bits" = amd64:64 ] || return 1
+  packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n') || return 2
+  printf '%s\n' "$packages" | awk -F '\t' '
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ {
+      sub(/:.*/, "", $2)
+      if ($4 == "yes" || $2 ~ /^(dpkg|apt|apt-utils|bash|coreutils|tar|perl-base|systemd|systemd-sysv|udev|openssh-server|ifupdown)$/) {
+        if ($1 !~ / installed$/ || ($3 != "amd64" && $3 != "all")) mixed=1
+      }
+    }
+    END { exit mixed }
   '
+}
+
+# shellcheck shell=bash
+# Output the release at which an explicitly permitted architecture conversion must run.
+# Permission alone does not request conversion while the chosen release supports i386.
+function upgrade_output_crossgrade_release() {
+  local family=$1 current=$2 target=$3 enabled=${UPGRADE_CROSSGRADE-false}
+  local native bits kernel boundary releases state pending=false
+  case "$enabled" in true|false) :;; *) echo 'dss:error: Internal crossgrade permission must be true or false.' >&2; return 1;; esac
+  case "$family" in
+    debian) releases=$ALL_DEBIAN; boundary=bookworm;;
+    ubuntu) releases=$ALL_UBUNTU; boundary=bionic;;
+    *) return 0;;
+  esac
+  case " $releases " in *" $current "*) :;; *) echo "dss:error: Unknown $family starting release: $current" >&2; return 1;; esac
+  case " $releases " in *" $target "*) :;; *) echo "dss:error: Unknown $family target release: $target" >&2; return 1;; esac
+  native=$(dpkg --print-architecture) || return 1
+  bits=$(getconf LONG_BIT) || return 1
+  [ -n "$native" ] || { echo 'dss:error: Cannot establish native package architecture.' >&2; return 1; }
+  case "$bits" in 32|64) :;; *) echo "dss:error: Cannot establish userspace bit width: $bits" >&2; return 1;; esac
+  if [ "$family" = debian ] && [ "$current" = bookworm ]; then
+    crossgrade_bookworm_is_pending
+    state=$?
+    case "$state" in 0) pending=true;; 1) :;; *) return 1;; esac
+  fi
+  case "$native:$bits" in
+    amd64:64)
+      if $pending; then state=1
+      else crossgrade_bookworm_check_native; state=$?; fi
+      [ "$state" -ne 0 ] || return 0
+      [ "$state" -eq 1 ] || return 1;;
+    i386:32|i386:64|amd64:32) :;;
+    *) return 0;;
+  esac
+  if ! is_distro_name_newer "$target" "$boundary"; then
+    if [ "$native:$bits" != i386:32 ]; then
+      echo 'dss:error: Package architecture and userspace width disagree. Repair the incomplete crossgrade before release upgrades.' >&2
+      return 1
+    fi
+    return 0
+  fi
+  if ! $enabled; then
+    echo "dss:error: $family $target requires conversion before leaving $boundary. Add --crossgrade to permit i386 to amd64 conversion." >&2
+    return 1
+  fi
+  if [ "$family" = ubuntu ] && [ -z "${ENABLE_UBUNTU_CROSSGRADE:-}" ]; then
+    echo 'dss:error: Ubuntu crossgrading remains experimental. Set ENABLE_UBUNTU_CROSSGRADE only after reviewing that risk, as well as --crossgrade.' >&2
+    return 1
+  fi
+  kernel=$(uname -m) || return 1
+  if [ "$kernel" != x86_64 ]; then
+    echo 'dss:error: Automatic i386 to amd64 conversion needs a running x86_64 kernel before any release changes.' >&2
+    return 1
+  fi
+  if is_distro_name_newer "$current" "$boundary"; then
+    echo "dss:error: Architecture conversion must finish on $family $boundary before later release sources are selected. Restore or repair that checkpoint." >&2
+    return 1
+  fi
+  if [ "$current" != "$boundary" ] && [ "$native:$bits" != i386:32 ]; then
+    echo 'dss:error: Architecture conversion is incomplete before the planned checkpoint. Repair it on the current release before continuing release upgrades.' >&2
+    return 1
+  fi
+  if [ "$family" = debian ]; then crossgrade_check_apt_architecture_config || return 1; fi
+  printf '%s\n' "$boundary"
+}
+
+function upgrade_check_crossgrade_checkpoint() {
+  # Source checks read this dynamically scoped override; no release transition is active here.
+  # shellcheck disable=SC2034
+  local family=$1 release=$2 current audit plan apt_sources_transition_target=''
+  if [ "$family" = debian ]; then debian_check_release_completion "$release"; return $?; fi
+  current=$(distro_output_codename) || return 1
+  [ "$current" = "$release" ] || return 1
+  apt_sources_check_releases_and_vendors || return 1
+  audit=$(LC_ALL=C dpkg --audit) || return 1
+  if [ -n "$audit" ]; then
+    printf '%s\n' "$audit" >&2
+    echo 'dss:error: Incomplete package state prevents crossgrading.' >&2
+    return 1
+  fi
+  plan=$(LC_ALL=C apt-get -s dist-upgrade) || return 1
+  if printf '%s\n' "$plan" | grep -Eq '^(Inst|Conf|Remv|Purg) '; then
+    echo 'dss:error: Pending package changes prevent crossgrading. Finish updating this release first.' >&2
+    return 1
+  fi
+}
+
+# Call before changing repositories at bookworm -> trixie or bionic -> focal.
+function upgrade_crossgrade_before_release() {
+  local family=$1 old=$2 target=$3 current checkpoint native bits
+  current=$(distro_output_codename) || return 1
+  [ "$current" = "$old" ] || return 0
+  checkpoint=$(upgrade_output_crossgrade_release "$family" "$current" "$target") || return 1
+  [ -n "$checkpoint" ] || return 0
+  if [ "$current" != "$checkpoint" ]; then
+    echo "dss:error: Expected $family $checkpoint before architecture conversion; installed release is $current." >&2
+    return 1
+  fi
+  pause_check || return 1
+  check_disk_space || return 1
+  if [ "$family" = debian ] && crossgrade_bookworm_is_pending; then
+    # Package audit can be incomplete mid-conversion; the guarded backend repairs its recorded plan.
+    apt_sources_check_releases_and_vendors "$checkpoint" || return 1
+  else upgrade_check_crossgrade_checkpoint "$family" "$checkpoint" || return 1; fi
+  echo "dss:stage: Crossgrading $family $checkpoint from i386 to amd64 before $target" >&2
+  if [ "$family" = debian ]; then crossgrade_debian_bookworm || return $?
+  else crossgrade_debian || return $?; fi
+  native=$(dpkg --print-architecture) || return 1
+  bits=$(getconf LONG_BIT) || return 1
+  if [ "$native:$bits" != amd64:64 ]; then
+    echo "dss:error: Crossgrade did not establish native amd64 and 64-bit userspace ($native/$bits). Release upgrade stopped." >&2
+    return 1
+  fi
+  upgrade_check_crossgrade_checkpoint "$family" "$checkpoint" || return 1
+}
+
+# End automatic crossgrade planning.
+
+# Validate the complete requested path before any package/source mutation.
+function upgrade_check_path() {
+  echo "dss:stage: Checking complete upgrade path $2 -> $3" >&2
+  local family=$1 current=$2 target=$3 issues action rule boundary packages remedy arch crossgrade_release blocked=false
+  local purge=${PURGE_INCOMPATIBLE_PACKAGES-false}
+  case "$purge" in true|false) :;; *) echo 'dss:error: PURGE_INCOMPATIBLE_PACKAGES must be true or false.' >&2; return 1;; esac
+  local releases
+  case "$family" in debian) releases=$ALL_DEBIAN;; ubuntu) releases=$ALL_UBUNTU;; *) return 1;; esac
+  case " $releases " in *" $current "*) :;; *) echo "dss:error: Unknown $family starting release: $current" >&2; return 1;; esac
+  case " $releases " in *" $target "*) :;; *) echo "dss:error: Unknown $family target release: $target" >&2; return 1;; esac
+  if crossgrade_release=$(upgrade_output_crossgrade_release "$family" "$current" "$target"); then :; else blocked=true; fi
+  if ! is_distro_name_older "$current" "$target"; then $blocked && return 1; return 0; fi
+  arch=$(dpkg --print-architecture) || return 1
+  if [ "$family" = debian ] && ! is_distro_name_older "$target" trixie; then
+    case "$arch" in i386)
+      if [ -z "$crossgrade_release" ]; then blocked=true; fi;;
+      mipsel|mips64el)
+      echo "dss:error: Requested path $current -> $target reaches Debian 13, which cannot upgrade native $arch. Migrate or crossgrade first." >&2
+      blocked=true;;
+    esac
+  fi
+  if [ "$family" = ubuntu ] && [ "$arch" = i386 ] && is_distro_name_newer "$target" bionic && [ -z "$crossgrade_release" ]; then
+    echo "dss:error: Requested path $current -> $target exceeds Ubuntu 18.04 native i386 support. Migrate or crossgrade first." >&2
+    blocked=true
+  fi
+  if [ "$family" = debian ] && [ "$arch" = i386 ] && is_distro_name_older "$current" bullseye && ! is_distro_name_older "$target" bullseye && [ -r /sys/hypervisor/guest_type ] && [ "$(cat /sys/hypervisor/guest_type)" = PV ] && [[ "$(uname -m)" == i?86 ]]; then
+    echo 'dss:error: Debian 11 drops 32-bit Xen PV guests; change the guest boot mode before upgrading.' >&2
+    blocked=true
+  fi
+  issues=$(upgrade_output_compatibility_issues "$family" "$current" "$target") || return 1
+  while IFS=$'\t' read -r action rule boundary packages remedy; do
+    [ -n "$action" ] || continue
+    case "$action" in
+      warn) printf 'dss:warn: [%s at %s] %s\n' "$rule" "$boundary" "$remedy" >&2;;
+      manual)
+        printf 'dss:error: [%s at %s] %s Packages: %s.\n' "$rule" "$boundary" "$remedy" "$packages" >&2
+        blocked=true;;
+      purge)
+        printf 'dss:warn: [%s at %s] %s Packages: %s.\n' "$rule" "$boundary" "$remedy" "$packages" >&2
+        if ! $purge; then blocked=true; fi;;
+    esac
+  done <<< "$issues"
+  if $blocked; then
+    echo "dss:error: Requested upgrade path $current -> $target blocked before changes. PURGE_INCOMPATIBLE_PACKAGES=true backs up and purges config-only blockers; manual migrations cannot be bypassed with it." >&2
+    return 1
+  fi
+  upgrade_check_incompatible_packages "$family" "$current" "$target"
+}
+
+function upgrade_preflight_action() {
+  local action=$1 version=${2:-} family current target next remaining=1000
+  current=$(distro_output_codename) || return 1
+  case " $ALL_DEBIAN " in *" $current "*) family=debian;; *)
+    case " $ALL_UBUNTU " in *" $current "*) family=ubuntu;; *) return 0;; esac;;
+  esac
+  case "$action:$family" in
+    --to-squeeze:ubuntu|--to-wheezy:ubuntu|--to-jessie:ubuntu|--to-debian-release:ubuntu|--to-latest-debian:ubuntu|--to-latest-lts:debian|--to-next-ubuntu:debian)
+      echo "dss:error: $action does not apply to $family." >&2; return 1;;
+  esac
+  case "$action" in
+    --to-squeeze) target=squeeze;;
+    --to-wheezy) target=wheezy;;
+    --to-jessie) target=jessie;;
+    --to-debian-release)
+      case "$version" in 6) target=squeeze;; 7) target=wheezy;; 8) target=jessie;; 9) target=stretch;; 10) target=buster;; 11) target=bullseye;; 12) target=bookworm;; 13) target=trixie;; *) return 1;; esac;;
+    --to-latest-debian) target=trixie;;
+    --to-next-ubuntu) remaining=1;;
+    --to-latest-lts|--dist-upgrade) :;;
+    *) return 0;;
+  esac
+  if [ -z "$target" ]; then
+    if [ "$family" = debian ]; then target=trixie
+    else
+      target=$current
+      while [ "$remaining" -gt 0 ]; do
+        next=$(ubuntu_output_next_release "$target") || return 1
+        [ -n "$next" ] || break
+        target=$next
+        remaining=$((remaining-1))
+      done
+    fi
+  fi
+  upgrade_check_path "$family" "$current" "$target"
 }
 
 # Config/state backups deliberately exclude mail stores and unrelated application data.
@@ -961,6 +1494,8 @@ function upgrade_check_incompatible_packages() {
     echo "dss:error: Upgrade $current to $target blocked by: ${packages[*]}. Set PURGE_INCOMPATIBLE_PACKAGES=true to back up and purge them; services remain removed until manual reinstall." >&2
     return 1
   fi
+  # Honour pause before any service removal, including whole-path preflight.
+  pause_check || return 1
   # Validate the other upgrade conditions before stopping services or removing their packages.
   upgrade_precondition_checks "$target" || return 1
   record_config_state || return 1
@@ -1245,6 +1780,10 @@ function rm_overwrite_files() {
   local i=
   local rmed=0
   for i in $overwrites; do
+    case "$i" in /etc/apache2|/etc/apache2/*|/etc/httpd|/etc/httpd/*)
+      echo "dss:warn: Preserving Apache configuration after package overwrite failure: $i. Review the package error; no configuration was removed." >&2
+      continue;;
+    esac
     [  ! -f "$i" ] && echo "dss:warn: expecting $i to be a file in rm_overwrite_files" && continue
     rm -f "$i"
     echo "dss:info: removed a shared overwrite file.  sometimes required when cross grading: $i"
@@ -1431,6 +1970,7 @@ function apt_get_install() {
 }
 
 function apt_get_f_install() {
+  echo "dss:stage: Checking package repair" >&2
   pause_check
   local tmplog signature
   signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
@@ -1588,6 +2128,259 @@ function check_systemd_install_matches_init() {
   # ii  systemd-sysv                    232-25+deb9u6                amd64        system and service manager - SysV links
 
 }
+
+# shellcheck shell=bash
+# shellcheck shell=bash
+# Bookworm crossgrade keeps unavailable foreign applications and never autoremoves.
+# https://wiki.debian.org/CrossGrading (Bookworm dpkg/tar/apt bootstrap recipe)
+function crossgrade_bookworm_output_candidate() {
+  local package=$1 version rows policy
+  policy=$(LC_ALL=C apt-cache policy "$package:amd64") || return 2
+  version=$(printf '%s\n' "$policy" | awk '$1 == "Candidate:" { print $2; exit }')
+  [ -n "$version" ] && [ "$version" != '(none)' ] || return 1
+  rows=$(LC_ALL=C apt-cache madison "$package:amd64") || return 2
+  printf '%s\n' "$rows" | awk -F '|' -v version="$version" '
+    { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2) }
+    $2 == version && $3 ~ /[[:space:]]amd64[[:space:]]+Packages[[:space:]]*$/ { found=1 }
+    END { exit !found }' || return 1
+  printf '%s\n' "$version"
+}
+
+# Every removal must have its amd64 replacement in this same plan or already installed.
+function crossgrade_bookworm_check_plan() {
+  local plan=$1 targets=$2 installed=$3
+  awk -F '\t' '
+    FILENAME == ARGV[1] { wanted[$1]=1; if ($3 == "same") coinstall[$1]=1; next }
+    FILENAME == ARGV[2] { if ($1 == "install ok installed" && $3 == "amd64") native[$2]=1; next }
+    {
+      line=$0; split(line, field, /[[:space:]]+/); name=field[2]; sub(/:.*/, "", name)
+      if (field[1] == "Inst") {
+        if (field[2] ~ /:i386$/ || line ~ /\[i386\]\)$/) { if (!(name in coinstall)) bad=1 }
+        else replaced[name]=1
+      }
+      if (field[1] == "Remv" || field[1] == "Purg") {
+        if (field[1] == "Purg" || field[2] ~ /:amd64$/ || (!(field[2] ~ /:/) && name in native) || !(name in wanted)) bad=1
+        removed[name]=1
+      }
+    }
+    END { for (name in removed) if (!(name in replaced) && !(name in native)) bad=1; exit bad }
+  ' "$targets" "$installed" "$plan"
+}
+
+# Download to an empty private cache, check the simulated removals, then inspect every archive.
+function crossgrade_bookworm_download() {
+  local directory=$1 targets=$2 installed=$3 phase=$4 file package version arch cache
+  local -a apt_options=()
+  shift 4
+  read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
+  cache=$(mktemp -d "$directory/$phase.XXXXXX") || return 1
+  mkdir "$cache/partial" || return 1
+  printf '%s\n' "$cache" > "$directory/$phase.cache" || return 1
+  LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
+    -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false --allow-remove-essential --fix-broken --simulate install "$@" \
+    > "$directory/$phase.plan" 2>&1 || return 1
+  crossgrade_bookworm_check_plan "$directory/$phase.plan" "$targets" "$installed" || {
+    echo "dss:error: Crossgrade plan would remove a protected package or reverse architecture; inspect $directory/$phase.plan." >&2
+    return 1
+  }
+  LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
+    -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false -o Dir::Cache::archives="$cache" \
+    --allow-remove-essential --fix-broken --download-only install "$@" || return 1
+  : > "$directory/$phase.archives" || return 1
+  for file in "$cache/"*.deb; do
+    [ -f "$file" ] || continue
+    package=$(dpkg-deb -f "$file" Package) && version=$(dpkg-deb -f "$file" Version) && arch=$(dpkg-deb -f "$file" Architecture) || return 1
+    case "$arch" in
+      amd64|all) :;;
+      i386) awk -F '\t' -v package="$package" '$1 == package && $3 == "same" { found=1 } END { exit !found }' "$targets" || {
+        echo "dss:error: Unapproved i386 archive: $file" >&2; return 1;
+      };;
+      *) echo "dss:error: Unexpected $arch archive: $file" >&2; return 1;;
+    esac
+    printf '%s\t%s\t%s\t%s\n' "$package" "$version" "$arch" "$file" >> "$directory/$phase.archives" || return 1
+  done
+}
+
+function crossgrade_bookworm_check_completion() {
+  local directory=$1 audit package version status plan
+  crossgrade_bookworm_check_native || { echo 'dss:error: Crossgrade core package architecture check failed.' >&2; return 1; }
+  [ "$(/usr/bin/dpkg --print-architecture)" = amd64 ] || { echo 'dss:error: Crossgrade incomplete: dpkg native architecture is not amd64.' >&2; return 1; }
+  [ "$(apt-config dump | awk '$1 == "APT::Architecture" { gsub(/[";]/,"",$2); print $2; exit }')" = amd64 ] || {
+    echo 'dss:error: Crossgrade incomplete: APT native architecture is not amd64; inspect APT architecture overrides.' >&2; return 1;
+  }
+  /bin/bash -c '[ "$(getconf LONG_BIT)" = 64 ]' || { echo 'dss:error: A freshly started Bash/userland is not 64-bit.' >&2; return 1; }
+  while IFS=$'\t' read -r package version; do
+    [ -n "$package" ] || continue
+    if ! status=$(dpkg-query -W -f='${Status}\t${Architecture}' "$package:amd64" 2>/dev/null); then
+      status=$(dpkg-query -W -f='${Status}\t${Architecture}' "$package:all") || return 1
+    fi
+    case "$status" in $'install ok installed\tamd64'|$'install ok installed\tall') :;; *)
+      echo "dss:error: Crossgrade incomplete: required replacement $package:amd64 is not configured." >&2; return 1;;
+    esac
+  done < "$directory/targets"
+  audit=$(LC_ALL=C dpkg --audit 2>&1) || { printf '%s\n' "$audit" >&2; return 1; }
+  [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
+  LC_ALL=C apt-get -o APT::Get::AllowUnauthenticated=false check || return 1
+  plan=$(LC_ALL=C apt-get -s dist-upgrade 2>&1) || { printf '%s\n' "$plan" >&2; return 1; }
+  if printf '%s\n' "$plan" | grep -Eq '^(Inst|Conf|Remv|Purg) '; then
+    printf '%s\n' "$plan" >&2
+    echo 'dss:error: Package changes remain; complete --dist-update and retry the crossgrade before changing release.' >&2
+    return 1
+  fi
+  # A running 32-bit PID1 must not be mistaken for a fully restarted 64-bit system.
+  if [ ! -r /proc/1/exe ] || [ "$(od -An -tu1 -j4 -N1 /proc/1/exe 2>/dev/null | tr -d ' ')" != 2 ]; then
+    echo 'dss:error: Packages converted, but PID1 is not a verified 64-bit executable. Reboot with the verified 64-bit kernel, reconnect, and retry before Debian 13.' >&2
+    return 1
+  fi
+}
+
+function crossgrade_debian_bookworm() {
+  local apt_state_cache_disabled=true current native architecture records file line type filters base added removed
+  local baseline directory package installed_version essential priority multi_arch candidate status audit version oldmark held cache attempt
+  local -a arguments=() bootstrap=() backups=() archives=() apt_options=()
+  read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
+  pause_check || return 1
+  current=$(distro_output_codename) || return 1
+  [ "$current" = bookworm ] || { echo 'dss:error: This crossgrade backend requires Debian 12 bookworm.' >&2; return 1; }
+  [ "$(uname -m)" = x86_64 ] || { echo 'dss:error: Boot a verified x86_64 kernel before crossgrading.' >&2; return 1; }
+  [ "$(id -u)" = 0 ] || return 1
+  check_disk_space || return 1
+  native=$(dpkg --print-architecture) || return 1
+  case "$native" in i386|amd64) :;; *) return 1;; esac
+  if directory=$(crossgrade_bookworm_output_pending_directory); then :
+  else
+    status=$?
+    [ "$status" -eq 1 ] || { echo 'dss:error: Cannot select an unambiguous pending Bookworm crossgrade.' >&2; return 1; }
+    if [ "$native" = amd64 ]; then
+      crossgrade_bookworm_check_native || { echo 'dss:error: Mixed native packages without an original crossgrade inventory require manual review.' >&2; return 1; }
+      echo 'dss:stage: Bookworm native amd64 conversion is already complete.' >&2
+      return 0
+    fi
+  fi
+  crossgrade_check_apt_architecture_config || return 1
+  check_systemd_install_matches_init || return 1
+  apt_sources_check_releases_and_vendors bookworm || return 1
+  records=$(apt_sources_list) || return 1
+  while IFS=$'\t' read -r file line _ type _ _ _ filters; do
+    [ "$type" = deb ] || continue
+    [ "$filters" != '*' ] || continue
+    IFS='|' read -r base added removed <<< "${filters//,/ }"
+    for architecture in i386 amd64; do
+      case " $removed " in *" $architecture "*) echo "dss:error: Source $file:$line excludes $architecture; enable both i386 and amd64 first." >&2; return 1;; esac
+      if [ -n "$base" ]; then
+        case " $base $added " in *" $architecture "*) :;; *) echo "dss:error: Source $file:$line excludes $architecture; enable both i386 and amd64 first." >&2; return 1;; esac
+      fi
+    done
+  done <<< "$records"
+  if [ -z "$directory" ]; then
+    baseline=$(config_state_output_baseline) || {
+      record_config_state || return 1
+      baseline=$(config_state_output_baseline) || return 1
+    }
+    directory="$baseline.crossgrade-bookworm"
+  fi
+  if [ ! -f "$directory/original.i386" ]; then
+    [ "$native" = i386 ] || { echo 'dss:error: No original crossgrade inventory; inspect this mixed system manually before resuming.' >&2; return 1; }
+    audit=$(LC_ALL=C dpkg --audit 2>&1) || return 1
+    [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
+    LC_ALL=C apt-get check || return 1
+    held=$(apt-mark showhold) || return 1
+    [ -z "$held" ] || { echo 'dss:error: Review held packages before crossgrading.' >&2; return 1; }
+    (umask 077; mkdir -p "$directory" && chmod 700 "$directory") || return 1
+    dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\t${Multi-Arch}\n' > "$directory/original.packages" || return 1
+    awk -F '\t' '$1 == "install ok installed" && $3 == "i386" { print $2 "\t" $4 "\t" ($5 == "yes" ? "yes" : "no") "\t" ($6 == "" ? "unknown" : $6) "\t" ($7 == "" ? "no" : $7) }' \
+      "$directory/original.packages" > "$directory/original.i386.new" || return 1
+    apt-mark showauto > "$directory/original.auto" || return 1
+    for file in etc var/lib/dpkg var/lib/apt/extended_states; do [ ! -e "/$file" ] || backups+=("$file"); done
+    (umask 077; tar -C / -czpf "$directory/pre-crossgrade.tar.gz" "${backups[@]}") || return 1
+    mv "$directory/original.i386.new" "$directory/original.i386" || return 1
+  fi
+  echo "dss:stage: Bookworm crossgrade inventory/backups: $directory" >&2
+  if [ "$native" = i386 ]; then dpkg --add-architecture amd64 || return 1; fi
+  apt_get_update || return 1
+  : > "$directory/targets.new" || return 1
+  : > "$directory/retained-i386.new" || return 1
+  while IFS=$'\t' read -r package installed_version essential priority multi_arch; do
+    [ -n "$package" ] || continue
+    if candidate=$(crossgrade_bookworm_output_candidate "$package"); then status=0; else status=$?; fi
+    [ "$status" -ne 2 ] || { echo "dss:error: Cannot inspect APT availability for $package:amd64." >&2; return 1; }
+    if [ -n "$candidate" ] && dpkg --compare-versions "$candidate" ge "$installed_version"; then
+      printf '%s\t%s\t%s\n' "$package" "$candidate" "${multi_arch:-no}" >> "$directory/targets.new" || return 1
+    else
+      case "$essential:$priority:$package" in
+        yes:*|*:required:*|*:important:*|*:dpkg|*:apt|*:bash|*:coreutils|*:tar|*:systemd|*:udev|*:openssh-server|*:ifupdown|*:iproute2|*:apache2|*:apache2-bin|*:postfix|*:dovecot-core|*:mariadb-server*)
+          echo "dss:error: No suitable archive amd64 replacement for critical package $package; manual migration required." >&2; return 1;;
+      esac
+      printf '%s\t%s\n' "$package" "$installed_version" >> "$directory/retained-i386.new" || return 1
+      case "$package" in libapache2-mod-*)
+        upgrade_compatibility_apache_module_enabled "$package"; status=$?
+        case "$status" in
+          0) echo "dss:error: Active unavailable 32-bit Apache module package $package needs manual migration before changing Apache architecture." >&2; return 1;;
+          1) :;;
+          *) echo "dss:error: Cannot inspect Apache module configuration for $package." >&2; return 1;;
+        esac;;
+      esac
+      echo "dss:warn: Preserving unavailable legacy foreign package $package:i386 ($installed_version); review it manually." >&2
+    fi
+  done < "$directory/original.i386"
+  mv "$directory/targets.new" "$directory/targets" && mv "$directory/retained-i386.new" "$directory/retained-i386" || return 1
+  # These binaries must be native, even if they were absent from the original inventory.
+  for package in dpkg tar apt bash coreutils perl-base systemd udev openssh-server ifupdown; do
+    candidate=$(crossgrade_bookworm_output_candidate "$package") || return 1
+    if ! awk -F '\t' -v package="$package" '$1 == package { found=1 } END { exit !found }' "$directory/targets"; then
+      printf '%s\t%s\tno\n' "$package" "$candidate" >> "$directory/targets" || return 1
+    fi
+  done
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n' > "$directory/installed" || return 1
+  while IFS=$'\t' read -r package candidate multi_arch; do
+    arguments+=("$package:amd64=$candidate")
+    [ "$multi_arch" = same ] || arguments+=("$package:i386-")
+  done < "$directory/targets"
+  if [ "$native" = i386 ]; then
+    bootstrap=(dpkg:amd64 tar:amd64 apt:amd64 dpkg:i386- tar:i386- apt:i386-)
+    if awk -F '\t' '$2 == "apt-utils" && $1 == "install ok installed" { found=1 } END { exit !found }' "$directory/original.packages"; then
+      bootstrap+=(apt-utils:amd64 apt-utils:i386-)
+    fi
+    crossgrade_bookworm_download "$directory" "$directory/targets" "$directory/installed" bootstrap "${bootstrap[@]}" || return 1
+    for package in dpkg tar apt; do
+      awk -F '\t' -v package="$package" '$1 == package && $3 == "amd64" { found=1 } END { exit !found }' "$directory/bootstrap.archives" || {
+        echo "dss:error: Verified bootstrap archive missing: $package:amd64." >&2; return 1;
+      }
+    done
+    while IFS=$'\t' read -r package version status file; do archives+=("$file"); done < "$directory/bootstrap.archives"
+    [ "${#archives[@]}" -gt 0 ] || { echo 'dss:error: No verified bootstrap archives downloaded.' >&2; return 1; }
+    # A second pass can satisfy pre-dependencies configured by the first grouped pass.
+    if ! dpkg --force-confnew --force-confmiss --install "${archives[@]}"; then
+      dpkg --force-confnew --force-confmiss --install "${archives[@]}" || return 1
+    fi
+    [ "$(/usr/bin/dpkg --print-architecture)" = amd64 ] || return 1
+    apt_get_update || return 1
+  fi
+  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n' > "$directory/installed" || return 1
+  crossgrade_bookworm_download "$directory" "$directory/targets" "$directory/installed" remaining "${arguments[@]}" || return 1
+  # One transaction keeps systemd and udev together and preserves recorded service packages.
+  cache=$(cat "$directory/remaining.cache") || return 1
+  LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
+    -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false -o Dir::Cache::archives="$cache" \
+    --allow-remove-essential --fix-broken install "${arguments[@]}" || return 1
+  while IFS= read -r oldmark; do
+    package=${oldmark%:i386}
+    if awk -F '\t' -v package="$package" '$1 == package { found=1 } END { exit !found }' "$directory/targets"; then
+      apt-mark auto "$package:amd64" || return 1
+    fi
+  done < "$directory/original.auto"
+  if [ "$(od -An -tu1 -j4 -N1 /proc/1/exe 2>/dev/null | tr -d ' ')" != 2 ]; then
+    systemctl daemon-reexec || return 1
+    for attempt in 1 2 3 4 5; do
+      [ "$(od -An -tu1 -j4 -N1 /proc/1/exe 2>/dev/null | tr -d ' ')" != 2 ] || break
+      [ "$attempt" -eq 5 ] || sleep 1
+    done
+  fi
+  crossgrade_bookworm_check_completion "$directory" || return 1
+  (umask 077; : > "$directory/completed") || return 1
+  echo 'dss:stage: Bookworm native amd64 packages, package state and 64-bit PID1 verified.' >&2
+}
+
 
 function crossgrade_debian() {
   local apt_state_cache_disabled=true
@@ -2006,7 +2799,7 @@ function crossgrade_debian() {
     # => e.g. toreinstall=apache2 apache2-bin fontconfig-config fonts-dejavu-core
     [ ! -z "$toreinstall" ] && echo "dss:info: Will reinstall some packages that have been removed during the crossgrade: $(echo $toreinstall)"
     for pkg in ${toreinstall}; do
-      apt_get_install "${pgk}"
+      apt_get_install "${pkg}"
     done
   done
 
@@ -2287,32 +3080,6 @@ function cruft_packages0() {
 
 function tweak_broken_configs() {
   echo "dss:trace:tweak_broken_configs: tweaking certain broken configs if they exist."
-  [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include conf.d'  /etc/apache2/apache2.conf && [ ! -d /etc/apache2/conf.d ] && mkdir /etc/apache2/conf.d
-  if [ -x /usr/sbin/apache2ctl ] && [ -f /etc/apache2/apache2.conf ]; then
-    if grep -qai '^Include /etc/apache2/conf.d/' /etc/apache2/apache2.conf && [ ! -d /etc/apache2/conf.d ]; then
-      replace 'Include /etc/apache2/conf.d/' '#Include /etc/apache2/conf.d/' -- /etc/apache2/apache2.conf
-      echo "dss:info: Commenting out Include /etc/apache2/conf.d/ for non-existent directory.  Might be better to use revert to package provided apache config?"
-    fi
-    if grep -qa '^Include /etc/apache2/httpd.conf' /etc/apache2/apache2.conf && [ ! -f /etc/apache2/httpd.conf ]; then
-      replace "Include /etc/apache2/httpd.conf" "#Include /etc/apache2/httpd.conf" -- /etc/apache2/apache2.conf
-      echo "dss:info: Commenting out Include /etc/apache2/httpd.conf for non existent file"
-    fi
-    if grep -qa '^Include httpd.conf' /etc/apache2/apache2.conf && [ ! -f /etc/apache2/httpd.conf ]; then
-      replace "Include httpd.conf" "#Include httpd.conf" -- /etc/apache2/apache2.conf
-      echo "dss:info: Commenting out Include httpd.conf for non existent file"
-    fi
-    if ! /usr/sbin/apache2ctl -S &> /dev/null && grep -qa '^LockFile ' /etc/apache2/apache2.conf; then
-        replace "LockFile" "#LockFile" -- /etc/apache2/apache2.conf
-        echo "dss:info: Commented out Lockfile in /etc/apache2/apache2.conf"
-    fi
-    if [ -f /etc/apache2/mods-available/ssl.conf ] && /usr/sbin/apache2ctl -S 2>&1 | grep -qai "Invalid command 'SSLMutex'"; then
-      replace "SSLMutex" "#SSLMutex" -- /etc/apache2/mods-available/ssl.conf
-    fi
-    if /usr/sbin/apache2ctl -S 2>&1 | grep -qai 'Ignoring deprecated use of DefaultType'; then
-      replace "DefaultType" "#DefaultType" -- /etc/apache2/apache2.conf
-      echo "dss:info: Commented out DefaultType in /etc/apache2/apache2.conf"
-    fi
-  fi
   # error of sshd[1762]: Missing privilege separation directory: /var/run/sshd
   # => mkdir /var/run/sshd
   # FIXME: https://wiki.debian.org/ReleaseGoals/RunDirectory
@@ -2453,11 +3220,12 @@ if [ "$current" != "$old_distro" ]; then
   return 0
 fi
 
+echo "dss:stage: Upgrading Debian $old_distro -> $new_distro"
 check_disk_space || return 1
 
-if [ "$old_distro" == "lenny" ]; then
-  add_missing_debian_keys
-  [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
+upgrade_check_path debian "$old_distro" "$new_distro" || return $?
+if [ "$old_distro" = bookworm ] && [ "$new_distro" = trixie ]; then
+  upgrade_crossgrade_before_release debian "$old_distro" "$new_distro" || return $?
 fi
 
 if [ "$new_distro" = trixie ]; then
@@ -2469,10 +3237,14 @@ if [ "$new_distro" = trixie ]; then
   esac
 fi
 
-upgrade_check_incompatible_packages debian "$old_distro" "$new_distro" || return $?
+if [ "$old_distro" == "lenny" ]; then
+  add_missing_debian_keys
+  [ ! -d "/dev/pts" ] && mkdir /dev/pts && echo "dss:info: created /dev/pts"
+fi
+
 upgrade_precondition_checks "$new_distro" || return 1
 apt_sources_prepare || return 1
-if [ "$new_distro" = trixie ]; then check_usrmerge || return 1; fi
+if [ "$new_distro" = bookworm ] || [ "$new_distro" = trixie ]; then check_usrmerge || return 1; fi
 retain_etc_networking_naming_re_enX0
 fix_missing_lsb_release || return 1
 
@@ -2546,8 +3318,10 @@ for modifiedconfigfile in $modifiedconfigfiles; do
     mv "$debfilename" "hidden-$debfilename"
   fi
 
-  # pop a copy there so we can replace current file if desired
-  [ -f "./${modifiedconfigfile}" ] && [ ! -f "${modifiedconfigfile}.dpkg-dist" ] && cp "./${modifiedconfigfile}" "${modifiedconfigfile}.dpkg-dist"
+  # Apache configuration is managed by its packages; reporting must not create sidecars there.
+  case "$modifiedconfigfile" in /etc/apache2|/etc/apache2/*|/etc/httpd|/etc/httpd/*) :;;
+    *) [ -f "./${modifiedconfigfile}" ] && [ ! -f "${modifiedconfigfile}.dpkg-dist" ] && cp "./${modifiedconfigfile}" "${modifiedconfigfile}.dpkg-dist";;
+  esac
   [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:modifiedfilereplace:To replace edited file with dist file: [ ! -f $modifiedconfigfile.dpkg-old ] && [ -f /etc/nginx/nginx.conf.dpkg-dist] && mv $modifiedconfigfile $modifiedconfigfile.dpkg-old && mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
   # show a diff
   print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:configdiff:modifiedconfig:'$pkg':'$modifiedconfigfile':" $0}'
@@ -2695,6 +3469,7 @@ function record_config_state() {
 }
 
 function apt_get_update() {
+  echo "dss:stage: Refreshing APT package indexes" >&2
 pause_check
 local tmplog signature completed inputs current_inputs warning_status
 signature=$(apt_state_output_signature repositories 2>/dev/null) || signature=
@@ -2759,6 +3534,7 @@ return $ret
 }
 
 function apt_get_upgrade() {
+  echo "dss:stage: Upgrading current packages" >&2
   pause_check
   [ ! -f /etc/debian_version ] && return 0
   [ -e /etc/redhat-release ] && return 0
@@ -2827,6 +3603,7 @@ function plesk_upgrade() {
 }
 
 function apt_get_dist_upgrade() {
+  echo "dss:stage: Performing full package upgrade" >&2
   pause_check
   [ ! -f /etc/debian_version ] && return 0
   upgrade_precondition_checks || return $?
@@ -2918,17 +3695,29 @@ function dist_upgrade_ubuntu_to_latest() {
   local remaining=${1:-1000} current next arch ret apt_sources_transition_target=
   current=$(distro_output_codename) || return 1
   case " $ALL_UBUNTU " in *" $current "*) :;; *) return 0;; esac
+  local planned=$current steps=$remaining
+  while [ "$steps" -gt 0 ]; do
+    next=$(ubuntu_output_next_release "$planned") || return 1
+    [ -n "$next" ] || break
+    planned=$next
+    steps=$((steps-1))
+  done
+  upgrade_check_path ubuntu "$current" "$planned" || return $?
   while [ "$remaining" -gt 0 ]; do
     current=$(distro_output_codename) || return 1
     next=$(ubuntu_output_next_release "$current") || return 1
     [ -n "$next" ] || return 0
     check_disk_space || return 1
+    upgrade_check_path ubuntu "$current" "$next" || return $?
+    if [ "$current" = bionic ]; then
+      upgrade_crossgrade_before_release ubuntu "$current" "$next" || return $?
+    fi
     arch=$(dpkg --print-architecture) || return 1
     if [ "$arch" = i386 ] && ! is_distro_name_older "$current" bionic; then
       echo "dss:error: Native i386 Ubuntu cannot upgrade past 18.04." >&2
       return 1
     fi
-    upgrade_check_incompatible_packages ubuntu "$current" "$next" || return $?
+    echo "dss:stage: Upgrading Ubuntu $current -> $next"
     apt_sources_transition_target=$next
     upgrade_precondition_checks "$next" || return 1
     apt_sources_prepare || return 1
@@ -2936,7 +3725,6 @@ function dist_upgrade_ubuntu_to_latest() {
     retain_etc_networking_naming_re_enX0
     apt_sources_upgrade ubuntu "$current" "$next" || return 1
     apt_get_update || return 1
-    [ -d /etc/apache2 ] && [ ! -f /etc/apache2/httpd.conf ] && touch /etc/apache2/httpd.conf
     apt_get_dist_upgrade
     ret=$?
     if [ "$ret" -ne 0 ] || [ "$(distro_output_codename)" != "$next" ]; then
@@ -3147,6 +3935,7 @@ function dist_upgrade_to_latest() {
   pause_check
   local debian_target=''
   echo "dss:trace:dist_upgrade_to_latest"
+  upgrade_preflight_action --dist-upgrade || return $?
 
   if [ -f /etc/debian_version ] && lsb_release -a 2>/dev/null | grep -qai debian; then
     debian_target=trixie
@@ -3180,9 +3969,654 @@ EOJ
 }
 
 
+# Application/service manifest: bounded read-only collection.
+# shellcheck shell=bash
+# Manifest collection is read-only: parse configuration and application metadata, never run application code.
+function manifest_json_string() {
+  local value="$1" character escaped i
+  printf '"'
+  for ((i=0; i<${#value}; i++)); do
+    character=${value:i:1}
+    case "$character" in
+      '"') printf '\\"' ;;
+      \\) printf '%s' "\\\\" ;;
+      $'\n') printf '\\n' ;;
+      $'\r') printf '\\r' ;;
+      $'\t') printf '\\t' ;;
+      *)
+        if [[ "$character" < ' ' ]]; then
+          printf -v escaped '\\u%04x' "'$character"
+          printf '%s' "$escaped"
+        else
+          printf '%s' "$character"
+        fi ;;
+    esac
+  done
+  printf '"'
+}
+
+function manifest_emit() {
+  local record_type="$1" key value
+  shift
+  if [ "$manifest_format" = json ]; then
+    printf '%s{"type":' "$manifest_separator"
+    manifest_json_string "$record_type"
+    while [ "$#" -ge 2 ]; do
+      key="$1"; value="$2"; shift 2
+      printf ','; manifest_json_string "$key"; printf ':'; manifest_json_string "$value"
+    done
+    printf '}'
+    manifest_separator=,
+  else
+    printf '%s' "$record_type"
+    while [ "$#" -ge 2 ]; do
+      key="$1"; value="$2"; shift 2
+      # Keep each finding on one line, even when filenames contain control characters.
+      value=${value//$'\n'/\\n}; value=${value//$'\r'/\\r}; value=${value//$'\t'/\\t}; value=${value//$'\e'/\\e}; value=${value//$'\b'/\\b}; value=${value//$'\f'/\\f}
+      printf ' | %s=%s' "$key" "$value"
+    done
+    printf '\n'
+  fi
+}
+
+function manifest_listeners() {
+  local raw source protocol address port program scope application
+  if command -v ss >/dev/null 2>&1 && raw=$(ss -lntp 2>/dev/null); then
+    source=ss
+  elif command -v netstat >/dev/null 2>&1 && raw=$(netstat -lntp 2>/dev/null); then
+    source=netstat
+  else
+    manifest_emit warning area listeners reason 'ss/netstat unavailable or permission denied'
+    return
+  fi
+  # ss: LISTEN 0 128 127.0.0.1:25 *:* users:(("master",pid=12,fd=3))
+  # netstat: tcp 0 0 0.0.0.0:80 0.0.0.0:* LISTEN 12/apache2
+  while IFS=$'\t' read -r protocol address port program; do
+    [ -n "$port" ] || continue
+    case "$address" in
+      127.*|::1|'[::1]') scope=loopback ;;
+      '*'|0.0.0.0|::|'[::]') scope=all_interfaces ;;
+      *) scope=specific_interface ;;
+    esac
+    application=unknown
+    case "$program" in
+      master|postfix*|smtpd) application=Postfix ;;
+      exim*) application=Exim ;;
+      sendmail*) application=Sendmail ;;
+      dovecot*|imap-login|pop3-login) application=Dovecot ;;
+      courier*) application=Courier ;;
+      apache2|httpd) application=Apache ;;
+      nginx*) application=nginx ;;
+      caddy*) application=Caddy ;;
+    esac
+    case "$port" in
+      25|465|587) protocol=smtp ;;
+      110|995) protocol=pop3 ;;
+      143|993) protocol=imap ;;
+      80|443|8080|8443) protocol=http ;;
+      *) protocol=tcp ;;
+    esac
+    manifest_emit listener service "$protocol" address "$address" port "$port" program "$program" application "$application" binding "$scope" reachability unknown
+  done < <(printf '%s\n' "$raw" | awk -v source="$source" '
+    source == "ss" && $1 == "LISTEN" {
+      endpoint=$4; program="unknown"
+      if (match($0, /users:\(\("[^"]+/)) {
+        program=substr($0, RSTART+9, RLENGTH-9)
+      }
+      port=endpoint; sub(/^.*:/,"",port); address=endpoint; sub(/:[^:]*$/,"",address)
+      print "tcp\t" address "\t" port "\t" program
+    }
+    source == "netstat" && $1 ~ /^tcp/ && $6 == "LISTEN" {
+      endpoint=$4; program=$7; sub(/^[0-9]+\//,"",program)
+      if (program == "-" || program == "") program="unknown"
+      port=endpoint; sub(/^.*:/,"",port); address=endpoint; sub(/:[^:]*$/,"",address)
+      print "tcp\t" address "\t" port "\t" program
+    }')
+}
+
+function manifest_packages() {
+  local package version status
+  if ! command -v dpkg-query >/dev/null 2>&1; then
+    manifest_emit warning area packages reason 'dpkg-query unavailable'
+    return
+  fi
+  while IFS=$'\t' read -r package version status; do
+    case "$status" in *' installed') :;; *) continue;; esac
+    case "$package" in libapache2-mod-php*) manifest_php_packages+=("$package"); manifest_php_versions+=("$version");; esac
+    case "$package" in
+      apache2|apache2-bin|libapache2-mod-php*|nginx|nginx-core|nginx-full|nginx-light|caddy|postfix|exim4*|sendmail*|dovecot*|courier*|php[0-9]*|php-fpm|ruby|ruby[0-9]*|python[23]*|nodejs|mysql-server*|mariadb-server*|postgresql-[0-9]*|redis-server|mailman*|fail2ban)
+        manifest_emit package name "$package" version "$version" ;;
+    esac
+  done < <(dpkg-query -W -f='${Package}\t${Version}\t${Status}\n' 2>/dev/null)
+}
+
+function manifest_read_metadata() {
+  # Configuration/metadata only: cap individual files even when they contain a huge single line.
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  head -c 1048576 -- "$1" 2>/dev/null
+}
+
+function manifest_config_files() {
+  local kind="$1" file count=0
+  local -a files=()
+  case "$kind" in
+    apache) files=("$manifest_root"/etc/apache2/apache2.conf "$manifest_root"/etc/apache2/sites-enabled/* "$manifest_root"/etc/apache2/conf-enabled/* "$manifest_root"/etc/httpd/conf/httpd.conf "$manifest_root"/etc/httpd/conf.d/*.conf) ;;
+    apache-modules) files=("$manifest_root"/etc/apache2/apache2.conf "$manifest_root"/etc/apache2/mods-enabled/*.load "$manifest_root"/etc/apache2/conf-enabled/*.conf "$manifest_root"/etc/apache2/sites-enabled/*.conf) ;;
+    nginx) files=("$manifest_root"/etc/nginx/nginx.conf "$manifest_root"/etc/nginx/sites-enabled/* "$manifest_root"/etc/nginx/conf.d/*.conf) ;;
+    caddy) files=("$manifest_root"/etc/caddy/Caddyfile) ;;
+    fpm) files=("$manifest_root"/etc/php/*/fpm/pool.d/*.conf "$manifest_root"/etc/php5/fpm/pool.d/*.conf "$manifest_root"/etc/php-fpm.d/*.conf) ;;
+  esac
+  for file in "${files[@]}"; do
+    if [ ! -f "$file" ] || [ ! -r "$file" ]; then continue; fi
+    count=$((count+1))
+    [ "$count" -le 200 ] || break
+    printf '%s\n' "$file"
+  done
+}
+
+# Match active LoadModule paths to installed package ownership; never load the module.
+function manifest_apache_php() {
+  local file module conditional owners owner package version source owner_count i seen='' ambiguous=false count=0
+  while IFS= read -r file; do
+    while IFS=$'\t' read -r module conditional; do
+      [ -n "$module" ] || continue
+      case "|$seen|" in *"|$module|"*) continue;; esac
+      seen="$seen|$module"
+      package=unknown; version=unknown; owner_count=0; source=unknown
+      case "$module" in
+        /*)
+          if [ -f "$manifest_root$module" ] && [ "$conditional" = false ]; then
+            owners=$(dpkg-query -S "$module" 2>/dev/null) || owners=''
+            # dpkg -S: libapache2-mod-php5: /usr/lib/apache2/modules/libphp5.so
+            # Multiarch owner names may also include :amd64 before the final ': path'.
+            while IFS= read -r owner; do
+              [ "$owner" != "${owner%": $module"}" ] || continue
+              owner_count=$((owner_count+1))
+              [ "$owner_count" -le 1 ] || ambiguous=true
+              owner=${owner%": $module"}; owner=${owner%%:*}
+              for ((i=0; i<${#manifest_php_packages[@]}; i++)); do
+                [ "$owner" = "${manifest_php_packages[i]}" ] || continue
+                if [ "$package" != unknown ]; then ambiguous=true; fi
+                package=$owner
+                version=${manifest_php_versions[i]#*:}
+                if [[ "$version" =~ ^([0-9]+[.][0-9]+([.][0-9]+)?) ]]; then version=${BASH_REMATCH[1]}
+                else version=unknown; fi
+              done
+            done <<< "$owners"
+          fi;;
+      esac
+      count=$((count+1))
+      [ "$conditional" = false ] || ambiguous=true
+      [ "$version" = unknown ] || source=installed_module_package
+      manifest_apache_php_version=$version
+      manifest_apache_php_package=$package
+      manifest_emit runtime kind apache-mod-php version "$version" package "$package" module "$module" config "${file#"$manifest_root"}" conditional "$conditional" version_source "$source"
+    done < <(awk '
+      FNR > 20000 { exit }
+      /^[ \t]*#/ { next }
+      tolower($1) ~ /^<if/ { conditional++ }
+      tolower($1) ~ /^<\/if/ && conditional > 0 { conditional-- }
+      tolower($1) == "loadmodule" && tolower($2) ~ /^php[0-9.]*_module$/ {
+        path=$3; gsub(/[\042\047]/,"",path)
+        print path "\t" (conditional ? "true" : "false")
+      }' < <(manifest_read_metadata "$file"))
+  done < <(manifest_config_files apache-modules)
+  if [ "$count" -gt 1 ] || $ambiguous; then
+    manifest_apache_php_version=unknown
+    manifest_apache_php_package=unknown
+  fi
+  if [ "$count" -eq 1 ] && ! $ambiguous; then manifest_apache_php_available=true; fi
+}
+
+function manifest_has_php_document_root() {
+  local root=$1 entry
+  for entry in index.php wp-includes/version.php administrator/manifests/files/joomla.xml core/lib/Drupal.php includes/constants.php includes/DefaultSettings.php version.php artisan; do
+    [ ! -f "$manifest_root$root/$entry" ] || return 0
+  done
+  return 1
+}
+
+function manifest_fpm_pools() {
+  local file pool socket user version
+  while IFS= read -r file; do
+    version=${file#"$manifest_root"/etc/php/}; version=${version%%/*}
+    [ "$version" != "$file" ] || version=unknown
+    case "$file" in */etc/php5/*) version=5 ;; */etc/php-fpm.d/*) version=unknown ;; esac
+    while IFS=$'\t' read -r pool socket user; do
+      manifest_fpm_sockets+=("$socket")
+      manifest_fpm_users+=("$user")
+      manifest_fpm_versions+=("$version")
+      manifest_emit runtime kind php-fpm pool "$pool" listen "$socket" user "$user" version "$version" config "${file#"$manifest_root"}"
+    done < <(awk '
+      function output() { if (pool != "") print pool "\t" socket "\t" user }
+      BEGIN { socket="unknown"; user="unknown" }
+      FNR > 20000 { exit }
+      /^[ \t]*[;#]/ { next }
+      /^[ \t]*\[/ { output(); pool=$0; gsub(/^[ \t]*\[|\][ \t]*$/,"",pool); socket="unknown"; user="unknown"; next }
+      /^[ \t]*(listen|user)[ \t]*=/ {
+        key=$0; sub(/[ \t]*=.*/,"",key); gsub(/^[ \t]+/,"",key)
+        value=$0; sub(/^[^=]*=[ \t]*/,"",value); sub(/[ \t]*;.*/,"",value)
+        if (key == "listen") socket=value; else user=value
+      }
+      END { output() }' < <(manifest_read_metadata "$file"))
+  done < <(manifest_config_files fpm)
+}
+
+function manifest_dns() {
+  local domain="$1" address addresses='' match=false result reason i
+  manifest_dns_addresses=unknown
+  manifest_dns_result=unknown
+  if ! $manifest_dns_enabled; then manifest_dns_reason=disabled; return; fi
+  if [[ ! "$domain" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z0-9-]+$ ]]; then
+    manifest_dns_reason=wildcard_or_dynamic_name; return
+  fi
+  for ((i=0; i<${#manifest_dns_names[@]}; i++)); do
+    if [ "${manifest_dns_names[i]}" = "$domain" ]; then
+      manifest_dns_addresses=${manifest_dns_values[i]}
+      manifest_dns_result=${manifest_dns_results[i]}
+      manifest_dns_reason=${manifest_dns_reasons[i]}
+      return
+    fi
+  done
+  if [ "${#manifest_dns_names[@]}" -ge "$manifest_dns_limit" ]; then manifest_dns_reason=domain_limit; return; fi
+  if ! command -v timeout >/dev/null 2>&1 || ! command -v getent >/dev/null 2>&1; then
+    manifest_dns_reason=resolver_or_timeout_unavailable; return
+  fi
+  if addresses=$(timeout 2 getent ahosts "$domain" 2>/dev/null); then
+    addresses=$(printf '%s\n' "$addresses" | awk '!seen[$1]++ { if (value != "") value=value ","; value=value $1 } END { print value }')
+    if [ -n "$addresses" ]; then
+      for address in ${addresses//,/ }; do
+        case " $manifest_local_addresses " in *" $address "*) match=true ;; esac
+      done
+      if [ -z "$manifest_local_addresses" ]; then result=unknown; reason=local_addresses_unavailable
+      elif $match; then result=this_host; reason=resolved
+      else result=other_address; reason=resolved; fi
+    else addresses=unknown; result=unknown; reason=no_addresses; fi
+  else addresses=unknown; result=unknown; reason=resolution_failed_or_timed_out; fi
+  manifest_dns_names+=("$domain"); manifest_dns_values+=("$addresses")
+  manifest_dns_results+=("$result"); manifest_dns_reasons+=("$reason")
+  manifest_dns_addresses="$addresses"; manifest_dns_result="$result"; manifest_dns_reason="$reason"
+}
+
+function manifest_application() {
+  local document_root="$1" file='' application=unknown version=unknown language=unknown language_version=unknown version_source=unknown modified=unknown
+  case "$document_root" in /*) ;; *) return ;; esac
+  case "$document_root" in *'$'*|*'%'*|*'{'*|*'}'*) return ;; esac
+  if [ -f "$manifest_root$document_root/wp-includes/version.php" ]; then
+    file="$manifest_root$document_root/wp-includes/version.php"; application=WordPress; language=PHP
+    version=$(awk '/^[ \t]*\$wp_version[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
+  elif [ -f "$manifest_root$document_root/administrator/manifests/files/joomla.xml" ]; then
+    file="$manifest_root$document_root/administrator/manifests/files/joomla.xml"; application=Joomla; language=PHP
+    version=$(awk 'match($0,/<version>[^<]+/) { print substr($0,RSTART+9,RLENGTH-9); exit }' < <(manifest_read_metadata "$file"))
+  elif [ -f "$manifest_root$document_root/core/lib/Drupal.php" ]; then
+    file="$manifest_root$document_root/core/lib/Drupal.php"; application=Drupal; language=PHP
+    version=$(awk '/const VERSION[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
+  elif [ -f "$manifest_root$document_root/includes/constants.php" ] && grep -q 'PHPBB_VERSION' < <(manifest_read_metadata "$manifest_root$document_root/includes/constants.php"); then
+    file="$manifest_root$document_root/includes/constants.php"; application=phpBB; language=PHP
+    version=$(awk '/define[ \t]*\([ \t]*[\047\042]PHPBB_VERSION[\047\042]/ { line=$0; sub(/^.*PHPBB_VERSION[\047\042][ \t]*,[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
+  elif [ -f "$manifest_root$document_root/includes/DefaultSettings.php" ] && grep -q "\\\$wgVersion" < <(manifest_read_metadata "$manifest_root$document_root/includes/DefaultSettings.php"); then
+    file="$manifest_root$document_root/includes/DefaultSettings.php"; application=MediaWiki; language=PHP
+    version=$(awk '/^[ \t]*\$wgVersion[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
+  elif [ -f "$manifest_root$document_root/version.php" ] && [ -f "$manifest_root$document_root/lib/moodlelib.php" ]; then
+    file="$manifest_root$document_root/version.php"; application=Moodle; language=PHP
+    version=$(awk '/^[ \t]*\$release[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
+  elif [ -f "$manifest_root$document_root/artisan" ]; then application=Laravel; language=PHP
+  elif [ -f "$manifest_root$document_root/config.ru" ] || [ -f "$manifest_root$document_root/Gemfile" ]; then language=Ruby
+  elif [ -f "$manifest_root$document_root/package.json" ]; then language=JavaScript
+  elif [ -f "$manifest_root$document_root/manage.py" ] || [ -f "$manifest_root$document_root/app.wsgi" ]; then language=Python
+  elif [ -f "$manifest_root$document_root/index.php" ]; then language=PHP
+  elif [ -f "$manifest_root$document_root/index.pl" ]; then language=Perl
+  elif [ -f "$manifest_root$document_root/index.cgi" ]; then
+    language=$(awk 'NR == 1 { if ($0 ~ /^#!.*perl/) print "Perl"; else if ($0 ~ /^#!.*python/) print "Python"; else print "unknown"; exit }' < <(manifest_read_metadata "$manifest_root$document_root/index.cgi"))
+  fi
+  # A version is metadata, never an arbitrary expression or configuration value.
+  if [[ ! "$version" =~ ^[0-9][A-Za-z0-9.+_()\ -]{0,100}$ ]]; then version=unknown; fi
+  if [ -n "$file" ]; then modified=$(stat -c '%y' -- "$file" 2>/dev/null) || modified=unknown; fi
+  case "$language" in
+    Ruby) file="$manifest_root$document_root/.ruby-version" ;;
+    Python) file="$manifest_root$document_root/.python-version" ;;
+    *) file= ;;
+  esac
+  if [ -n "$file" ] && [ -r "$file" ]; then
+    language_version=$(awk 'NR == 1 { print; exit }' < <(manifest_read_metadata "$file"))
+    if [[ "$language_version" =~ ^[0-9][0-9A-Za-z.+_-]{0,60}$ ]]; then version_source=project_declared_not_verified_runtime
+    else language_version=unknown; fi
+  fi
+  manifest_emit application document_root "$document_root" application "$application" version "$version" language "$language" language_version "$language_version" language_version_source "$version_source" version_file_modified "$modified" date_basis filesystem_metadata_not_install_date
+}
+
+function manifest_website() {
+  local server="$1" names="$2" port="$3" tls="$4" document_root="$5" user="$6" runtime="$7" config="$8"
+  local name url scheme=http runtime_version=unknown runtime_source=unknown runtime_package=unknown i
+  for ((i=0; i<${#manifest_fpm_sockets[@]}; i++)); do
+    if [[ "$runtime" == *"${manifest_fpm_sockets[i]}"* ]] && [ "${manifest_fpm_sockets[i]}" != unknown ]; then
+      user=${manifest_fpm_users[i]}; runtime_version=${manifest_fpm_versions[i]}; runtime=php-fpm
+      runtime_source=fpm_pool_config
+      break
+    fi
+  done
+  case "$runtime" in
+    php-fpm|php_disabled) :;;
+    /*|*fcgi*) runtime=fastcgi_handler_version_unknown;;
+    *php*) runtime=php_handler_version_unknown;;
+  esac
+  if [ "$server" = apache ] && $manifest_apache_php_available; then
+    if [ "$runtime" = php_handler_version_unknown ] || { [ "$runtime" = unknown ] && manifest_has_php_document_root "$document_root"; }; then
+      runtime=apache-mod-php; runtime_version=$manifest_apache_php_version; runtime_package=$manifest_apache_php_package
+      runtime_source=enabled_module_inferred_for_php_site
+    fi
+  fi
+  [ "$tls" != true ] || scheme=https
+  # Configs use comma-separated names internally; whitespace and controls are removed by the parsers.
+  for name in ${names//,/ }; do
+    case "$name" in https://*) scheme=https; name=${name#https://} ;; http://*) scheme=http; name=${name#http://} ;; esac
+    if [[ "$name" =~ ^([^:]+|\[[^]]+\]):([0-9]+)$ ]]; then
+      port=${BASH_REMATCH[2]}; name=${BASH_REMATCH[1]}
+    elif [[ "$name" == *:* ]] && [[ "$name" != \[*\] ]]; then name="[$name]"; fi
+    url="$scheme://$name"
+    case "$scheme:$port" in http:80|https:443|*:unknown) ;; *) url="$url:$port" ;; esac
+    case "$name" in unknown|_) url=unknown;; esac
+    manifest_dns "$name"
+    manifest_emit website server "$server" name "$name" port "$port" tls "$tls" url "$url" document_root "$document_root" user "$user" runtime "$runtime" runtime_version "$runtime_version" runtime_version_source "$runtime_source" runtime_package "$runtime_package" config "$config" dns "$manifest_dns_result" dns_addresses "$manifest_dns_addresses" dns_reason "$manifest_dns_reason" proxy unknown
+  done
+  case "|$manifest_seen_roots|" in *"|$document_root|"*) ;; *)
+    manifest_seen_roots="$manifest_seen_roots|$document_root"
+    manifest_application "$document_root" ;;
+  esac
+}
+
+function manifest_websites() {
+  local server file names port tls document_root user runtime default_user
+  for server in apache nginx caddy; do
+    default_user=unknown
+    case "$server" in
+      apache)
+        if [ -r "$manifest_root/etc/apache2/envvars" ]; then
+          default_user=$(awk '/^[ \t]*(export[ \t]+)?APACHE_RUN_USER=[A-Za-z_][A-Za-z0-9_-]*[ \t]*$/ { sub(/^.*=/, ""); gsub(/[ \t]/, ""); print; exit }' < <(manifest_read_metadata "$manifest_root/etc/apache2/envvars"))
+          [ -n "$default_user" ] || default_user=unknown
+        fi ;;
+      nginx)
+        if [ -r "$manifest_root/etc/nginx/nginx.conf" ]; then
+          default_user=$(awk '/^[ \t]*user[ \t]+[A-Za-z_][A-Za-z0-9_-]*[; \t]/ { value=$2; gsub(/;/,"",value); print value; exit }' < <(manifest_read_metadata "$manifest_root/etc/nginx/nginx.conf"))
+          [ -n "$default_user" ] || default_user=unknown
+        fi ;;
+    esac
+    while IFS= read -r file; do
+      while IFS=$'\t' read -r names port tls document_root user runtime; do
+        [ -n "$names" ] || continue
+        manifest_website "$server" "$names" "$port" "$tls" "$document_root" "$user" "$runtime" "${file#"$manifest_root"}"
+      done < <(awk -v server="$server" -v default_user="$default_user" '
+        function reset( i) { names="unknown"; port="unknown"; tls="unknown"; root="unknown"; user=default_user; runtime="unknown"; listeners=0; for (i in ports) delete ports[i]; for (i in secure) delete secure[i] }
+        function emit( i) {
+          if (!active) return
+          if (!listeners) print names "\t" port "\t" tls "\t" root "\t" user "\t" runtime
+          else for (i=1; i<=listeners; i++) print names "\t" ports[i] "\t" secure[i] "\t" root "\t" user "\t" runtime
+        }
+        function append_names(start, stop, i, v) {
+          for (i=start; i<=stop; i++) { v=$i; gsub(/[;\042\047]/,"",v); if (v != "") { if (names == "unknown") names=v; else names=names "," v } }
+        }
+        BEGIN { reset() }
+        FNR > 20000 { exit }
+        /^[ \t]*#/ { next }
+        {
+          line=$0; sub(/[ \t]+#.*/,"",line); $0=line
+          if (server == "apache") {
+            key=tolower($1)
+            if (key == "<virtualhost") { emit(); reset(); active=1; port=$2; gsub(/[>]/,"",port); sub(/^.*:/,"",port); next }
+            if (key == "</virtualhost>") { emit(); active=0; next }
+            if (!active) next
+            if (key == "servername" || key == "serveralias") append_names(2,NF)
+            if (key == "documentroot") { root=$0; sub(/^[ \t]*[^ \t]+[ \t]+/,"",root); gsub(/^[\042\047]|[\042\047][ \t]*$/,"",root) }
+            if (key == "suexecusergroup" || key == "assignuserid") user=$2
+            if (key == "sslengine" && tolower($2) == "on") tls="true"
+            if ((key == "php_flag" || key == "php_admin_flag") && tolower($2) == "engine" && tolower($3) == "off") runtime="php_disabled"
+            if (key == "sethandler" && tolower($2) ~ /^(none|default-handler)$/) runtime="php_disabled"
+            if (key == "sethandler" || key == "proxypassmatch" || key == "fcgidwrapper") {
+              if (match($0,/unix:[^| \t\042\047]+/)) { runtime=substr($0,RSTART+5,RLENGTH-5) }
+              else if ($0 ~ /php/) runtime="php_handler_version_unknown"
+              else if ($0 ~ /fcgi/) runtime="fastcgi_version_unknown"
+            }
+          } else if (server == "nginx") {
+            opens=gsub(/\{/,"{",line); closes=gsub(/\}/,"}",line)
+            if (!active && $1 == "server" && opens > 0) { reset(); active=1; depth=0 }
+            if (active) {
+              if ($1 == "server_name") append_names(2,NF)
+              if ($1 == "listen") {
+                value=$2; gsub(/;/,"",value); port=value
+                if (value ~ /:/) sub(/^.*:/,"",port)
+                if (value !~ /[0-9]$/) port="unknown"
+                listeners++; ports[listeners]=port; secure[listeners]="false"
+                if ($0 ~ /(^|[ \t])ssl([ \t;]|$)/) secure[listeners]="true"
+              }
+              if ($1 == "ssl_certificate") tls="true"
+              if ($1 == "root" && depth == 1) { root=$0; sub(/^[ \t]*root[ \t]+/,"",root); sub(/;[ \t]*$/,"",root); gsub(/^[\042\047]|[\042\047]$/,"",root) }
+              if ($1 == "user") user=$2
+              if ($1 == "fastcgi_pass") { runtime=$2; sub(/^unix:/,"",runtime); gsub(/;/,"",runtime) }
+              if ($1 == "proxy_pass") runtime="reverse_proxy"
+              if ($1 == "uwsgi_pass") runtime="uwsgi"
+              depth += opens-closes
+              if (depth <= 0) { emit(); active=0 }
+            }
+          } else if (server == "caddy") {
+            opens=gsub(/\{/,"{",line); closes=gsub(/\}/,"}",line)
+            if (!active && opens > 0 && $1 !~ /^\(/ && $1 != "{") { reset(); active=1; depth=0; append_names(1,NF-1); port="443"; tls="true"; if ($1 ~ /^http:\/\//) { port="80"; tls="false" }; sub(/^https?:\/\//,"",names) }
+            if (active) {
+              if ($1 == "root") { root=$0; sub(/^[ \t]*root[ \t]+(\*[ \t]+)?/,"",root); gsub(/^[\042\047]|[\042\047][ \t]*$/,"",root) }
+              if ($1 == "php_fastcgi") { runtime=$2; sub(/^unix\//,"",runtime) }
+              if ($1 == "reverse_proxy") runtime="reverse_proxy"
+              depth += opens-closes
+              if (depth <= 0) { emit(); active=0 }
+            }
+          }
+        }
+        END { emit() }' < <(manifest_read_metadata "$file"))
+    done < <(manifest_config_files "$server")
+  done
+}
+
+function manifest_mail_root() {
+  local path="$1" source="$2" size=unknown count=unknown reason=not_scanned count_reason=ambiguous_layout actual output inode
+  case "$path" in /*) ;; *) return ;; esac
+  case "$path" in *'$'*|*'%'*|*'~'*|*'{'*|*'}'*)
+    manifest_emit mail_storage path "$path" source "$source" size_mib unknown mailbox_count unknown reason dynamic_path
+    return ;;
+  esac
+  case "|$manifest_mail_seen|" in *"|$path|"*) return ;; esac
+  manifest_mail_seen="$manifest_mail_seen|$path"
+  actual="$manifest_root$path"
+  [ -d "$actual" ] || return
+  inode=$(stat -c '%d:%i' -- "$actual" 2>/dev/null) || inode=
+  if [ -n "$inode" ]; then
+    case "|$manifest_mail_inodes|" in *"|$inode|"*) return ;; esac
+    manifest_mail_inodes="$manifest_mail_inodes|$inode"
+  fi
+  manifest_mail_count=$((manifest_mail_count+1))
+  # Only conventional narrow mail roots are scanned; a configured / or /home is never traversed.
+  case "$path" in /var/mail|/var/spool/mail|/var/vmail|/var/mail/*|/var/spool/mail/*|/var/vmail/*|/home/*/Maildir|/root/Maildir)
+    if $manifest_mail_metrics && [ "$manifest_mail_count" -le 8 ] && command -v timeout >/dev/null 2>&1; then
+      if output=$(timeout 3 du -smx -- "$actual" 2>/dev/null); then size=${output%%[[:space:]]*}; reason=measured; else reason=limit_or_permissions; fi
+      if [ -d "$actual/cur" ] && [ -d "$actual/new" ] && [ -d "$actual/tmp" ]; then count=1; count_reason=maildir
+      elif [ "$path" = /var/mail ] || [ "$path" = /var/spool/mail ]; then
+        if output=$(timeout 2 find "$actual" -mindepth 1 -maxdepth 1 -type f -printf '.\n' 2>/dev/null); then
+          if [ -n "$output" ]; then count=$(printf '%s\n' "$output" | wc -l); count_reason=top_level_mbox_files; else count=unknown; fi
+        fi
+      fi
+    else reason=disabled_or_limit; fi ;;
+    *) reason=nonstandard_path_not_scanned ;;
+  esac
+  manifest_emit mail_storage path "$path" source "$source" size_mib "$size" mailbox_count "$count" size_basis allocated_disk_mib count_reason "$count_reason" reason "$reason"
+}
+
+function manifest_mail() {
+  local file path key value home count=0 file_count=0
+  for file in "$manifest_root"/etc/postfix/main.cf "$manifest_root"/etc/dovecot/dovecot.conf "$manifest_root"/etc/dovecot/conf.d/*.conf "$manifest_root"/etc/exim4/exim4.conf.template "$manifest_root"/etc/exim4/conf.d/main/* "$manifest_root"/etc/courier/imapd "$manifest_root"/etc/courier/pop3d; do
+    if [ ! -f "$file" ] || [ ! -r "$file" ]; then continue; fi
+    file_count=$((file_count+1)); [ "$file_count" -le 200 ] || break
+    while IFS=$'\t' read -r key value; do
+      case "$key" in
+        mail_spool_directory|virtual_mailbox_base|mail_path) manifest_mail_root "$value" "${file#"$manifest_root"}:$key" ;;
+        mail_location)
+          path=${value#*:}; path=${path%%:*}
+          manifest_mail_root "$path" "${file#"$manifest_root"}:$key" ;;
+      esac
+    done < <(awk '
+      FNR > 20000 { exit }
+      /^[ \t]*[#;]/ { next }
+      /^[ \t]*(mail_spool_directory|virtual_mailbox_base|mail_location|mail_path)[ \t]*=/ {
+        key=$0; sub(/[ \t]*=.*/,"",key); gsub(/^[ \t]+/,"",key)
+        value=$0; sub(/^[^=]*=[ \t]*/,"",value); sub(/[ \t]+#.*/,"",value); gsub(/^[\042\047]|[\042\047][ \t]*$/,"",value)
+        print key "\t" value
+      }' < <(manifest_read_metadata "$file"))
+  done
+  manifest_mail_root /var/mail conventional
+  manifest_mail_root /var/spool/mail conventional
+  manifest_mail_root /var/vmail conventional
+  for home in "$manifest_root"/home/*/Maildir "$manifest_root"/root/Maildir; do
+    [ -d "$home" ] || continue
+    count=$((count+1)); [ "$count" -le 20 ] || break
+    manifest_mail_root "${home#"$manifest_root"}" conventional
+  done
+  if [ "$manifest_mail_count" -eq 0 ]; then
+    manifest_emit mail_storage path unknown source unknown size_mib unknown mailbox_count unknown reason no_conventional_mail_store_identified
+  fi
+}
+
+# FORMAT is text or json; ROOT is used only by isolated fixtures, never a chroot or executable source.
+function manifest_output() (
+  local manifest_format="${1:-text}" manifest_dns_enabled="${2:-true}" manifest_root="${3:-/}"
+  local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
+  local manifest_dns_limit=20 manifest_mail_metrics="${MANIFEST_MAIL_METRICS:-true}"
+  local manifest_dns_addresses manifest_dns_result manifest_dns_reason
+  local manifest_apache_php_available=false manifest_apache_php_version=unknown manifest_apache_php_package=unknown
+  local -a manifest_php_packages=() manifest_php_versions=()
+  local -a manifest_fpm_sockets=() manifest_fpm_users=() manifest_fpm_versions=()
+  local -a manifest_dns_names=() manifest_dns_values=() manifest_dns_results=() manifest_dns_reasons=()
+  case "$manifest_format:$manifest_dns_enabled:$manifest_mail_metrics" in
+    text:true:true|text:true:false|text:false:true|text:false:false|json:true:true|json:true:false|json:false:true|json:false:false) ;;
+    *) printf '%s\n' 'dss:error: invalid manifest format or boolean control' >&2; return 1 ;;
+  esac
+  [ "$manifest_root" = / ] && manifest_root=
+  if command -v ip >/dev/null 2>&1; then
+    manifest_local_addresses=$(ip -o address show 2>/dev/null | awk '{split($4,a,"/"); printf "%s ",a[1]}')
+  fi
+  [ "$manifest_format" != json ] || printf '{"schema_version":1,"records":['
+  manifest_emit system hostname "$(hostname 2>/dev/null || printf unknown)" generated_utc "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" local_addresses "${manifest_local_addresses:-unknown}"
+  manifest_listeners
+  manifest_packages
+  manifest_apache_php
+  manifest_fpm_pools
+  manifest_mail
+  manifest_websites
+  manifest_emit warning area interpretation reason 'Static inventory: conventional config files only (200 files per server, 1 MiB/20000 lines per file); includes, variables and dynamic application settings may be unresolved. Bindings do not prove Internet reachability; DNS may point at a proxy. Application dates are filesystem metadata. No application code was executed.'
+  [ "$manifest_format" != json ] || printf ']}\n'
+)
+
+# End application/service manifest.
+
+# Detailed logging and console progress.
+# Only mutating actions use this wrapper; read-only reports retain normal stdout.
+# LOG_VERBOSE and LOG_TRACE are validated booleans set by the main option parser.
+function logging_run() (
+	local logging_root="${DISTROREJUVE_LOG_DIR:-/root/distrorejuveinfo/runs}"
+	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
+	local logging_dir logging_log logging_line logging_status logging_original_umask
+	local logging_color=false logging_level
+	local -a logging_pipeline_status
+
+	case "$logging_verbose:$logging_trace" in
+		true:true|true:false|false:true|false:false) ;;
+		*) printf '%s\n' 'dss:error Invalid logging boolean.' >&2; return 1 ;;
+	esac
+	if [ "$#" -eq 0 ]; then
+		printf '%s\n' 'dss:error No action supplied to logging_run.' >&2
+		return 1
+	fi
+	if $logging_trace && (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) )); then
+		printf '%s\n' 'dss:error --trace requires Bash 4.1 or newer.' >&2
+		return 1
+	fi
+
+	logging_original_umask=$(umask)
+	if [ -t 2 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ]; then logging_color=true; fi
+	umask 077
+	if ! mkdir -p -- "$logging_root"; then
+		printf '%s\n' 'dss:error Cannot create the detailed-log directory; action was not started.' >&2
+		return 1
+	fi
+	if ! logging_dir=$(mktemp -d "$logging_root/run.XXXXXXXXXX"); then
+		printf '%s\n' 'dss:error Cannot create a private run directory; action was not started.' >&2
+		return 1
+	fi
+	logging_log="$logging_dir/output.log"
+	if ! chmod u=rwx,go= -- "$logging_dir" || ! : > "$logging_log" || ! chmod u=rw,go= -- "$logging_log"; then
+		printf '%s\n' 'dss:error Cannot prepare the private detailed log; action was not started.' >&2
+		return 1
+	fi
+	if $logging_trace; then
+		if ! : > "$logging_dir/trace.log" || ! chmod u=rw,go= -- "$logging_dir/trace.log"; then
+			printf '%s\n' 'dss:error Cannot prepare the private trace log; action was not started.' >&2
+			return 1
+		fi
+	fi
+	printf 'dss:stage Detailed run log: %s\n' "$logging_log" >&2
+
+	# The subshell contains traps, tracing and callback exits; caller state is intact.
+	# Terminal interrupts reach the foreground pipeline, including action children.
+	trap 'printf "dss:error Action interrupted; details: %s\n" "$logging_log" >&2; exit 130' INT
+	trap 'printf "dss:error Action terminated; details: %s\n" "$logging_log" >&2; exit 143' TERM
+	trap 'printf "dss:error Action disconnected; details: %s\n" "$logging_log" >&2; exit 129' HUP
+	(
+		trap - INT TERM HUP
+		if $logging_trace; then
+			if ! exec 9> "$logging_dir/trace.log"; then exit 1; fi
+			BASH_XTRACEFD=9
+			PS4='+ ${BASH_SOURCE}:${LINENO}:${FUNCNAME[0]}: '
+			set -x
+		fi
+		umask "$logging_original_umask"
+		"$@"
+	) 2>&1 | tee "$logging_log" | (
+		while IFS= read -r logging_line || [ -n "$logging_line" ]; do
+			logging_level=
+			case "$logging_line" in
+				dss:stage:*|dss:stage\ *) logging_level=36 ;;
+				dss:warn:*|dss:warn\ *) logging_level=33 ;;
+				dss:error:*|dss:error\ *) logging_level=31 ;;
+			esac
+			if [ -n "$logging_level" ] && $logging_color; then
+				printf '\033[%sm%s\033[0m\n' "$logging_level" "$logging_line" >&2 || exit 1
+			elif [ -n "$logging_level" ] || $logging_verbose; then
+				printf '%s\n' "$logging_line" >&2 || exit 1
+			fi
+		done
+	)
+	logging_pipeline_status=("${PIPESTATUS[@]}")
+	logging_status=${logging_pipeline_status[0]}
+	if [ "${logging_pipeline_status[1]}" -ne 0 ] || [ "${logging_pipeline_status[2]}" -ne 0 ]; then
+		printf 'dss:error Detailed logging or console output failed; inspect %s\n' "$logging_log" >&2
+		if [ "$logging_status" -eq 0 ]; then logging_status=1; fi
+	fi
+	if [ "$logging_status" -ne 0 ]; then
+		printf 'dss:error Action failed (status %s); details: %s\n' "$logging_status" "$logging_log" >&2
+	else
+		printf 'dss:stage Action complete; details: %s\n' "$logging_log" >&2
+	fi
+	return "$logging_status"
+)
+
+# End detailed logging.
+
+function distrorejuve_main() {
 ret=0
-echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
-if [ "--usage" = "${ACTION:-$1}" ] || [ "--help" = "${ACTION:-$1}" ]; then
+[ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
+if [ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ]; then
+  manifest_dns_enabled=true
+  case "${2:-}" in --no-dns) manifest_dns_enabled=false;; '') :;; *) print_usage; exit 1;; esac
+  [ -z "${3:-}" ] || { print_usage; exit 1; }
+  if [ "${ACTION:-$1}" = --manifest-json ]; then manifest_output json "$manifest_dns_enabled"
+  else manifest_output text "$manifest_dns_enabled"; fi
+  exit $?
+elif [ "--usage" = "${ACTION:-$1}" ] || [ "--help" = "${ACTION:-$1}" ]; then
   print_usage
 elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
@@ -3193,6 +4627,7 @@ elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
   [ "$ret" -eq 0 ]
 elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
+  upgrade_preflight_action --to-wheezy "${2:-}" || exit $?
   print_info
   dist_upgrade_lenny_to_squeeze || exit 1
   dist_upgrade_squeeze_to_wheezy || exit 1
@@ -3200,6 +4635,7 @@ elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
   if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
 elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
+  upgrade_preflight_action --to-jessie "${2:-}" || exit $?
   print_info
   dist_upgrade_lenny_to_squeeze || exit 1
   dist_upgrade_squeeze_to_wheezy || exit 1
@@ -3223,21 +4659,23 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
       echo "dss:error: Expecting a --to-debian-release version of 6 to 13" && exit 1
       ;;
   esac
+  upgrade_preflight_action --to-debian-release "${2:-}" || exit $?
   print_info
-  if [ $version -gt 5 ]; then dist_upgrade_lenny_to_squeeze || exit 1; fi
-  if [ $version -gt 6 ]; then dist_upgrade_squeeze_to_wheezy || exit 1; fi
-  if [ $version -gt 7 ]; then dist_upgrade_wheezy_to_jessie || exit 1; fi
-  if [ $version -gt 8 ]; then dist_upgrade_jessie_to_stretch || exit 1; fi
-  if [ $version -gt 9 ]; then dist_upgrade_stretch_to_buster || exit 1; fi
-  if [ $version -gt 10 ]; then dist_upgrade_buster_to_bullseye || exit 1; fi
-  if [ $version -gt 11 ]; then dist_upgrade_bullseye_to_bookworm || exit 1; fi
-  if [ $version -gt 12 ]; then dist_upgrade_bookworm_to_trixie || exit 1; fi
+  if [ "$version" -gt 5 ]; then dist_upgrade_lenny_to_squeeze || exit 1; fi
+  if [ "$version" -gt 6 ]; then dist_upgrade_squeeze_to_wheezy || exit 1; fi
+  if [ "$version" -gt 7 ]; then dist_upgrade_wheezy_to_jessie || exit 1; fi
+  if [ "$version" -gt 8 ]; then dist_upgrade_jessie_to_stretch || exit 1; fi
+  if [ "$version" -gt 9 ]; then dist_upgrade_stretch_to_buster || exit 1; fi
+  if [ "$version" -gt 10 ]; then dist_upgrade_buster_to_bullseye || exit 1; fi
+  if [ "$version" -gt 11 ]; then dist_upgrade_bullseye_to_bookworm || exit 1; fi
+  if [ "$version" -gt 12 ]; then dist_upgrade_bookworm_to_trixie || exit 1; fi
   debian_check_release_completion "$debian_target" || exit 1
 
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes"
 elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
+  upgrade_preflight_action --to-latest-debian "${2:-}" || exit $?
   print_info
   dist_upgrade_lenny_to_squeeze || exit 1
   dist_upgrade_squeeze_to_wheezy || exit 1
@@ -3253,6 +4691,7 @@ elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes"
 elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
+  upgrade_preflight_action --to-latest-lts "${2:-}" || exit $?
   print_info
   dist_upgrade_ubuntu_to_latest
   [ $? -ne 0 ] && ret=$(($ret+1))
@@ -3260,6 +4699,7 @@ elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
   [ $ret -eq 0 ] && echo "dss:info: --to-latest-lts completed ok.  use $0 --show-changes to see changes"
 elif [ "--to-next-ubuntu" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
+  upgrade_preflight_action --to-next-ubuntu "${2:-}" || exit $?
   print_info
   dist_upgrade_ubuntu_to_latest 1
   [ $? -ne 0 ] && ret=$(($ret+1))
@@ -3267,6 +4707,7 @@ elif [ "--to-next-ubuntu" = "${ACTION:-$1}" ] ; then
   [ $ret -eq 0 ] && echo "dss:info:  --to-next-ubuntu completed ok.  use $0 --show-changes to see changes"
 elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
+  upgrade_preflight_action --to-squeeze "${2:-}" || exit $?
   print_info
   dist_upgrade_lenny_to_squeeze || exit 1
   debian_check_release_completion squeeze || exit 1
@@ -3284,6 +4725,7 @@ elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
   [ $ret -eq 0 ] && echo "dss:info:  --upgrade completed ok.  use $0 --show-changes to see changes"
 elif [ "--dist-upgrade" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
+  upgrade_preflight_action --dist-upgrade "${2:-}" || exit $?
   print_info
   dist_upgrade_to_latest
   [ $? -ne 0 ] && ret=$(($ret+1))
@@ -3317,6 +4759,10 @@ elif [ "--remove-deprecated-packages" = "${ACTION:-$1}" ] ; then
 elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   check_disk_space || exit 1
+  if [ "$(distro_output_codename)" = bookworm ]; then
+    crossgrade_debian_bookworm
+    exit $?
+  fi
   if [  64 -eq $(getconf LONG_BIT) ]; then
     if has_cruft_packages 32bit; then
       echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-running crossgrade."
@@ -3349,3 +4795,37 @@ else
   print_usage
   exit 1
 fi
+
+}
+
+function distrorejuve_run() {
+  local argument action LOG_VERBOSE=false LOG_TRACE=false UPGRADE_CROSSGRADE=false
+  local -a arguments=()
+  for argument in "$@"; do
+    case "$argument" in
+      --verbose) LOG_VERBOSE=true;;
+      --trace) LOG_TRACE=true;;
+      --crossgrade) UPGRADE_CROSSGRADE=true;;
+      *) arguments+=("$argument");;
+    esac
+  done
+  action=${ACTION:-${arguments[0]:-}}
+  if $UPGRADE_CROSSGRADE; then
+    case "$action" in
+      --dist-upgrade|--to-debian-release|--to-latest-debian|--to-latest-lts|--to-next-ubuntu|--to-squeeze|--to-wheezy|--to-jessie) :;;
+      *) echo 'dss:error: --crossgrade modifies a release-upgrade command; use --to-64bit for a standalone crossgrade.' >&2; return 1;;
+    esac
+  fi
+  case "$action" in
+    --upgrade|--dist-update|--dist-upgrade|--to-squeeze|--to-wheezy|--to-jessie|--to-debian-release|--to-latest-debian|--to-latest-lts|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages)
+      logging_run distrorejuve_main "${arguments[@]}";;
+    *)
+      if $LOG_VERBOSE || $LOG_TRACE; then
+        echo 'dss:error: --verbose and --trace apply to commands that change the system.' >&2
+        return 1
+      fi
+      distrorejuve_main "${arguments[@]}";;
+  esac
+}
+
+distrorejuve_run "$@"

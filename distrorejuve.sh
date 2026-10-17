@@ -2232,7 +2232,7 @@ function upgrade_outcome_output_php_removals() {
 function upgrade_finish_run() {
   local action_status=$1 logfile=$2 baseline='' services=2 web=2 status category state detail reason audit='' plan=''
   local release='not verified' packages='not verified' cleanup='' php_removals='' service_summary='unknown' package_verified=false
-  local directory=${DISTROREJUVE_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0
+  local directory=${DISTROREJUVE_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0 autoremove_skipped=''
   local none=false obsolete_none=false cleanup_done=false missing_provenance=false cleanup_failed=false cleanup_deferred=false
   case "$action_status" in ''|*[!0-9]*) return 1;; esac
   [ "$action_status" -le 255 ] || return 1
@@ -2284,7 +2284,8 @@ function upgrade_finish_run() {
       case "$category:$state" in
         autoremove:removed) removed=$((removed+1));;
         autoremove:none) none=true;;
-        autoremove:deferred) deferred=$((deferred+1));;
+        autoremove:deferred)
+          if [ "$detail" = - ]; then autoremove_skipped=$reason; else deferred=$((deferred+1)); fi;;
         obsolete:removed) obsolete_removed=$((obsolete_removed+1));;
         obsolete:none) obsolete_none=true;;
         obsolete:deferred)
@@ -2296,6 +2297,7 @@ function upgrade_finish_run() {
     cleanup="autoremove $removed removed, $deferred deferred"
     [ "$deferred" -eq 0 ] || cleanup="$cleanup (protected packages/dependencies or policy)"
   elif $none; then cleanup='no autoremove candidates'; fi
+  [ -z "$autoremove_skipped" ] || cleanup="$cleanup${cleanup:+; }autoremove skipped ($autoremove_skipped)"
   if [ "$obsolete_removed" -gt 0 ] || [ "$obsolete_deferred" -gt 0 ]; then
     cleanup="$cleanup${cleanup:+; }obsolete $obsolete_removed removed, $obsolete_deferred deferred"
     [ "$obsolete_deferred" -eq 0 ] || cleanup="$cleanup (protected packages/dependencies or policy)"
@@ -2310,7 +2312,7 @@ function upgrade_finish_run() {
       [ -z "$php_removals" ] || printf 'dss:warn: PHP extensions removed without target replacements: %s. Review application requirements.\n' "${php_removals//$'\n'/, }" >&2
     else echo 'dss:warn: Removed PHP extension availability could not be summarized.' >&2; fi
   fi
-  printf 'dss:stage: Cleanup: %s.\n' "${cleanup:-not recorded; inspect the detailed log}" >&2
+  printf 'dss:stage: Cleanup: %s.\n' "${cleanup:-not run (no release transition reached cleanup in this run)}" >&2
   printf 'dss:stage: Detailed run log: %s\n' "$logfile" >&2
   return "$status"
 }

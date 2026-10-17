@@ -1050,7 +1050,8 @@ function upgrade_compatibility_rule_applies() {
       if [ "$rule" = dovecot-23 ]; then
         upgrade_compatibility_config_matches '^[[:space:]]*(ssl_protocols|ssl_parameters|director_doveadm_port|director_consistent_hashing|mdbox_purge_preserve_alt)[[:space:]]*=|^[[:space:]]*mail_plugins[[:space:]]*=[[:space:]]*([^#]*[[:space:]])?(stats|imap_stats)([[:space:]]|$)' "${paths[@]}"
       else
-        upgrade_compatibility_config_matches '^[[:space:]]*(mail_replica[[:space:]]*=[[:space:]]*["\047]?[^[:space:]#"\047]|service[[:space:]]+(replicator|director)[[:space:]]*\{|mail_plugins[[:space:]]*=[[:space:]]*([^#]*[[:space:]])?replication([[:space:]]|$))' "${paths[@]}"
+        # Packaged director/replicator service templates alone do not enable the workload.
+        upgrade_compatibility_config_matches '^[[:space:]]*((mail_replica|director_(mail_)?servers)[[:space:]]*=[[:space:]]*["\047]?[^[:space:]#"\047]|mail_plugins[[:space:]]*=[[:space:]]*([^#]*[[:space:]])?replication([[:space:]]|$)|executable[[:space:]]*=[[:space:]]*(imap|pop3|submission)-login[[:space:]]+director([[:space:]]|$)|auth_socket_path[[:space:]]*=[[:space:]]*([^#]*/)?director-userdb([[:space:]]|$))' "${paths[@]}"
       fi;;
     dovecot-armhf) [ "$arch" = armhf ];;
     crossgrade-rrd|crossgrade-postgresql|crossgrade-ldap)
@@ -2787,7 +2788,12 @@ function usrmerge_output_collisions() {
       case "$source$target" in *$'\n'*|*$'\t'*|*$'\r'*) echo 'dss:error: Unsupported control characters in usrmerge collision paths; inspect manually.' >&2; return 1;; esac
       case "${source##*/}" in *[!a-zA-Z0-9._+-]*) printf 'manual\t%s\t%s\tunsupported executable name\n' "$source" "$target"; continue;; esac
       # These aliases are accepted by convert-usrmerge; other symlink/type conflicts stay manual.
-      if [ -L "$source" ] && { [ "$(readlink -- "$source")" = "$target" ] || { [ -L "$target" ] && [ "$(readlink -- "$source")" = "$(readlink -- "$target")" ]; }; }; then continue; fi
+      if [ -L "$source" ] && [ -L "$target" ]; then
+        left=$(readlink -- "$source") || return 1
+        right=$(readlink -- "$target") || return 1
+        if [ "$left" = "$right" ] || [ "${source%/*}/$left" = "$right" ] || [ "$left" = "${target%/*}/$right" ]; then continue; fi
+      fi
+      if [ -L "$source" ] && [ "$(readlink -- "$source")" = "$target" ]; then continue; fi
       if [ -L "$target" ] && [ "$(readlink -- "$target")" = "$source" ]; then continue; fi
       if [ ! -f "$source" ] || [ -L "$source" ] || [ ! -f "$target" ] || [ -L "$target" ]; then
         printf 'manual\t%s\t%s\tunsupported file types\n' "$source" "$target"; continue
@@ -4827,14 +4833,52 @@ function upgrade_obsolete_payload_is_documentation() {
   $found
 }
 
+# Status 3 preserves a protected package; metadata failures remain fatal.
+function upgrade_obsolete_output_safe_package() {
+  local package=$1 native=$2 qualified_packages=$3 inventory=$4 query_package files file logcheck documentation_only=false status
+  local gcc_base_pattern='^gcc-[0-9]+([.][0-9]+)?-base$' mariadb_transition_pattern='^mariadb-server-[0-9]+([.][0-9]+)+$'
+  case "${package%:*}" in
+    linux-*|grub*|lilo|init*|systemd*|udev*|network*|ifupdown*|netplan.io|resolvconf|dhcpcd*|isc-dhcp-client|iproute*|iptables*|nftables*|apt*|dpkg*|sudo|passwd|login|util-linux|openssh*|apache2*|libapache2-mod-*|nginx*|php*|mysql*|mariadb*|postgresql*|dovecot*|postfix*|exim*|sendmail*|fail2ban*|bind9*|rabbitmq*|slapd*|mailman*|redis*|caddy*|cron*|rsyslog*)
+      if [[ "${package%:*}" =~ $mariadb_transition_pattern ]]; then
+        if awk -F '\t' -v arch="${package##*:}" -v native="$native" '
+          $1 == "install ok installed" && $2 == "mariadb-server" && $3 == (arch == "all" ? native : arch) { found=1 }
+          END { exit !found }
+        ' "$inventory"; then documentation_only=true
+        else status=$?; [ "$status" -eq 1 ] || return 1
+        fi
+      fi
+      if ! $documentation_only; then echo "dss:warn: Preserving service or system package $package." >&2; return 3; fi;;
+  esac
+  query_package=$package
+  if ! $qualified_packages; then
+    case "${package##*:}" in "$native"|all) query_package=${package%:*};; *) return 1;; esac
+  fi
+  files=$(dpkg-query -L "$query_package") || return 1
+  if $documentation_only || [[ "${package%:*}" =~ $gcc_base_pattern ]]; then
+    logcheck=
+    if $documentation_only; then logcheck=${package%:*}; logcheck=${logcheck//./_}; fi
+    if ! upgrade_obsolete_payload_is_documentation "$package" "$files" "$logcheck"; then
+      echo "dss:warn: Preserving unverified base/transitional payload for $package." >&2; return 3
+    fi
+  fi
+  while IFS= read -r file; do
+    case "$file" in /etc/init.d/?*|/etc/init/?*|/etc/cron*|/etc/systemd/system/?*|/etc/systemd/user/?*|/lib/systemd/system/?*|/lib/systemd/user/?*|/usr/lib/systemd/system/?*|/usr/lib/systemd/user/?*|/etc/network/?*|/etc/netplan/?*|/etc/NetworkManager/?*|/etc/kernel/?*|/boot/?*|/var/lib/?*|/var/spool/?*|/srv/?*|/home/?*|/var/www/?*)
+      echo "dss:warn: Preserving $package because it owns service/data path $file." >&2; return 3;;
+    esac
+  done <<< "$files"
+  printf '%s\n' "$query_package"
+}
+
 function upgrade_remove_obsolete_packages() {
 (
   local package_umask
   package_umask=$(umask) || return 1
   umask 077
   set -o pipefail
-  local family=$1 from=$2 to=$3 baseline directory native attempt package files file audit removals query_package signature current_signature
-  local automatic_remove plan rejection status documentation_only logcheck dpkg_help qualified_packages=false gcc_base_pattern='^gcc-[0-9]+([.][0-9]+)?-base$' mariadb_transition_pattern='^mariadb-server-[0-9]+([.][0-9]+)+$'
+  local family=$1 from=$2 to=$3 baseline directory native attempt package audit removals query_package signature current_signature
+  local automatic_remove plan allowed rejection status dpkg_help qualified_packages=false name architecture version config preserved
+  local -a planning_options=()
+  local -a planning_packages=()
   local -a options=()
   local -a obsolete=()
   local -a selected=()
@@ -4887,15 +4931,42 @@ function upgrade_remove_obsolete_packages() {
   read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
   umask "$package_umask"
   pause_check || return 1
-  # Automatic removals are optional; retry only the same proven obsolete candidates if they are unsafe.
+  # Retry unsafe autoremove with only safe obsolete packages marked automatic in a private planning state.
   for automatic_remove in true false; do
     plan="$attempt/plan.auto"
-    if ! $automatic_remove; then plan="$attempt/plan.explicit"; fi
+    allowed="$attempt/eligible"
+    planning_options=()
+    planning_packages=("${obsolete[@]}")
+    if ! $automatic_remove; then
+      config=$(LC_ALL=C apt-config dump) || return 1
+      if ! awk 'tolower($1) == "dir::state::extended_states" { found=1 } END { exit !found }' <<< "$config"; then
+        echo 'dss:error: This APT cannot isolate automatic-package state; preserve packages and review cleanup manually.' >&2; return 1
+      fi
+      plan="$attempt/plan.protected"
+      allowed="$attempt/obsolete.safe"
+      : > "$allowed" && : > "$attempt/extended_states" || return 1
+      awk -F '\t' '
+        FILENAME == ARGV[1] { eligible[$1 ":" $2]=$0; next }
+        $0 in eligible { print eligible[$0] }
+      ' "$attempt/eligible" "$attempt/obsolete" > "$attempt/obsolete.candidates" || return 1
+      while IFS=$'\t' read -r name architecture version; do
+        package="$name:$architecture"
+        if upgrade_obsolete_output_safe_package "$package" "$native" "$qualified_packages" "$attempt/packages" > /dev/null; then
+          printf '%s\t%s\t%s\n' "$name" "$architecture" "$version" >> "$allowed" || return 1
+          # Packages omitted from this private file are manual roots during simulation only.
+          printf 'Package: %s\nArchitecture: %s\nAuto-Installed: 1\n\n' "$name" "$architecture" >> "$attempt/extended_states" || return 1
+        else status=$?; [ "$status" -eq 3 ] || return 1
+        fi
+      done < "$attempt/obsolete.candidates"
+      [ -s "$allowed" ] || { echo "dss:warn: No safe obsolete cleanup candidates remain; preserved packages for manual review in $attempt." >&2; return 0; }
+      planning_options=(-o "Dir::State::extended_states=$attempt/extended_states")
+      planning_packages=()
+    fi
     selected=()
     rejection=
-    LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
-      -o APT::Get::AutomaticRemove="$automatic_remove" --simulate remove "${obsolete[@]}" > "$plan" 2>&1 || return 1
-    if removals=$(upgrade_obsolete_output_removals "$plan" "$attempt/eligible" "$native"); then :
+    LC_ALL=C apt-get "${options[@]}" "${planning_options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
+      -o APT::Get::AutomaticRemove=true --simulate remove "${planning_packages[@]}" > "$plan" 2>&1 || return 1
+    if removals=$(upgrade_obsolete_output_removals "$plan" "$allowed" "$native"); then :
     else
       status=$?
       if [ "$status" -ne 3 ]; then
@@ -4904,47 +4975,29 @@ function upgrade_remove_obsolete_packages() {
       rejection='protected or unknown packages'
     fi
     if [ -z "$rejection" ]; then
+      if ! $automatic_remove; then
+        printf '%s\n' "$removals" > "$attempt/protected.removals" || return 1
+        preserved=$(awk -F '\t' 'FILENAME == ARGV[1] { removed[$0]=1; next } !(($1 ":" $2) in removed) { print $1 ":" $2 }' \
+          "$attempt/protected.removals" "$allowed") || return 1
+        if [ -n "$preserved" ]; then
+          printf 'dss:warn: Retaining obsolete packages required by preserved packages or APT policy: %s. Review %s.\n' "${preserved//$'\n'/, }" "$plan" >&2
+        fi
+      fi
       [ -n "$removals" ] || return 0
       while IFS= read -r package; do
-        documentation_only=false
-        case "${package%:*}" in
-          linux-*|grub*|lilo|init*|systemd*|udev*|network*|ifupdown*|netplan.io|resolvconf|dhcpcd*|isc-dhcp-client|iproute*|iptables*|nftables*|apt*|dpkg*|sudo|passwd|login|util-linux|openssh*|apache2*|libapache2-mod-*|nginx*|php*|mysql*|mariadb*|postgresql*|dovecot*|postfix*|exim*|sendmail*|fail2ban*|bind9*|rabbitmq*|slapd*|mailman*|redis*|caddy*|cron*|rsyslog*)
-            if [[ "${package%:*}" =~ $mariadb_transition_pattern ]]; then
-              if awk -F '\t' -v arch="${package##*:}" -v native="$native" '
-                $1 == "install ok installed" && $2 == "mariadb-server" && $3 == (arch == "all" ? native : arch) { found=1 }
-                END { exit !found }
-              ' "$attempt/packages"; then documentation_only=true
-              else status=$?; [ "$status" -eq 1 ] || return 1
-              fi
-            fi
-            if ! $documentation_only; then rejection="service or system package $package"; break; fi;;
-        esac
-        query_package=$package
-        if ! $qualified_packages; then
-          case "${package##*:}" in "$native"|all) query_package=${package%:*};; *) return 1;; esac
+        if query_package=$(upgrade_obsolete_output_safe_package "$package" "$native" "$qualified_packages" "$attempt/packages"); then selected+=("$query_package")
+        else
+          status=$?
+          [ "$status" -eq 3 ] || return 1
+          rejection="protected package $package"; break
         fi
-        files=$(dpkg-query -L "$query_package") || return 1
-        if $documentation_only || [[ "${package%:*}" =~ $gcc_base_pattern ]]; then
-          logcheck=
-          if $documentation_only; then logcheck=${package%:*}; logcheck=${logcheck//./_}; fi
-          if ! upgrade_obsolete_payload_is_documentation "$package" "$files" "$logcheck"; then
-            rejection="unverified base/transitional payload for $package"; break
-          fi
-        fi
-        while IFS= read -r file; do
-          case "$file" in /etc/init.d/?*|/etc/init/?*|/etc/cron*|/etc/systemd/system/?*|/etc/systemd/user/?*|/lib/systemd/system/?*|/lib/systemd/user/?*|/usr/lib/systemd/system/?*|/usr/lib/systemd/user/?*|/etc/network/?*|/etc/netplan/?*|/etc/NetworkManager/?*|/etc/kernel/?*|/boot/?*|/var/lib/?*|/var/spool/?*|/srv/?*|/home/?*|/var/www/?*)
-            rejection="service/data path $file owned by $package"; break;;
-          esac
-        done <<< "$files"
-        [ -z "$rejection" ] || break
-        selected+=("$query_package")
       done <<< "$removals"
     fi
     [ -n "$rejection" ] || break
     if $automatic_remove; then
-      echo "dss:warn: Autoremove plan includes $rejection; preserving automatic candidates and retrying only proven obsolete packages. Review $plan." >&2
+      echo "dss:warn: Autoremove plan includes $rejection; preserving automatic candidates and planning a safe obsolete subset. Review $plan." >&2
     else
-      echo "dss:error: Explicit obsolete cleanup still includes $rejection; migrate manually. Review $plan; no cleanup attempted." >&2; return 1
+      echo "dss:error: Protected cleanup still includes $rejection; migrate manually. Review $plan; no cleanup attempted." >&2; return 1
     fi
   done
   # Recheck exact explicit removals with autoremove disabled before allowing package changes.
@@ -6361,11 +6414,18 @@ function manifest_apache_php() {
 }
 
 function manifest_has_php_document_root() {
-  local root=$1 entry
+  local root=$1 entry found
   for entry in index.php wp-includes/version.php administrator/manifests/files/joomla.xml core/lib/Drupal.php includes/constants.php includes/DefaultSettings.php version.php artisan; do
     [ ! -f "$manifest_root$root/$entry" ] || return 0
   done
-  return 1
+  case "$root" in /*) :;; *) return 1;; esac
+  case "$root" in /|*'$'*|*'%'*|*'{'*|*'}'*) return 1;; esac
+  command -v timeout >/dev/null 2>&1 || return 1
+  # Inspect immediate app children only; backup trees do not establish a site's PHP runtime.
+  found=$(timeout 2 find -H "$manifest_root$root" -mindepth 1 -maxdepth 2 \
+    \( -type d \( -name '.*' -o -name '*.bak' -o -name '*.backup' -o -name '*.old' -o -name '*~' -o -name backup -o -name backups \) -prune \) -o \
+    \( -xtype f -name '*.php' -print -quit \) 2>/dev/null) || return 1
+  [ -n "$found" ]
 }
 
 function manifest_fpm_pools() {

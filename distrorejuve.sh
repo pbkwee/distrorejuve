@@ -1683,7 +1683,7 @@ function upgrade_migrate_php_packages() {
   fi
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --download-only --reinstall install "${arguments[@]}") || return 1
   : > "$directory/started" || return 1
-  echo "dss:stage: Migrating installed PHP roles to distribution default $default; configs/inventory: $directory" >&2
+  echo "dss:stage: Updating installed PHP packages to the distribution's default PHP version ($default); configs/inventory: $directory" >&2
   if [ -f "$directory/apache.handoff" ]; then
     upgrade_php_apache_control "$directory" prepare || return 1
     if [ "${#modules[@]}" -gt 0 ]; then
@@ -7295,7 +7295,7 @@ function logging_run() (
 	local logging_root="${DISTROREJUVE_LOG_DIR:-/root/distrorejuveinfo/runs}"
 	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
 	local logging_dir logging_log logging_line logging_status logging_original_umask logging_action_status=0
-	local logging_color=false logging_summarize=false logging_level
+	local logging_color=false logging_summarize=false logging_level logging_required
 	local -a logging_pipeline_status
 
 	case "$logging_verbose:$logging_trace" in
@@ -7309,6 +7309,19 @@ function logging_run() (
 	if $logging_trace && (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) )); then
 		printf '%s\n' 'dss:error --trace requires Bash 4.1 or newer.' >&2
 		return 1
+	fi
+
+	case "$1:${ACTION:-${2:-}}" in
+		distrorejuve_main:--upgrade|distrorejuve_main:--dist-update|distrorejuve_main:--dist-upgrade|distrorejuve_main:--to-*) logging_summarize=true;;
+	esac
+	if $logging_summarize; then
+		# A partial copy must fail before package changes, not at completion.
+		for logging_required in upgrade_outcome_record upgrade_finish_run; do
+			if ! declare -F "$logging_required" >/dev/null; then
+				printf 'dss:error Incomplete distrorejuve script: required function %s is missing. Replace it with a complete copy; action was not started.\n' "$logging_required" >&2
+				return 1
+			fi
+		done
 	fi
 
 	logging_original_umask=$(umask)
@@ -7333,9 +7346,6 @@ function logging_run() (
 			return 1
 		fi
 	fi
-	case "$1:${ACTION:-${2:-}}" in
-		distrorejuve_main:--upgrade|distrorejuve_main:--dist-update|distrorejuve_main:--dist-upgrade|distrorejuve_main:--to-*) logging_summarize=true;;
-	esac
 	printf 'dss:stage Detailed run log: %s\n' "$logging_log" >&2
 
 	# The subshell contains traps, tracing and callback exits; caller state is intact.
@@ -7349,7 +7359,19 @@ function logging_run() (
 			DISTROREJUVE_RUN_DIRECTORY=$logging_dir
 			export DISTROREJUVE_RUN_DIRECTORY
 			# Main dispatch can exit directly; retain its status and still report final health.
-			trap 'logging_action_status=$?; trap - EXIT; upgrade_finish_run "$logging_action_status" "$logging_log"; exit $?' EXIT
+			trap '
+				logging_action_status=$?
+				trap - EXIT
+				if declare -F upgrade_finish_run >/dev/null; then
+					upgrade_finish_run "$logging_action_status" "$logging_log"
+					logging_status=$?
+				else
+					printf "dss:error Completion reporting is unavailable: upgrade_finish_run is missing; package and service health remain unverified.\n" >&2
+					logging_status=1
+				fi
+				[ "$logging_action_status" -eq 0 ] || logging_status=$logging_action_status
+				exit "$logging_status"
+			' EXIT
 		fi
 		if $logging_trace; then
 			if ! exec 9> "$logging_dir/trace.log"; then exit 1; fi

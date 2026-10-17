@@ -709,8 +709,9 @@ function apt_sources_check_releases_and_vendors() {
   return "$ret"
 }
 
-# Existing security sources must cover each binary base component and architecture filter.
-# Do not add conflicting Signed-By records when only part of a security pocket is configured.
+# Require security coverage for supported components and matching architecture filters.
+# Debian optional components have no guaranteed Security Team coverage; retain their source choices.
+# https://www.debian.org/security/faq.en.html#contrib
 function apt_sources_check_security_coverage() {
   local records=$1 family=$2 current=$3 target=$4 provider type suite components architectures
   local secprovider sectype secsuite seccomponents secarchitectures component covered
@@ -720,6 +721,9 @@ function apt_sources_check_security_coverage() {
     [ "$suite" = "$current" ] || [ "$suite" = "$target" ] || continue
     read -r -a basecomponents <<< "$components"
     for component in "${basecomponents[@]}"; do
+      case "$family:$component" in
+        debian:contrib|debian:non-free|debian:non-free-firmware) continue;;
+      esac
       covered=false
       while IFS=$'\t' read -r _ _ secprovider sectype _ secsuite seccomponents secarchitectures; do
         if [ "$secprovider" != "$family" ] || [ "$sectype" != deb ]; then continue; fi
@@ -1218,28 +1222,43 @@ function upgrade_php_output_new_apache_packages() {
 # Retain the machine's web-server role before every ordinary APT mutation.
 function apt_get_apply() {
 (
-  local directory additions status package_umask
+  local directory additions status package_umask attempt
+  local -a pipeline_status=()
   package_umask=$(umask) || return 1
   umask 077
   upgrade_php_runtime_prepare || return 1
   directory=$(mktemp -d) || return 1
   trap 'rm -rf -- "$directory"' EXIT
-  dpkg-query -W -f='${Status}\t${Package}\n' > "$directory/packages" || return 1
-  if awk -F '\t' '
-    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ &&
-      ($2 ~ /^(apache2|apache2[.]2-common|apache2-mpm-.*)(:[a-z0-9-]+)?$/ || $2 ~ /^libapache2-mod-php/) { found=1 }
-    END { exit !found }
-  ' "$directory/packages"; then :
-  else
-    (umask "$package_umask" && LC_ALL=C apt-get "$@" --simulate) > "$directory/plan" 2>&1 || { status=$?; cat "$directory/plan" >&2; return "$status"; }
-    additions=$(upgrade_php_output_new_apache_packages "$directory/packages" "$directory/plan") || return 1
-    if [ -n "$additions" ]; then
-      printf 'dss:error: APT would add an Apache web server/PHP handler to a host without that role: %s. No package changes attempted; review PHP-FPM/CGI dependency alternatives.\n' "${additions//$'\n'/, }" >&2
-      return 1
+  for attempt in 1 2; do
+    umask 077
+    dpkg-query -W -f='${Status}\t${Package}\n' > "$directory/packages" || return 1
+    if awk -F '\t' '
+      $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ &&
+        ($2 ~ /^(apache2|apache2[.]2-common|apache2-mpm-.*)(:[a-z0-9-]+)?$/ || $2 ~ /^libapache2-mod-php/) { found=1 }
+      END { exit !found }
+    ' "$directory/packages"; then :
+    else
+      (umask "$package_umask" && LC_ALL=C apt-get "$@" --simulate) > "$directory/plan" 2>&1 || { status=$?; cat "$directory/plan" >&2; return "$status"; }
+      additions=$(upgrade_php_output_new_apache_packages "$directory/packages" "$directory/plan") || return 1
+      if [ -n "$additions" ]; then
+        printf 'dss:error: APT would add an Apache web server/PHP handler to a host without that role: %s. No package changes attempted; review PHP-FPM/CGI dependency alternatives.\n' "${additions//$'\n'/, }" >&2
+        return 1
+      fi
     fi
-  fi
-  umask "$package_umask" || return 1
-  apt-get "$@"
+    : > "$directory/output" || return 1
+    umask "$package_umask" || return 1
+    LC_ALL=C apt-get "$@" 2>&1 | tee "$directory/output"
+    pipeline_status=("${PIPESTATUS[@]}")
+    status=${pipeline_status[0]}
+    if [ "${pipeline_status[1]}" -ne 0 ]; then
+      echo 'dss:error: Cannot capture APT output; shared-file recovery was not attempted.' >&2
+      return "${pipeline_status[1]}"
+    fi
+    if [ "$attempt" -eq 1 ] && [ "$status" -ne 0 ] && grep -qF "trying to overwrite shared '" "$directory/output"; then
+      if rm_overwrite_files "$directory/output"; then continue; fi
+    fi
+    return "$status"
+  done
 )
 }
 
@@ -2912,6 +2931,7 @@ function rm_overwrite_files() {
    [  -z "$1" ] && return 1
    [  ! -f "$1" ] && return 1
    local tmplog="$1"
+   grep -qF 'dss:error: Cannot capture APT output;' "$tmplog" && return 1
 
   if egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $tmplog; then
     echo "dss:warn: mysql error.  Trying a mysql_upgrade to resolve."
@@ -2971,7 +2991,7 @@ function rm_overwrite_files() {
   local overwrites="$(grep "trying to overwrite shared '/usr/share/doc/.*/changelog.Debian.gz'" $tmplog | sed 's#.*trying to overwrite shared .##g' | sed 's#., which is different from other instances of package.*##g')"
   overwrites="$overwrites $(grep "trying to overwrite shared '/.*.py'" $tmplog | sed 's#.*trying to overwrite shared .##g' | sed 's#., which is different from other instances of package.*##g')"
   overwrites="$overwrites $(grep "trying to overwrite shared '/.*.conf'" $tmplog | sed 's#.*trying to overwrite shared .##g' | sed 's#., which is different from other instances of package.*##g')"
-  local i=
+  local i='' baseline='' backup='' backup_parent=''
   local rmed=0
   for i in $overwrites; do
     case "$i" in /etc/apache2|/etc/apache2/*|/etc/httpd|/etc/httpd/*)
@@ -2979,8 +2999,23 @@ function rm_overwrite_files() {
       continue;;
     esac
     [  ! -f "$i" ] && echo "dss:warn: expecting $i to be a file in rm_overwrite_files" && continue
-    rm -f "$i"
-    echo "dss:info: removed a shared overwrite file.  sometimes required when cross grading: $i"
+    if [ -z "$baseline" ]; then
+      record_config_state || return 1
+      baseline=$(config_state_output_baseline) || return 1
+      case "$baseline" in /*) :;; *) return 1;; esac
+      backup_parent="$baseline.shared-overwrites"
+    fi
+    backup=$(
+      umask 077
+      [ ! -L "$backup_parent" ] && mkdir -p -- "$backup_parent" && chmod 700 "$backup_parent" &&
+        mktemp -d "$backup_parent/overwrite.XXXXXX"
+    ) || { echo "dss:error: Cannot create shared-file backup; preserving $i." >&2; return 1; }
+    if ! (umask 077; printf '%s\n' "$i" > "$backup/source.path" && cp -a -- "$i" "$backup/file"); then
+      echo "dss:error: Cannot back up shared file $i; preserving it. Review $backup." >&2
+      return 1
+    fi
+    rm -f -- "$i" || return 1
+    echo "dss:info: removed a shared overwrite file.  sometimes required when cross grading: $i. Backup: $backup"
     rmed=$((rmed+1))
   done
   if egrep -aqi 'ERROR: Your kernel version indicates a revision number' $tmplog; then
@@ -3135,7 +3170,7 @@ function apt_get_remove() {
   apt_state_upgraded=
   apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.aptgetremove.log.XXXXXX") || return 1
-  apt_get_apply $APT_GET_INSTALL_OPTIONS remove $@ | tee "$tmplog"
+  apt_get_apply $APT_GET_INSTALL_OPTIONS remove $@ 2>&1 | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
   [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt_get_apply $APT_GET_INSTALL_OPTIONS remove $@ && ret=$?
   #if [  $ret -ne 0 ] && echo "$@" | egrep -qai 'gcc-6-base:i386'; then
@@ -3160,7 +3195,7 @@ function apt_get_install() {
   apt_state_upgraded=
   apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.aptgetinstall.log.XXXXXX") || return 1
-  apt_get_apply $APT_GET_INSTALL_OPTIONS install $@ | tee "$tmplog"
+  apt_get_apply $APT_GET_INSTALL_OPTIONS install $@ 2>&1 | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
   [  $ret -ne 0 ] && rm_overwrite_files "$tmplog" && apt_get_apply $APT_GET_INSTALL_OPTIONS install $@ && ret=$?
   local essentialissuepackages="$(grep --after-context 50 'WARNING: The following essential packages will be removed.' "$tmplog" | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
@@ -3184,7 +3219,7 @@ function apt_get_f_install() {
   apt_state_upgraded=
   apt_state_dist_upgraded=
   tmplog=$(mktemp "tmplog.aptgetfinstall.log.XXXXXX") || return 1
-  apt_get_apply $APT_GET_INSTALL_OPTIONS -f install | tee "$tmplog"
+  apt_get_apply $APT_GET_INSTALL_OPTIONS -f install 2>&1 | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
   if [  $ret -ne 0 ]; then
     rm_overwrite_files "$tmplog" && apt_get_apply $APT_GET_INSTALL_OPTIONS -f install && ret=$?
@@ -3199,7 +3234,7 @@ function apt_get_f_install() {
     else
       apt-get download perl-base:i386
       dpkg -i perl-base*i386*deb
-      apt_get_apply $APT_GET_INSTALL_OPTIONS -f install | tee "$tmplog"
+      apt_get_apply $APT_GET_INSTALL_OPTIONS -f install 2>&1 | tee "$tmplog"
       local ret=${PIPESTATUS[0]}
     fi
   fi
@@ -4770,6 +4805,23 @@ function upgrade_obsolete_output_removals() {
   ' "$allowed" "$plan"
 }
 
+# Base/transitional exceptions allow documentation; MariaDB may retain its exact obsolete logcheck filters.
+function upgrade_obsolete_payload_is_documentation() {
+  local package=${1%:*} files=$2 logcheck=${3:-} file found=false
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    case "$file" in /.) :;; *'/../'*|*'/./'*|*/..|*/.) return 1;; esac
+    case "$file" in
+      /.|/|/usr|/usr/share|/usr/share/doc|/usr/share/lintian|/usr/share/lintian/overrides) :;;
+      /usr/share/doc/"$package"|/usr/share/doc/"$package"/*|/usr/share/lintian/overrides/"$package") found=true;;
+      /etc|/etc/logcheck|/etc/logcheck/ignore.d.workstation|/etc/logcheck/ignore.d.server|/etc/logcheck/ignore.d.paranoid|/etc/logcheck/ignore.d.workstation/"$logcheck"|/etc/logcheck/ignore.d.server/"$logcheck"|/etc/logcheck/ignore.d.paranoid/"$logcheck")
+        [ -n "$logcheck" ] || return 1;;
+      *) return 1;;
+    esac
+  done <<< "$files"
+  $found
+}
+
 function upgrade_remove_obsolete_packages() {
 (
   local package_umask
@@ -4777,6 +4829,7 @@ function upgrade_remove_obsolete_packages() {
   umask 077
   set -o pipefail
   local family=$1 from=$2 to=$3 baseline directory native attempt package files file audit removals query_package signature current_signature
+  local documentation_only logcheck dpkg_help qualified_packages=false gcc_base_pattern='^gcc-[0-9]+([.][0-9]+)?-base$' mariadb_transition_pattern='^mariadb-server-[0-9]+([.][0-9]+)+$'
   local -a options=()
   local -a obsolete=()
   local -a selected=()
@@ -4792,6 +4845,8 @@ function upgrade_remove_obsolete_packages() {
   fi
   native=$(dpkg --print-architecture) || return 1
   [ "$native" = "$(cat "$directory/native")" ] || return 1
+  dpkg_help=$(LC_ALL=C dpkg --help) || return 1
+  case "$dpkg_help" in *--print-foreign-architectures*) qualified_packages=true;; esac
   attempt=$(mktemp -d "$directory/cleanup.XXXXXX") || return 1
   signature=$(apt_state_output_signature packages) || return 1
   [ -n "$signature" ] || return 1
@@ -4804,9 +4859,12 @@ function upgrade_remove_obsolete_packages() {
     FILENAME == ARGV[1] { original[$1 SUBSEP $2]=$3; next }
     FILENAME == ARGV[2] { current[$1 SUBSEP $2]=$3; next }
     FILENAME == ARGV[3] { available[$1 SUBSEP $2]=1; next }
-    $1 == "install ok installed" && $5 != "yes" && $6 != "required" && $6 != "important" {
+    $1 == "install ok installed" && $5 != "yes" {
       key=$2 SUBSEP $3
-      if ($4 == current[key] || ((key in original) && $4 == original[key] && !(($2 SUBSEP ($3 == "all" ? native : $3)) in available))) print $2, $3, $4
+      obsolete=((key in original) && $4 == original[key] && !(($2 SUBSEP ($3 == "all" ? native : $3)) in available))
+      # Retired GCC base packages can be required despite containing only documentation.
+      if (($6 != "required" && $6 != "important") || (obsolete && $2 ~ /^gcc-[0-9]+([.][0-9]+)?-base$/))
+        if ($4 == current[key] || obsolete) print $2, $3, $4
     }
   ' "$directory/provenance" "$attempt/provenance" "$attempt/archives" "$attempt/packages" > "$attempt/eligible" || return 1
   awk -F '\t' -v native="$native" '
@@ -4816,7 +4874,10 @@ function upgrade_remove_obsolete_packages() {
   ' "$directory/provenance" "$attempt/archives" "$attempt/packages" > "$attempt/obsolete" || return 1
   while IFS= read -r package; do
     [ -n "$package" ] || continue
-    case "${package##*:}" in "$native"|all) obsolete+=("${package%:*}");; *) obsolete+=("$package");; esac
+    if $qualified_packages; then obsolete+=("$package")
+    else
+      case "${package##*:}" in "$native"|all) obsolete+=("${package%:*}");; *) return 1;; esac
+    fi
   done < "$attempt/obsolete"
   read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
   umask "$package_umask"
@@ -4828,13 +4889,29 @@ function upgrade_remove_obsolete_packages() {
   }
   [ -n "$removals" ] || return 0
   while IFS= read -r package; do
+    documentation_only=false
     case "${package%:*}" in
       linux-*|grub*|lilo|init*|systemd*|udev*|network*|ifupdown*|netplan.io|resolvconf|dhcpcd*|isc-dhcp-client|iproute*|iptables*|nftables*|apt*|dpkg*|sudo|passwd|login|util-linux|openssh*|apache2*|libapache2-mod-*|nginx*|php*|mysql*|mariadb*|postgresql*|dovecot*|postfix*|exim*|sendmail*|fail2ban*|bind9*|rabbitmq*|slapd*|mailman*|redis*|caddy*|cron*|rsyslog*)
-        echo "dss:error: Obsolete/autoremove plan includes service or system package $package; migrate it manually. Review $attempt/plan; no cleanup attempted." >&2; return 1;;
+        if [[ "${package%:*}" =~ $mariadb_transition_pattern ]] && awk -F '\t' -v arch="${package##*:}" -v native="$native" '
+          $1 == "install ok installed" && $2 == "mariadb-server" && $3 == (arch == "all" ? native : arch) { found=1 }
+          END { exit !found }
+        ' "$attempt/packages"; then documentation_only=true
+        else
+          echo "dss:error: Obsolete/autoremove plan includes service or system package $package; migrate it manually. Review $attempt/plan; no cleanup attempted." >&2; return 1
+        fi;;
     esac
     query_package=$package
-    case "${package##*:}" in "$native"|all) query_package=${package%:*};; esac
+    if ! $qualified_packages; then
+      case "${package##*:}" in "$native"|all) query_package=${package%:*};; *) return 1;; esac
+    fi
     files=$(dpkg-query -L "$query_package") || return 1
+    if $documentation_only || [[ "${package%:*}" =~ $gcc_base_pattern ]]; then
+      logcheck=
+      if $documentation_only; then logcheck=${package%:*}; logcheck=${logcheck//./_}; fi
+      upgrade_obsolete_payload_is_documentation "$package" "$files" "$logcheck" || {
+        echo "dss:error: Package $package does not have a verified base/transitional payload; preserve it and migrate manually. Review $attempt/plan; no cleanup attempted." >&2; return 1;
+      }
+    fi
     while IFS= read -r file; do
       case "$file" in /etc/init.d/?*|/etc/init/?*|/etc/cron*|/etc/systemd/system/?*|/etc/systemd/user/?*|/lib/systemd/system/?*|/lib/systemd/user/?*|/usr/lib/systemd/system/?*|/usr/lib/systemd/user/?*|/etc/network/?*|/etc/netplan/?*|/etc/NetworkManager/?*|/etc/kernel/?*|/boot/?*|/var/lib/?*|/var/spool/?*|/srv/?*|/home/?*|/var/www/?*)
         echo "dss:error: Package $package owns service/data path $file; preserve it and migrate manually. Review $attempt/plan; no cleanup attempted." >&2; return 1;;
@@ -6514,7 +6591,7 @@ function manifest_mail_root() {
   manifest_mail_seen="$manifest_mail_seen|$path"
   actual="$manifest_root$path"
   [ -d "$actual" ] || return
-  inode=$(stat -c '%d:%i' -- "$actual" 2>/dev/null) || inode=
+  inode=$(stat -L -c '%d:%i' -- "$actual" 2>/dev/null) || inode=
   if [ -n "$inode" ]; then
     case "|$manifest_mail_inodes|" in *"|$inode|"*) return ;; esac
     manifest_mail_inodes="$manifest_mail_inodes|$inode"
@@ -6523,11 +6600,19 @@ function manifest_mail_root() {
   # Only conventional narrow mail roots are scanned; a configured / or /home is never traversed.
   case "$path" in /var/mail|/var/spool/mail|/var/vmail|/var/mail/*|/var/spool/mail/*|/var/vmail/*|/home/*/Maildir|/root/Maildir)
     if $manifest_mail_metrics && [ "$manifest_mail_count" -le 8 ] && command -v timeout >/dev/null 2>&1; then
-      if output=$(timeout 3 du -smx -- "$actual" 2>/dev/null); then size=${output%%[[:space:]]*}; reason=measured; else reason=limit_or_permissions; fi
-      if [ -d "$actual/cur" ] && [ -d "$actual/new" ] && [ -d "$actual/tmp" ]; then count=1; count_reason=maildir
-      elif [ "$path" = /var/mail ] || [ "$path" = /var/spool/mail ]; then
-        if output=$(timeout 2 find "$actual" -mindepth 1 -maxdepth 1 -type f -printf '.\n' 2>/dev/null); then
-          if [ -n "$output" ]; then count=$(printf '%s\n' "$output" | wc -l); count_reason=top_level_mbox_files; else count=unknown; fi
+      # Follow only the root alias; its resolved target must still be a narrow mail root.
+      actual=$(readlink -f -- "$actual" 2>/dev/null) || actual=
+      case "$actual" in
+        "$manifest_root"/var/mail|"$manifest_root"/var/spool/mail|"$manifest_root"/var/vmail|"$manifest_root"/var/mail/*|"$manifest_root"/var/spool/mail/*|"$manifest_root"/var/vmail/*|"$manifest_root"/home/*/Maildir|"$manifest_root"/root/Maildir) :;;
+        *) actual=; reason=resolved_path_not_scanned;;
+      esac
+      if [ -n "$actual" ]; then
+        if output=$(timeout 3 du -smx -- "$actual" 2>/dev/null); then size=${output%%[[:space:]]*}; reason=measured; else reason=limit_or_permissions; fi
+        if [ -d "$actual/cur" ] && [ -d "$actual/new" ] && [ -d "$actual/tmp" ]; then count=1; count_reason=maildir
+        elif [ "$path" = /var/mail ] || [ "$path" = /var/spool/mail ]; then
+          if output=$(timeout 2 find "$actual" -mindepth 1 -maxdepth 1 -type f -printf '.\n' 2>/dev/null); then
+            if [ -n "$output" ]; then count=$(printf '%s\n' "$output" | wc -l); count_reason=top_level_mbox_files; else count=unknown; fi
+          fi
         fi
       fi
     else reason=disabled_or_limit; fi ;;

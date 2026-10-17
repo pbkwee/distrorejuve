@@ -5057,8 +5057,12 @@ function apt_packages_output_archives() {
       [ "$arch" = "$architecture" ] || continue
       if [ "$arch" = "$native" ]; then printf '%s\0' "$package"; else printf '%s\0' "$package:$arch"; fi
     done < "$inventory" > "$directory/query" || return 1
-    LC_ALL=C xargs -0 -r -n 256 apt-cache -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= madison \
-      < "$directory/query" > "$directory/madison" || return 1
+    # APT1.x misparses multiple split -o arguments before the command.
+    LC_ALL=C xargs -0 -r -n 256 apt-cache madison -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= \
+      < "$directory/query" > "$directory/madison" || {
+      echo "dss:error: Cannot read existing APT indexes for $architecture; package provenance is unverified." >&2
+      return 1
+    }
     awk -F '|' -v OFS='\t' -v architecture="$architecture" -v native="$native" '
       { text=$3; gsub(/^[ \t]+|[ \t]+$/, "", text); count=split(text, fields, /[ \t]+/)
         legacy=(count == 3 && fields[3] == "Packages" && architecture == native && fields[1] ~ /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\/]+\/?$/)

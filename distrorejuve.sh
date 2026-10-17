@@ -2869,6 +2869,8 @@ function check_usrmerge() {
     dpkg --configure usrmerge || return $?
   else
     case "$info" in *' ok installed'|*' ok unpacked'|*' ok half-configured') echo 'dss:error: Installed/partial usrmerge has no executable packaged converter; restore the package manually before further package work.' >&2; return 1;; esac
+    # Restored systems may have no indexes, or source preparation may have changed mirrors.
+    apt_get_update || return $?
     apt_get_install usrmerge || return $?
   fi
   usrmerge_is_complete || { echo 'dss:error: usrmerge did not establish canonical /bin, /sbin and /lib links; stop and inspect before package work.' >&2; return 1; }

@@ -1487,6 +1487,23 @@ function upgrade_php_output_preserved_packages() {
   ' "$allowed" <(printf '%s\n' "$packages") "$plan"
 }
 
+# Only documentation-only dependency packages for explicitly unavailable extensions qualify.
+function upgrade_php_is_obsolete_extension_meta() {
+  local package=${1%%:*} mapping=$2 packages=$3 files
+  case "$package" in php-cli|php-fpm|php-common|php-cgi|php-phpdbg) return 1;; php-?*) :;; *) return 1;; esac
+  awk -F '\t' -v package="$package" '
+    $5 == "unavailable" && index($1, "php" $3 "-") == 1 &&
+      "php" substr($1, 4+length($3)) == package { found=1 }
+    END { exit !found }
+  ' "$mapping" || return 1
+  awk -F '\t' -v package="$package" '
+    $1 == "install ok installed" && $2 == package && $3 == "all" { found=1 }
+    END { exit !found }
+  ' <<< "$packages" || return 1
+  files=$(dpkg-query -L "$package") || return 2
+  upgrade_obsolete_payload_is_documentation "$package" "$files"
+}
+
 function upgrade_migrate_php_packages() {
 (
   local package_umask
@@ -1668,9 +1685,18 @@ function upgrade_migrate_php_packages() {
           echo "dss:error: PHP plan still removes explicitly requested $package; inspect $directory/install.plan." >&2; return 1
         fi
       done
-      (umask "$package_umask" && upgrade_php_has_candidate "$package") || {
-        echo "dss:error: No verified target candidate to preserve $package; inspect $directory/install.plan." >&2; return 1;
-      }
+      if (umask "$package_umask" && upgrade_php_has_candidate "$package"); then :
+      else
+        status=$?
+        if [ "$status" -eq 1 ] && upgrade_php_is_obsolete_extension_meta "$package" "$directory/mapping" "$packages"; then
+          printf '%s:all\n' "${package%%:*}" >> "$directory/remove.packages" || return 1
+          printf '%s:all\n' "${package%%:*}" >> "$directory/install.allowed-removals" || return 1
+          arguments+=("${package%%:*}-")
+          echo "dss:warn: Removing obsolete PHP dependency package $package with its unavailable extension; configuration will not be purged." >&2
+          continue
+        fi
+        echo "dss:error: No verified target candidate to preserve $package; inspect $directory/install.plan." >&2; return 1
+      fi
       printf '%s\n' "$package" >> "$directory/install.packages" || return 1
       installs+=("$package")
       arguments+=("$package")

@@ -6005,7 +6005,7 @@ function tweak_broken_configs() {
   #slow_query_log                  = 1
   #slow_query_log_file             = /var/log/mysql/mysql-slow.log
   #find /var/log -type f | xargs --no-run-if-empty grep log_slow | grep ERROR
-  #/var/log/daemon.log:Apr  6 19:14:44 ititch mysqld_safe[13273]: 2020-04-06 19:14:44 3079187200 [ERROR] /usr/sbin/mysqld: unknown variable 'log_slow_queries=/var/log/mysql/mysql-slow.log'
+  #/var/log/daemon.log:Apr  6 19:14:44 examplehost mysqld_safe[13273]: 2020-04-06 19:14:44 3079187200 [ERROR] /usr/sbin/mysqld: unknown variable 'log_slow_queries=/var/log/mysql/mysql-slow.log'
   if [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
     echo "dss:info: Disabling log_slow settings, they are now slow_query_log"
     [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs --no-run-if-empty grep -l '^log_slow'); do
@@ -6025,8 +6025,8 @@ function tweak_broken_configs() {
     grep -qai 'random=.*ifconfig.*sed' $i || continue
     echo '#!/bin/bash
 # This is to delay cron jobs by up to 10 minutes to relieve host server load.
-# needs to parse inet 174.136.11.74  B174.136.11.79  M255.255.255.248 and
-# inet addr:174.136.11.74  Bcast:174.136.11.79  Mask:255.255.255.248
+# needs to parse inet 203.0.113.10  B203.0.113.15  M255.255.255.248 and
+# inet addr:203.0.113.10  Bcast:203.0.113.15  Mask:255.255.255.248
 declare -i random=$(expr $(ifconfig | grep -v inet6  | grep  "inet" | head -n 1 | sed -e "s/[^0-9 ]//g" | sed "s/^  *//" |  cut -f 1 -d\ ) % 900)
 sleep ${random}
 exit 0' > "$i" || return 1

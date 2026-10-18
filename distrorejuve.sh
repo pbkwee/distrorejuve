@@ -6143,119 +6143,122 @@ return 1
 }
 
 function print_minimal_config() {
-  local a=$1
-  [ ! -f "$a" ] && return 1
-  egrep -v '^\s*#|^$' "$a"
+  local status
+  [ -f "$1" ] && [ -r "$1" ] || return 2
+  grep -Ev '^[[:space:]]*#|^$' -- "$1"
+  status=$?
+  [ "$status" -le 1 ] || return "$status"
   return 0
 }
 function print_pkg_to_modified_diff() {
-[  ! -d "/root/pkgdiff.$$" ] && mkdir /root/pkgdiff.$$
-# get a list of config files in packages that have been changed by the user
-local modifiedconfigfiles=$(dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort)
-local modifiedconfigfile
-cd /root/pkgdiff.$$ || return 1
-for modifiedconfigfile in $modifiedconfigfiles; do
-  # figure out the package name
-  # dpkg -S /etc/apache2/mods-available/ssl.conf
-  # apache2: /etc/apache2/mods-available/ssl.conf
-  local pkg=$(dpkg -S "$modifiedconfigfile" | awk '{print $1}' | sed 's/://')
-  [ -z "$pkg" ] && continue
-
-  #figure out the filename
-  #apt-get --print-uris download apache2
-  # 'http://http.us.debian.org/debian/pool/main/a/apache2/apache2_2.4.10-10+deb8u7_i386.deb' apache2_2.4.10-10+deb8u7_i386.deb 207220 SHA256:7974cdeed39312fda20165f4ee8bebc10f51062600a7cd95f4c5cba32f7ae12c
-  # note will not return a result if the file is already here (hence the 'hidden' stuff below).
-  local debfilename=$(apt-get --print-uris download "$pkg" 2>/dev/null| awk '{print $2}')
-  [ -z "$debfilename" ] && continue
-
-  # download it if we don't already have it
-  if [ ! -f "hidden-${debfilename}" ]; then
-    apt-get download "$pkg" &>/dev/null
-    # can fail if apt is not up to date
-    [ $? -ne 0 ] && apt_get_update &>/dev/null && apt-get download "$pkg" &>/dev/null
-    # extract to local dir
-    dpkg -x "$debfilename" .
-    mv "$debfilename" "hidden-$debfilename"
+  local mode=${1:-} records line package=unknown file checksum actual state sidecar status report_status=0 sidecars=0
+  local -a pipeline_status=()
+  case "$mode" in ''|summary) :;; *) echo 'dss:error: Unknown configuration report mode.' >&2; return 1;; esac
+  records=$(LC_ALL=C dpkg-query -W -f='Package: ${Package}\n${Conffiles}\n' '*') || {
+    echo 'dss:error: Cannot query package conffiles; configuration verification is incomplete.' >&2; return 1;
+  }
+  while IFS= read -r line; do
+    case "$line" in
+      'Package: '*) package=${line#Package: }; continue;;
+      ' '*) line=${line# };;
+      '') continue;;
+      *) echo 'dss:warn: Unrecognized package conffile metadata; configuration verification is incomplete.' >&2; report_status=1; continue;;
+    esac
+    case "$line" in *' obsolete') continue;; esac
+    checksum=${line##* }; file=${line% *}
+    case "$file" in /*) :;; *) echo 'dss:warn: Invalid conffile path in package metadata.' >&2; report_status=1; continue;; esac
+    case "$checksum" in *[!0-9a-fA-F]*) checksum=;; esac
+    state=unknown
+    if [ "${#checksum}" -ne 32 ]; then :
+    elif [ ! -e "$file" ] && [ ! -L "$file" ]; then state=missing
+    elif [ -f "$file" ] && [ -r "$file" ]; then
+      if actual=$(md5sum < "$file"); then
+        if [ "${actual%% *}" = "$checksum" ]; then state=unchanged; else state=modified; fi
+      fi
+    fi
+    case "$state" in
+      modified) printf 'dss:info: Modified package conffile: %s (%s).\n' "$file" "$package";;
+      missing) printf 'dss:info: Missing package conffile: %s (%s); this may be intentional.\n' "$file" "$package";;
+      unknown) printf 'dss:warn: Cannot verify package conffile: %s (%s).\n' "$file" "$package" >&2; report_status=1;;
+    esac
+    for sidecar in "$file".dpkg-dist "$file".dpkg-old "$file".ucf-dist "$file".ucf-old "$file".rpmnew "$file".rpmsave; do
+      [ -e "$sidecar" ] || [ -L "$sidecar" ] || continue
+      sidecars=$((sidecars+1))
+      printf 'dss:info: Existing configuration sidecar: %s.\n' "$sidecar"
+      if [ "$mode" = summary ] || [ ! -f "$file" ] || [ ! -r "$file" ]; then continue; fi
+      print_minimal_config_diff "$sidecar" "$file" | awk -v package="$package" -v path="$file" '{print "dss:configdiff:modifiedconfig:" package ":" path ":" $0}'
+      pipeline_status=("${PIPESTATUS[@]}")
+      status=${pipeline_status[0]}
+      if [ "$status" -gt 1 ] || [ "${pipeline_status[1]}" -ne 0 ]; then
+        printf 'dss:error: Cannot compare configuration sidecar %s with %s.\n' "$sidecar" "$file" >&2
+        report_status=1
+      fi
+    done
+  done <<< "$records"
+  if [ "$sidecars" -eq 0 ]; then
+    echo 'dss:info: No existing package conffile sidecars found; local configuration changes may still exist.'
   fi
-
-  # Apache configuration is managed by its packages; reporting must not create sidecars there.
-  case "$modifiedconfigfile" in /etc/apache2|/etc/apache2/*|/etc/httpd|/etc/httpd/*) :;;
-    *) [ -f "./${modifiedconfigfile}" ] && [ ! -f "${modifiedconfigfile}.dpkg-dist" ] && cp "./${modifiedconfigfile}" "${modifiedconfigfile}.dpkg-dist";;
-  esac
-  [ -f "${modifiedconfigfile}.dpkg-dist" ] && echo "dss:modifiedfilereplace:To replace edited file with dist file: [ ! -f $modifiedconfigfile.dpkg-old ] && [ -f /etc/nginx/nginx.conf.dpkg-dist] && mv $modifiedconfigfile $modifiedconfigfile.dpkg-old && mv ${modifiedconfigfile}.dpkg-dist ${modifiedconfigfile}"
-  # show a diff
-  print_minimal_config_diff "./$modifiedconfigfile" "$modifiedconfigfile" | awk '{print "dss:configdiff:modifiedconfig:'$pkg':'$modifiedconfigfile':" $0}'
-done
-
-# cleanup
-cd - >/dev/null || return 1
-rm -rf /root/pkgdiff.$$
-return 0
+  return "$report_status"
 }
 
 function print_minimal_config_diff() {
-  local a=$1
-  local b=$2
-  [ ! -f "$a" ] && return 1
-  [ ! -f "$b" ] && return 1
-  ta=$(mktemp "$(basename "${a}").XXXXXX") || return 1
-  if ! tb=$(mktemp "$(basename "${b}").XXXXXX"); then
-    rm -f "$ta"
-    return 1
+  local a=$1 b=$2 ta tb status
+  [ -f "$a" ] && [ -r "$a" ] && [ -f "$b" ] && [ -r "$b" ] || return 2
+  ta=$(mktemp "${TMPDIR:-/tmp}/distrorejuve-configdiff.XXXXXX") || return 2
+  if ! tb=$(mktemp "${TMPDIR:-/tmp}/distrorejuve-configdiff.XXXXXX"); then rm -f -- "$ta"; return 2; fi
+  if print_minimal_config "$a" > "$ta" && print_minimal_config "$b" > "$tb"; then
+    diff --ignore-all-space -u --label "$a" --label "$b" "$ta" "$tb"
+    status=$?
+  else status=2; fi
+  if ! rm -f -- "$ta" "$tb"; then
+    echo 'dss:error: Cannot remove private configuration-diff temporary files.' >&2; return 2
   fi
-  print_minimal_config "$a" > "$ta"
-  print_minimal_config "$b" > "$tb"
-  diff --ignore-all-space -u "$ta" "$tb"
-  ret=$?
-  rm -f "$ta" "$tb"
-  return $ret
+  return "$status"
 }
 function print_config_state_changes() {
   prepare_output_dir
-  local availability_ret=0
+  local availability_ret=0 report_status now fromfile=$1 file files post_recorded=false
+  local -a pipeline_status=()
   print_installed_packages_without_available_versions || availability_ret=$?
-  local now=$(date +%s)
-  record_config_state "/root/distrorejuveinfo/postupgrade.dpkg.$now"
-  # get oldest/first preupgrade file.  e.g. we may have to rerun this script.  so diff from first run
-  local fromfile="${1}"
-  if [  -z "$fromfile" ]; then
-    fromfile=$(config_state_output_baseline) || fromfile=
+  if ! now=$(date +%s); then
+    echo 'dss:error: Cannot timestamp the current configuration report.' >&2
+    [ "$availability_ret" -ne 0 ] || availability_ret=1
+    return "$availability_ret"
   fi
-  [ -z "$fromfile" ] && fromfile=/root/distrorejuveinfo/preupgrade.dpkg.$$
-  # no prior changes just yet.
-  [  ! -f  "$fromfile" ] && return "$availability_ret"
+  if record_config_state "/root/distrorejuveinfo/postupgrade.dpkg.$now"; then post_recorded=true
+  else
+    echo 'dss:error: Cannot record current configuration state; comparison is incomplete.' >&2
+    [ "$availability_ret" -ne 0 ] || availability_ret=1
+  fi
+  if [ -z "$fromfile" ]; then fromfile=$(config_state_output_baseline) || fromfile=; fi
+  if [ -z "$fromfile" ] || [ ! -f "$fromfile" ]; then
+    echo 'dss:warn: No recent pre-upgrade baseline; before/after comparison is unavailable.' >&2
+    return "$availability_ret"
+  fi
   print_incompatible_package_changes "$fromfile"
-  print_crossgrade_obsolete_package_changes "$fromfile" || availability_ret=$?
-  # dpkg-new is used on unpack prior to choosing dpkg-dist or overwriting.
-  echo "dss:info: Config changes to check.  e.g. different processes after upgrade.  e.g. different ports.  e.g. different apache status output.  e.g. changes to dpkg-old/dpkg-dist files.  dpkg-old = your files that were not used.  dpkg-dist = distro files that were not used."
-  print_minimal_config_diff "$fromfile" "/root/distrorejuveinfo/postupgrade.dpkg.$now" | awk '{print "dss:configdiff:statechanges:" $0}'
-
-  # ucf-dist = backup of what was there before dist upgrade
-  local files=$(find "/etc" -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
-  [  -z "$files" ] && echo "dss:info: Looks like the server is using all distro-provided config files (no local overrides).  That makes it easy."
-  [ ! -z "$files" ] && echo "dss:info:key: How the distro provided config files differ from what is installed.  Consider what is needed to switch back to the distro provided config files?"
-  for file in $files; do
-    # defer to the new and improved print_pkg_to_modified_diff function (debian/ubuntu only)
-    echo $file | grep -q 'dpkg-dist' && continue
-    # if not rpmnew file, skip
-    echo $file | egrep -qv 'dpkg-dist|rpmnew' && continue
-    current=$(echo $file | sed 's/\.dpkg-dist$//')
-    current=$(echo $file | sed 's/\.rpmnew$//')
-
-    # modified file exists?
-    [ -z "$current" ] || [ ! -f $current ] && continue
-
-    echo "dss:pkgdiff:$current To use the dist file: mv $current $current.dpkg-old; mv $file $current"
-    print_minimal_config_diff $file $current | awk '{print "dss:configdiff:pkgconfig:" $0}'
-  done
-  print_pkg_to_modified_diff
-
-  # non .conf site files
-  # IncludeOptional sites-enabled/*.conf
-  [ -d /etc/apache2/sites-available ] && [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include.*sites-.*conf' /etc/apache2/apache2.conf && local nonconfsitefiles=$(find /etc/apache2/sites-available -type f | egrep -v '\.conf$|dpkg-')
-  for file in $nonconfsitefiles; do
-    echo "dss:warn: Apache config file '$file' should have a .conf extension: mv $file $file.conf;a2ensite $(basename $file).conf"
-  done
+  print_crossgrade_obsolete_package_changes "$fromfile" || { report_status=$?; [ "$availability_ret" -ne 0 ] || availability_ret=$report_status; }
+  echo 'dss:info: Configuration changes are review observations; changed or missing files may be intentional. Sidecars are compared only when already present.'
+  if $post_recorded; then
+    print_minimal_config_diff "$fromfile" "/root/distrorejuveinfo/postupgrade.dpkg.$now" | awk '{print "dss:configdiff:statechanges:" $0}'
+    pipeline_status=("${PIPESTATUS[@]}")
+    if [ "${pipeline_status[0]}" -gt 1 ] || [ "${pipeline_status[1]}" -ne 0 ]; then
+      echo 'dss:error: Cannot compare original and current configuration state.' >&2
+      [ "$availability_ret" -ne 0 ] || availability_ret=1
+    fi
+  fi
+  manifest_compare_baseline "$fromfile" || :
+  print_pkg_to_modified_diff '' || { report_status=$?; [ "$availability_ret" -ne 0 ] || availability_ret=$report_status; }
+  if [ -d /etc/apache2/sites-available ] && [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include.*sites-.*conf' /etc/apache2/apache2.conf; then
+    if files=$(find /etc/apache2/sites-available -type f ! -name '*.conf' ! -name '*dpkg-*'); then
+      while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        printf 'dss:warn: Apache configuration file %s has no .conf extension; review whether it should be enabled.\n' "$file"
+      done <<< "$files"
+    else
+      echo 'dss:error: Cannot inspect Apache site filenames.' >&2
+      [ "$availability_ret" -ne 0 ] || availability_ret=1
+    fi
+  fi
   return "$availability_ret"
 }
 
@@ -6322,7 +6325,7 @@ function record_config_state() {
   > "$file" || return 1
   # conf files
   echo "Date: $(date)" >> "$file"
-  [ ! -z "$files" ] && ls -lrt $files | awk '{print "configfiles:" $0}' > "$file"
+  [ ! -z "$files" ] && ls -lrt $files | awk '{print "configfiles:" $0}' >> "$file"
   echo "Listening ports:" >> "$file"
   echo "" >> "$file"
   # listening ports

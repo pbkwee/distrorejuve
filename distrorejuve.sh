@@ -6705,7 +6705,7 @@ function fix_missing_lsb_release() {
 which lsb_release >/dev/null 2>&1 && return 0
 ! [ -f /etc/debian_version ] && return 0
 echo "dss:info: Missing lsb release command.  trying to install it."
-apt_get_update
+apt_get_update || return $?
 apt_get_install lsb-release
 ret=$?
 return $ret
@@ -6864,7 +6864,7 @@ upgrade_precondition_checks || return $?
 
 apt_sources_prepare || return 1
 
-fix_missing_lsb_release
+fix_missing_lsb_release || return $?
 
 
 yum_enable_rhel4 || return $?
@@ -6903,11 +6903,16 @@ return 0
 
 function dist_upgrade_to_latest() {
   pause_check
-  local debian_target=''
+  local debian_target='' current='' family=''
   echo "dss:trace:dist_upgrade_to_latest"
   upgrade_preflight_action --dist-upgrade || return $?
 
-  if [ -f /etc/debian_version ] && lsb_release -a 2>/dev/null | grep -qai debian; then
+  if [ -f /etc/debian_version ]; then
+    current=$(distro_output_codename) || return 1
+    case " $ALL_DEBIAN " in *" $current "*) family=debian;; esac
+    case " $ALL_UBUNTU " in *" $current "*) family=ubuntu;; esac
+  fi
+  if [ "$family" = debian ]; then
     debian_target=trixie
     if ! dist_upgrade_etch_to_lenny; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_etch_to_lenny:failed" && return 1; fi
     if ! dist_upgrade_lenny_to_squeeze; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_lenny_to_squeeze:failed" && return 1; fi
@@ -6920,7 +6925,7 @@ function dist_upgrade_to_latest() {
     if ! dist_upgrade_bookworm_to_trixie; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_bookworm_to_trixie:failed" && return 1; fi
 
   fi
-  if [ -f /etc/debian_version ] && lsb_release -a 2>/dev/null | grep -qai ubuntu; then
+  if [ "$family" = ubuntu ]; then
     if ! dist_upgrade_ubuntu_to_latest; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_ubuntu_to_latest:failed" && return 1; fi
   fi
   if ! packages_upgrade; then echo "dss:error:dist_upgrade_to_latest:packages_upgrade:failed" && return 1; fi

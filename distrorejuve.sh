@@ -6167,7 +6167,8 @@ function print_pkg_to_modified_diff() {
       '') continue;;
       *) echo 'dss:warn: Unrecognized package conffile metadata; configuration verification is incomplete.' >&2; report_status=1; continue;;
     esac
-    case "$line" in *' obsolete') continue;; esac
+    # Retired conffiles are not shipped, including newconffile remove-on-upgrade records.
+    case "$line" in *' obsolete'|*' remove-on-upgrade') continue;; esac
     checksum=${line##* }; file=${line% *}
     case "$file" in /*) :;; *) echo 'dss:warn: Invalid conffile path in package metadata.' >&2; report_status=1; continue;; esac
     case "$checksum" in *[!0-9a-fA-F]*) checksum=;; esac

@@ -521,9 +521,7 @@ function apt_sources_rewrite() {
     fi
   done
   apt_state_updated=
-  apt_state_healthy=
-  apt_state_upgraded=
-  apt_state_dist_upgraded=
+  apt_state_invalidate_packages
   for index in "${!source_files[@]}"; do
     file=${source_files[index]}
     cmp -s -- "$file" "$stage/$index" && continue
@@ -1833,16 +1831,18 @@ function upgrade_php_runtime_output_directives() {
   case "$kind" in nginx|fpm) :;; *) return 1;; esac
   [ -f "$file" ] && [ -r "$file" ] && [ "$(stat -c '%s' -- "$file")" -le 1048576 ] || return 1
   LC_ALL=C awk -v kind="$kind" '
+    function unresolved(reason) { if (!reported[reason]++) print "unknown\t" reason }
     function emit() {
-      if (words[1] == "include") {
-        if (count == 2) print "include\t" words[2]; else print "unknown\tinclude_syntax"
+      if ((words[1] == "include" || words[1] == "fastcgi_pass") && directive_escaped) unresolved("escaped_nginx_syntax")
+      else if (words[1] == "include") {
+        if (count == 2) print "include\t" words[2]; else unresolved("include_syntax")
       } else if (words[1] == "fastcgi_pass") {
-        if (count != 2) print "unknown\tfastcgi_syntax"
+        if (count != 2) unresolved("fastcgi_syntax")
         else if (words[2] ~ /^unix:\//) { sub(/^unix:/, "", words[2]); print "socket\t" words[2] }
         else if (words[2] ~ /^[0-9.]+:[0-9]+$/ || words[2] ~ /^\[[0-9a-fA-F:]+\]:[0-9]+$/) print "tcp\t" words[2]
-        else print "unknown\tindirect_fastcgi_upstream"
+        else unresolved("indirect_fastcgi_upstream")
       }
-      count=0; token=""
+      count=0; token=""; directive_escaped=0
     }
     function word() { if (token != "") words[++count]=token; token="" }
     FNR > 20000 { print "unknown\tline_limit"; exit }
@@ -1864,13 +1864,13 @@ function upgrade_php_runtime_output_directives() {
     {
       for (i=1; i<=length($0); i++) {
         c=substr($0,i,1)
-        if (escaped) { print "unknown\tescaped_nginx_syntax"; escaped=0; token=token c; continue }
-        if (c == "\\") { escaped=1; continue }
+        if (escaped) { escaped=0; token=token c; continue }
+        if (c == "\\") { escaped=1; directive_escaped=1; continue }
         if (quote != "") { if (c == quote) quote=""; else token=token c; continue }
         if (c == "\042" || c == "\047") { quote=c; continue }
         if (c == "#") break
         if (c == ";") { word(); emit() }
-        else if (c == "{" || c == "}") { word(); count=0 }
+        else if (c == "{" || c == "}") { word(); count=0; directive_escaped=0 }
         else if (c ~ /[ \t\r\f\013]/) word()
         else token=token c
       }
@@ -2088,7 +2088,8 @@ function upgrade_services_is_active() {
     case "$(readlink /proc/1/exe)" in */systemd|*/'systemd (deleted)')
       properties=$(LC_ALL=C "${bounded[@]}" systemctl show -p SubState -p MainPID "$selector.service" 2>/dev/null) || return 2
       state=$(awk -F= '$1 == "SubState" { state=$2 } $1 == "MainPID" { pid=$2 } END { if (state == "" || pid !~ /^[0-9]+$/) exit 2; print state ":" pid }' <<< "$properties") || return 2
-      case "$state" in running:*) [ "${state#*:}" -gt 0 ] && return 0; return 1;; exited:*|dead:*|failed:*) return 1;; *) return 2;; esac;;
+      # Generated SysV units can track running daemons without recording a main PID.
+      case "$state" in running:*) return 0;; exited:*|dead:*|failed:*) return 1;; *) return 2;; esac;;
     esac
   fi
   return 0
@@ -2751,6 +2752,8 @@ function upgrade_check_crossgrade_package_blockers() {
 function upgrade_check_path() {
   if [ "${4:-requested}" = transition ]; then
     echo "dss:stage: Rechecking $2 -> $3 before this release transition" >&2
+  elif [ "$2" = "$3" ]; then
+    echo "dss:stage: Checking requested release $3 (already installed; no release transition)" >&2
   else
     echo "dss:stage: Checking complete requested upgrade path $2 -> $3" >&2
   fi
@@ -2947,9 +2950,7 @@ function upgrade_check_incompatible_packages() {
     echo "dss:error: Purge would change packages beyond the selected blockers; review $backup/purge-plan.txt. No purge attempted." >&2
     return 1
   fi
-  apt_state_healthy=''
-  apt_state_upgraded=''
-  apt_state_dist_upgraded=''
+  apt_state_invalidate_packages
   (umask 077; : > "$backup/purge.log") || return 1
   LC_ALL=C apt-get $APT_GET_INSTALL_OPTIONS -o APT::Get::AutomaticRemove=false purge "${packages[@]}" 2>&1 | tee "$backup/purge.log"
   local -a result=("${PIPESTATUS[@]}")
@@ -3415,6 +3416,12 @@ apt_state_healthy=
 apt_state_upgraded=
 apt_state_dist_upgraded=
 
+function apt_state_invalidate_packages() {
+  apt_state_healthy=
+  apt_state_upgraded=
+  apt_state_dist_upgraded=
+}
+
 # Local checks are cheaper than APT resolution/network work. A failed probe disables reuse.
 function apt_state_output_signature() {
 (
@@ -3540,9 +3547,7 @@ function apt_state_record_healthy() {
 function apt_get_remove() {
   pause_check
   local tmplog
-  apt_state_healthy=
-  apt_state_upgraded=
-  apt_state_dist_upgraded=
+  apt_state_invalidate_packages
   tmplog=$(mktemp "tmplog.aptgetremove.log.XXXXXX") || return 1
   apt_get_apply $APT_GET_INSTALL_OPTIONS remove $@ 2>&1 | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
@@ -3565,9 +3570,7 @@ function apt_get_remove() {
 function apt_get_install() {
   pause_check
   local tmplog
-  apt_state_healthy=
-  apt_state_upgraded=
-  apt_state_dist_upgraded=
+  apt_state_invalidate_packages
   tmplog=$(mktemp "tmplog.aptgetinstall.log.XXXXXX") || return 1
   apt_get_apply $APT_GET_INSTALL_OPTIONS install $@ 2>&1 | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
@@ -3589,9 +3592,7 @@ function apt_get_f_install() {
     return 0
   fi
   printf 'dss:stage: Checking package dependencies%s\n' "${1:+ $1}" >&2
-  apt_state_healthy=
-  apt_state_upgraded=
-  apt_state_dist_upgraded=
+  apt_state_invalidate_packages
   tmplog=$(mktemp "tmplog.aptgetfinstall.log.XXXXXX") || return 1
   apt_get_apply $APT_GET_INSTALL_OPTIONS -f install 2>&1 | tee "$tmplog"
   local ret=${PIPESTATUS[0]}
@@ -3626,9 +3627,7 @@ function apt_get_f_install() {
 function dpkg_install() {
   [  -z "$1" ] && return 0
   local tmplog
-  apt_state_healthy=
-  apt_state_upgraded=
-  apt_state_dist_upgraded=
+  apt_state_invalidate_packages
   tmplog=$(mktemp "tmplog.dpkginstall.log.XXXXXX") || return 1
   dpkg --force-confnew --force-confmiss --install $@ 2>&1 | tee "$tmplog"
   ret=${PIPESTATUS[0]}
@@ -3759,16 +3758,46 @@ function crossgrade_bookworm_check_plan() {
   ' "$targets" "$installed" "$obsolete" "$plan"
 }
 
+# APT's essential-removal switch also covers coinstalled Protected libraries.
+# Permit those foreign duplicates only after their exact native versions and runtime are ready.
+function crossgrade_bookworm_output_protected_removal_permission() {
+  local packages
+  crossgrade_bookworm_check_package_tools || { echo 'dss:error: Native package tools are not ready for foreign-library cleanup.' >&2; return 1; }
+  [ "$(od -An -tu1 -j4 -N1 /proc/1/exe 2>/dev/null | tr -d ' ')" = 2 ] || {
+    echo 'dss:error: Verify 64-bit PID1 before removing protected foreign libraries.' >&2; return 1;
+  }
+  packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\t${Protected}\t${Version}\n') || return 1
+  printf '%s\n' "$packages" | awk -F '\t' '
+    $1 == "install ok installed" && $3 == "amd64" { ready[$2]=$6 }
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && $3 == "i386" {
+      if ($4 == "yes") { print "dss:error: Active foreign Essential package blocks cleanup: " $2 > "/dev/stderr"; bad=1 }
+      if ($5 == "yes") protected[$2]=$6
+    }
+    END {
+      permission="false"
+      for (package in protected) {
+        if (!(package in ready) || ready[package] == "" || ready[package] != protected[package]) {
+          print "dss:error: Protected foreign package needs its configured native version before cleanup: " package > "/dev/stderr"; bad=1
+        }
+        permission="true"
+      }
+      if (bad) exit 1
+      print permission
+    }
+  '
+}
+
 # Download to an empty private cache, check the simulated removals, then inspect every archive.
 function crossgrade_bookworm_download() {
-  local directory=$1 targets=$2 installed=$3 phase=$4 file package version arch cache candidates status retries=0 progress
+  local directory=$1 targets=$2 installed=$3 phase=$4 file package version arch cache candidates status retries=0 progress cleanup_permission
   local -a apt_options=()
   local -a learned=()
   local -a essential_options=(--allow-remove-essential)
   shift 4
   read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
   if [ "$phase" = cleanup ]; then
-    essential_options=(-o APT::Get::allow-remove-essential=false -o APT::Force-LoopBreak=false)
+    cleanup_permission=$(crossgrade_bookworm_output_protected_removal_permission) || return 1
+    essential_options=(-o "APT::Get::allow-remove-essential=$cleanup_permission" -o APT::Force-LoopBreak=false)
   fi
   cache=$(mktemp -d "$directory/$phase.XXXXXX") || return 1
   mkdir "$cache/partial" || return 1
@@ -3778,6 +3807,7 @@ function crossgrade_bookworm_download() {
     if LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
       -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false "${essential_options[@]}" --fix-broken --simulate install "$@" \
       > "$directory/$phase.plan" 2>&1; then break; fi
+    [ "$phase" != cleanup ] || echo "dss:error: APT could not simulate foreign-package cleanup; inspect $directory/$phase.plan." >&2
     # APT 2.6 can omit new direct dependencies while repairing a broken crossgrade.
     [ "$phase" = remaining ] && [ "$retries" -lt 8 ] || return 1
     retries=$((retries+1))
@@ -3949,7 +3979,7 @@ function crossgrade_bookworm_apache_handoff() {
 }
 
 # Recovery compares contents; package-created timestamps do not invalidate it.
-function crossgrade_bookworm_bootstrap_configuration() {
+function crossgrade_bookworm_output_config_signature() {
 (
   local path
   [ -z "${APT_CONFIG:-}${DPKG_ADMINDIR:-}${DPKG_ROOT:-}" ] || return 1
@@ -3993,7 +4023,7 @@ function crossgrade_bookworm_record_archives() {
     fi
     sha256sum -- "${archives[@]}" > "$directory/$phase.sha256.new" &&
       mv "$directory/$phase.sha256.new" "$directory/$phase.sha256" || exit 1
-    crossgrade_bookworm_bootstrap_configuration > "$directory/$phase.configuration.new" &&
+    crossgrade_bookworm_output_config_signature > "$directory/$phase.configuration.new" &&
       mv "$directory/$phase.configuration.new" "$directory/$phase.configuration" || exit 1
     sha256sum -- "$directory/$phase.archives" "$directory/$phase.cache" "$directory/$phase.arguments" \
       "$directory/$phase.plan" "$directory/$phase.installed" "$directory/$phase.targets" \
@@ -4048,7 +4078,7 @@ function crossgrade_bookworm_apply_archives() {
   elif [ "$phase" = remaining ]; then
     echo 'dss:error: Remaining crossgrade archives have no verified replay metadata; use a trusted console to inspect or restore the system.' >&2; return 1
   fi
-  configuration=$(crossgrade_bookworm_bootstrap_configuration) || return 1
+  configuration=$(crossgrade_bookworm_output_config_signature) || return 1
   [ "$configuration" = "$(cat "$directory/$phase.configuration")" ] || {
     echo 'dss:error: APT configuration or source contents changed after package conversion started; review cached recovery manually.' >&2; return 1;
   }
@@ -4113,10 +4143,6 @@ function crossgrade_bookworm_apply_archives() {
     else status=$?; [ "$status" -eq 1 ] || return 1; fi
   done
   (umask 077; : > "$directory/$phase.completed") || return 1
-}
-
-function crossgrade_bookworm_apply_bootstrap() {
-  crossgrade_bookworm_apply_archives "$1" bootstrap "${2:-false}"
 }
 
 function crossgrade_bookworm_recover_bootstrap() {
@@ -4184,6 +4210,13 @@ function crossgrade_bookworm_can_retain_legacy() {
         case "$package" in libapt-inst1.5|libapt-pkg4.12) :;; *) return 1;; esac;;
       /usr/lib/ssl/engines/*.so) [ "$package" = libssl0.9.8 ] || return 1;;
       /usr/lib/i386-linux-gnu/openssl-1.0.0/engines/*.so) [ "$package" = libssl1.0.0 ] || return 1;;
+      /usr/lib/i386-linux-gnu/openssl-1.0.2/engines/*.so) [ "$package" = libssl1.0.2 ] || return 1;;
+      /usr/share/locale/*/LC_MESSAGES/gnutls-deb0-28.mo|/usr/share/locale/*/LC_MESSAGES/libgnutls26.mo)
+        case "$package:${file##*/}" in libgnutls-deb0-28:gnutls-deb0-28.mo|libgnutls26:libgnutls26.mo) :;; *) return 1;; esac;;
+      /usr/lib/libdb-[0-9]*.so|/usr/lib/i386-linux-gnu/libdb-[0-9]*.so)
+        case "$package" in libdb[0-9]*) :;; *) return 1;; esac
+        [ -f "$file" ] || return 1
+        existing_library=true;;
       /lib/sysvinit/init|/lib/sysvinit/telinit) [ "$package" = sysvinit ] || return 1;;
       /lib/*.so.[0-9]*|/usr/lib/*.so.[0-9]*)
         case "$package:$multi_arch" in lib*:*|*:same) :;; *) return 1;; esac
@@ -4205,14 +4238,15 @@ function upgrade_output_crossgrade_obsolete_packages() {
   packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n') || return 1
   printf '%s\n' "$packages" | awk -F '\t' '
     $1 == "install ok installed" && $3 == "i386" &&
-      ($2 ~ /^gcc-(4\.[0-9]+|[5-9]|10)$/ || $2 ~ /^(liblensfun0|liblvm2cmd2\.02|mysql-client)$/) { print $2 }
+      ($2 ~ /^(gcc|cpp)-(4\.[0-9]+|[5-9]|10)$/ || $2 ~ /^libgcc-(4\.[0-9]+|[5-9]|10)-dev$/ || $2 ~ /^(liblensfun0|liblvm2cmd2\.02|libssl1\.0\.2|metamail|ufraw-batch|mysql-client)$/) { print $2 }
   '
 }
 
 # Default removal still requires verified compiler roles, library/doc payloads and a backup.
 function crossgrade_bookworm_prepare_obsolete() {
-  local compiler_pattern='^gcc-[0-9]+([.][0-9]+)?$'
-  local directory=$1 blockers=$2 remove=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} package dependency reason packages
+  local compiler_pattern='^(gcc|cpp)-[0-9]+([.][0-9]+)?$|^libgcc-[0-9]+([.][0-9]+)?-dev$'
+  local directory=$1 blockers=$2 remove=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} package dependency reason packages compiler_role
+  local -a obsolete_packages=()
   case "$remove" in true|false) :;; *) echo 'dss:error: REMOVE_OBSOLETE_CROSSGRADE_PACKAGES must be true or false.' >&2; return 1;; esac
   [ -n "$blockers" ] || return 0
   while IFS=$'\t' read -r package dependency reason; do
@@ -4228,19 +4262,26 @@ function crossgrade_bookworm_prepare_obsolete() {
     awk -F '\t' -v package="$package" '$1 == package { found=1 } END { exit !found }' "$directory/retained-i386" || return 1
     awk -F '\t' -v package="$package" '$1 == "install ok installed" && $2 == package && $3 == "i386" && $5 != "yes" { found=1 } END { exit !found }' "$directory/original.packages" || return 1
     if [[ "$package" =~ $compiler_pattern ]]; then
-      # A versioned compiler can retire only when its current default role is converted.
-      awk -F '\t' '$1 == "gcc" { found=1 } END { exit !found }' "$directory/targets" || return 1
+      # Retired compiler components need their current default compiler/preprocessor converted.
+      compiler_role=gcc
+      case "$package" in cpp-*) compiler_role=cpp;; esac
+      awk -F '\t' -v role="$compiler_role" '$1 == role { found=1 } END { exit !found }' "$directory/targets" || return 1
+    elif [ "$package" = metamail ] || [ "$package" = ufraw-batch ]; then
+      # These retired Debian utilities have no native Bookworm package; keep service/data guards.
+      upgrade_obsolete_output_safe_package "$package:i386" i386 true "$directory/original.packages" >/dev/null || return 1
     else
       # Force payload inspection even for old optional packages; unknown executables stay manual.
       crossgrade_bookworm_can_retain_legacy "$package" no required no "$directory/original.packages" || {
         echo "dss:error: Obsolete package $package has an unverified payload; remove or migrate it manually." >&2; return 1;
       }
     fi
+    obsolete_packages+=("$package:i386")
   done <<< "$packages"
   if [ ! -s "$directory/pre-crossgrade.tar.gz" ] || [ -L "$directory/pre-crossgrade.tar.gz" ] || ! tar -tzf "$directory/pre-crossgrade.tar.gz" >/dev/null; then
     echo 'dss:error: Verified original configuration/package backup is required before obsolete package removal.' >&2
     return 1
   fi
+  upgrade_packages_backup_modified_files "$directory" "${obsolete_packages[@]}" || { echo "dss:error: Cannot preserve local package-file changes before crossgrade obsolete cleanup; removal stopped. Review $directory." >&2; return 1; }
   (
     umask 077
     printf '%s\n' "$blockers" > "$directory/obsolete.dependencies.new" || exit 1
@@ -4319,7 +4360,7 @@ function crossgrade_bookworm_output_foreign_replacements() {
 
 function crossgrade_debian_bookworm() {
   local apt_state_cache_disabled=true current native file
-  local baseline directory package installed_version essential priority multi_arch candidate status audit version oldmark held cache attempt foreign_replacements retained_blockers obsolete_removals foreign_packages removed_obsolete
+  local baseline directory package installed_version essential priority multi_arch candidate status audit version oldmark held cache attempt foreign_replacements retained_blockers obsolete_removals foreign_packages removed_obsolete cleanup_permission
   # The download checker reads only the removals verified for this invocation.
   local crossgrade_obsolete_approved=/dev/null
   local -a arguments=()
@@ -4469,7 +4510,7 @@ function crossgrade_debian_bookworm() {
     while IFS=$'\t' read -r package version status file; do archives+=("$file"); done < "$directory/bootstrap.archives"
     [ "${#archives[@]}" -gt 0 ] || { echo 'dss:error: No verified bootstrap archives downloaded.' >&2; return 1; }
     crossgrade_bookworm_record_archives "$directory" bootstrap || return 1
-    crossgrade_bookworm_apply_bootstrap "$directory" true || return 1
+    crossgrade_bookworm_apply_archives "$directory" bootstrap true || return 1
     apt_get_update || return 1
   fi
   if [ ! -f "$directory/remaining.completed" ]; then
@@ -4481,6 +4522,13 @@ function crossgrade_debian_bookworm() {
     crossgrade_bookworm_apply_archives "$directory" remaining true || return 1
   fi
   crossgrade_bookworm_check_package_tools || return 1
+  if [ "$(od -An -tu1 -j4 -N1 /proc/1/exe 2>/dev/null | tr -d ' ')" != 2 ]; then
+    systemctl daemon-reexec || return 1
+    for attempt in 1 2 3 4 5; do
+      [ "$(od -An -tu1 -j4 -N1 /proc/1/exe 2>/dev/null | tr -d ' ')" != 2 ] || break
+      [ "$attempt" -eq 5 ] || sleep 1
+    done
+  fi
   # Rebuild a fresh cleanup plan; never execute the raw download plan or its removal requests.
   dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n' > "$directory/installed" || return 1
   arguments=()
@@ -4512,9 +4560,10 @@ function crossgrade_debian_bookworm() {
   [ "${#arguments[@]}" -gt 0 ] || return 1
   cache=$(cat "$directory/cleanup.cache") || return 1
   crossgrade_bookworm_apache_handoff "$directory" prepare || return 1
+  cleanup_permission=$(crossgrade_bookworm_output_protected_removal_permission) || return 1
   LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
     -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false -o Dir::Cache::archives="$cache" \
-    -o APT::Get::allow-remove-essential=false -o APT::Force-LoopBreak=false \
+    -o "APT::Get::allow-remove-essential=$cleanup_permission" -o APT::Force-LoopBreak=false \
     --no-download --fix-broken install "${arguments[@]}" || return 1
   # Restore converted native packages in one APT load; leave foreign/all marks unchanged.
   local auto_marks
@@ -4540,13 +4589,6 @@ function crossgrade_debian_bookworm() {
   fi
   if [ "${#converted_auto[@]}" -gt 0 ]; then
     apt-mark auto "${converted_auto[@]}" || return 1
-  fi
-  if [ "$(od -An -tu1 -j4 -N1 /proc/1/exe 2>/dev/null | tr -d ' ')" != 2 ]; then
-    systemctl daemon-reexec || return 1
-    for attempt in 1 2 3 4 5; do
-      [ "$(od -An -tu1 -j4 -N1 /proc/1/exe 2>/dev/null | tr -d ' ')" != 2 ] || break
-      [ "$attempt" -eq 5 ] || sleep 1
-    done
   fi
   crossgrade_bookworm_check_completion "$directory" || return 1
   crossgrade_bookworm_apache_handoff "$directory" finish || return 1
@@ -5200,6 +5242,86 @@ function upgrade_obsolete_payload_is_documentation() {
   $found
 }
 
+# Package cleanup keeps local edits in a private tree rather than renaming active files.
+function upgrade_packages_backup_modified_files() {
+(
+  local directory=$1 attempt package files file checksum_file conffiles expected actual relative parent probe reason original_file lookup_file
+  local modified=0 unverified=0
+  local package_pattern='^[a-z0-9][a-z0-9+.-]*(:[a-z0-9][a-z0-9-]*)?$'
+  shift
+  [ "$#" -gt 0 ] || return 0
+  [ ! -L "$directory" ] && [ "$(stat -c '%u:%a' -- "$directory")" = 0:700 ] || return 1
+  umask 077
+  attempt=$(mktemp -d "$directory/modified-files.XXXXXX") || return 1
+  mkdir -m 700 -- "$attempt/root" && chmod 700 -- "$attempt" "$attempt/root" || return 1
+  : > "$attempt/preserved.tsv" && chmod 600 -- "$attempt/preserved.tsv" || return 1
+  for package in "$@"; do
+    [[ "$package" =~ $package_pattern ]] || return 1
+    files=$(LC_ALL=C dpkg-query -L "$package") || return 1
+    conffiles=$(LC_ALL=C dpkg-query -W -f='${Conffiles}\n' "$package") || return 1
+    checksum_file=$(LC_ALL=C dpkg-query --control-path "$package" md5sums 2>/dev/null) || checksum_file=
+    if [ -z "$checksum_file" ]; then
+      for file in "/var/lib/dpkg/info/$package.md5sums" "/var/lib/dpkg/info/${package%:*}.md5sums"; do
+        if [ -f "$file" ]; then checksum_file=$file; break; fi
+      done
+    fi
+    [ -z "$checksum_file" ] || [ -f "$checksum_file" ] || return 1
+    original_file=
+    while IFS= read -r file; do
+      # Diversions relocate package files; another package's saved files have unknown defaults.
+      case "$file" in
+        'package diverts others to: '*) file=${file#* to: }; lookup_file=;;
+        'locally diverted to: '*|'diverted by '*' to: '*)
+          [ -n "$original_file" ] || return 1
+          file=${file#* to: }; lookup_file=$original_file;;
+        *) original_file=$file; lookup_file=$file;;
+      esac
+      case "$file" in /.) continue;; *'/../'*|*'/./'*|*/..|*/.|[!/]*) return 1;; /*) :;; *) return 1;; esac
+      if [ -d "$file" ] && [ ! -L "$file" ]; then continue; fi
+      # Merged-/usr aliases are shared directories, not package-specific file edits.
+      case "$file" in /bin|/sbin|/lib|/lib32|/lib64) [ ! -d "$file" ] || continue;; esac
+      if [ ! -e "$file" ] && [ ! -L "$file" ]; then continue; fi
+      expected=; reason=unverified
+      if [ ! -L "$file" ]; then
+        [ -f "$file" ] || return 1
+        if [ -n "$checksum_file" ] && [ -n "$lookup_file" ]; then
+          expected=$(awk -v path="${lookup_file#/}" 'substr($0,35) == path { print substr($0,1,32); exit }' "$checksum_file") || return 1
+        fi
+        if [ -z "$expected" ] && [ -n "$lookup_file" ]; then
+          expected=$(awk -v path="$lookup_file" '$1 == path { print $2; exit }' <<< "$conffiles") || return 1
+        fi
+        case "$expected" in *[!0-9a-fA-F]*) expected=;; esac
+        if [ "${#expected}" -eq 32 ]; then
+          actual=$(md5sum -- "$file") || return 1
+          [ "${actual%% *}" != "$expected" ] || continue
+          reason=modified
+        fi
+      fi
+      # Package file lists can include children of shared directory aliases; preserve their real parents.
+      parent=$(dirname -- "$file") || return 1
+      parent=$(readlink -f -- "$parent") || return 1
+      case "$parent" in /*) :;; *) return 1;; esac
+      relative=${parent#/}/${file##*/}; relative=${relative#/}
+      parent=$(dirname -- "$relative") || return 1
+      probe=$parent
+      while [ "$probe" != . ]; do
+        [ ! -L "$attempt/root/$probe" ] || { echo "dss:error: Symlinked backup parent; preserving packages for review: $attempt/root/$probe" >&2; return 1; }
+        case "$probe" in */*) probe=${probe%/*};; *) break;; esac
+      done
+      mkdir -p -- "$attempt/root/$parent" || return 1
+      if [ ! -e "$attempt/root/$relative" ] && [ ! -L "$attempt/root/$relative" ]; then
+        cp -a -- "$file" "$attempt/root/$relative" || return 1
+      fi
+      printf '%s\t%s\t%s\t%s\n' "$package" "$reason" "$file" "/$relative" >> "$attempt/preserved.tsv" || return 1
+      case "$reason" in modified) modified=$((modified+1));; *) unverified=$((unverified+1));; esac
+    done <<< "$files"
+  done
+  if [ "$modified:$unverified" != 0:0 ]; then
+    echo "dss:stage: Preserved $modified locally modified package files and $unverified files without reliable checksums in $attempt/root" >&2
+  fi
+)
+}
+
 # Status 3 preserves a protected package; metadata failures remain fatal.
 function upgrade_obsolete_output_safe_package() {
   local package=$1 native=$2 qualified_packages=$3 inventory=$4 query_package files file logcheck documentation_only=false status
@@ -5399,6 +5521,7 @@ function upgrade_remove_obsolete_packages() {
     -o APT::Get::AutomaticRemove=false --simulate remove "${selected[@]}" > "$attempt/final.plan" 2>&1 || return 1
   upgrade_obsolete_output_removals "$attempt/final.plan" <(printf '%s\n' "$removals" | tr ':' '\t') "$native" > "$attempt/removals.requested" || return 1
   [ "$(LC_ALL=C sort "$attempt/removals.requested")" = "$(printf '%s\n' "$removals" | LC_ALL=C sort)" ] || return 1
+  upgrade_packages_backup_modified_files "$attempt" "${selected[@]}" || { echo "dss:error: Cannot preserve local package-file changes before obsolete cleanup; removal stopped. Review $attempt." >&2; return 1; }
   (umask 077; tar -C / -czpf "$attempt/configuration.tar.gz" etc) || return 1
   current_signature=$(apt_state_output_signature packages) || return 1
   if [ -z "$current_signature" ] || [ "$current_signature" != "$signature" ]; then
@@ -5516,6 +5639,7 @@ function upgrade_autoremove_packages() {
     -o APT::Get::AutomaticRemove=false --simulate remove "${selected[@]}" > "$directory/plan.final" 2>&1 || return 1
   upgrade_obsolete_output_removals "$directory/plan.final" "$directory/safe" "$native" > "$directory/removals.final" || return 1
   [ "$(LC_ALL=C sort "$directory/removals.final")" = "$(LC_ALL=C sort "$directory/removals.protected")" ] || return 1
+  upgrade_packages_backup_modified_files "$directory" "${selected[@]}" || { echo "dss:error: Cannot preserve local package-file changes before autoremove; removal stopped. Review $directory." >&2; return 1; }
   (umask 077; tar -C / -czpf "$directory/configuration.tar.gz" etc) || return 1
   current_signature=$(apt_state_output_signature packages) || return 1
   if [ -z "$current_signature" ] || [ "$current_signature" != "$signature" ]; then
@@ -5715,8 +5839,8 @@ function tweak_broken_configs() {
     # not debian-ish
     if ! which dpkg >/dev/null 2>&1; then break; fi
 
-    # mysql server of some version is installed.  done
-    if dpkg -l | egrep -qai '^ii.*mysql-server|^ii.*mariadb-server'; then break; fi
+    # Core binaries alone do not provide the server service or its upgrade scripts.
+    if dpkg -l | egrep -qai '^ii[[:space:]]+(mysql|mariadb)-server(-[0-9]+([.][0-9]+)*)?(:[a-z0-9-]+)?[[:space:]]'; then break; fi
 
     # skip if they never had a mysql server installed.  don't skip if they had an rc=removed,configured
     # if they had mysql they'll have something like:
@@ -5731,9 +5855,8 @@ function tweak_broken_configs() {
     # no mysql conf dir, quit
     if [ ! -d /etc/mysql ]; then break; fi
 
-    echo "dss:info: MySQL appears to have been installed, but no longer present.  This can happen between debian 8 and debian 9.  As mysql is replaced by mariadb.  Attempting to install mysql-server which would pull in mariadb."
     dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:pre:" $0}'
-    local dbpgk=
+    local dbpkg=
     local dbpkgret=0
     if dpkg -l | egrep ii | egrep -qai 'mariadb'; then
       dbpkg=mariadb-server
@@ -5741,6 +5864,7 @@ function tweak_broken_configs() {
       dbpkg=mysql-server
     fi
     if [ ! -z "$dbpkg" ]; then
+      echo "dss:stage: Restoring missing database server package $dbpkg from the current release"
       apt_get_install $dbpkg
       dbpkgret=$?
       if [ $dbpkgret -ne 0 ]; then
@@ -5816,7 +5940,10 @@ function debian_check_release_completion() {
     return 1
   fi
   # This check must remain read-only: do not run upgrade_precondition_checks (REMOVEX11 can remove packages).
-  apt_sources_check_releases_and_vendors || return 1
+  if ! apt_sources_check_releases_and_vendors; then
+    echo "dss:error: Debian $target completion check blocked by APT source policy; review the repository warnings above; package verification has not run." >&2
+    return 1
+  fi
   if ! audit=$(LC_ALL=C dpkg --audit 2>&1); then
     printf '%s\n' "$audit" >&2
     echo "dss:error: Cannot verify Debian $target package state. Review dpkg errors, repair with --dist-update, then retry the release command." >&2
@@ -6754,7 +6881,7 @@ function dist_upgrade_to_latest() {
 # shellcheck shell=bash
 # Manifest collection is read-only: parse configuration and application metadata, never run application code.
 function manifest_json_string() {
-  local value="$1" character escaped i
+  local value="$1" character i
   printf '"'
   for ((i=0; i<${#value}; i++)); do
     character=${value:i:1}
@@ -6766,8 +6893,7 @@ function manifest_json_string() {
       $'\t') printf '\\t' ;;
       *)
         if [[ "$character" < ' ' ]]; then
-          printf -v escaped '\\u%04x' "'$character"
-          printf '%s' "$escaped"
+          printf '\\u%04x' "'$character"
         else
           printf '%s' "$character"
         fi ;;
@@ -6969,7 +7095,6 @@ function manifest_fpm_pools() {
   local file pool socket user version
   while IFS= read -r file; do
     version=${file#"$manifest_root"/etc/php/}; version=${version%%/*}
-    [ "$version" != "$file" ] || version=unknown
     case "$file" in */etc/php5/*) version=5 ;; */etc/php-fpm.d/*) version=unknown ;; esac
     while IFS=$'\t' read -r pool socket user; do
       manifest_fpm_sockets+=("$socket")

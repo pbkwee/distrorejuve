@@ -1551,7 +1551,7 @@ function upgrade_php_is_obsolete_extension_meta() {
     END { exit !found }
   ' <<< "$packages" || return 1
   files=$(dpkg-query -L "$package") || return 2
-  upgrade_obsolete_payload_is_documentation "$package" "$files"
+  upgrade_cleanup_payload_is_documentation "$package" "$files"
 }
 
 function upgrade_migrate_php_packages() {
@@ -4322,7 +4322,7 @@ function crossgrade_bookworm_prepare_obsolete() {
       awk -F '\t' -v role="$compiler_role" '$1 == role { found=1 } END { exit !found }' "$directory/targets" || return 1
     elif [ "$package" = metamail ] || [ "$package" = ufraw-batch ]; then
       # These retired Debian utilities have no native Bookworm package; keep service/data guards.
-      upgrade_obsolete_output_safe_package "$package:i386" i386 true "$directory/original.packages" >/dev/null || return 1
+      upgrade_cleanup_output_safe_package "$package:i386" i386 true "$directory/original.packages" >/dev/null || return 1
     else
       # Force payload inspection even for old optional packages; unknown executables stay manual.
       crossgrade_bookworm_can_retain_legacy "$package" no required no "$directory/original.packages" || {
@@ -5170,11 +5170,11 @@ function remove_cruft_packages() {
 function apt_packages_output_inventory() {
 (
   set -o pipefail
-  LC_ALL=C dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\t${Section}\t${Description}\n' |
+  LC_ALL=C dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\t${Description}\n' |
     awk -F '\t' -v OFS='\t' '
       $1 ~ / not-installed$/ { next }
       $1 ~ /^[a-z-]+ [a-z-]+ [a-z-]+$/ && $2 ~ /^[a-z0-9][a-z0-9+.-]*$/ && $3 ~ /^[a-z0-9][a-z0-9-]*$/ && $4 != "" {
-        print $1, $2, $3, $4, $5, $6, $7, $8; next
+        print $1, $2, $3, $4, $5, $6, $7; next
       }
       /^[ \t]/ || !NF { next }
       { bad=1 }
@@ -5185,7 +5185,7 @@ function apt_packages_output_inventory() {
 
 # Report from existing indexes only; this deliberately does not use the mutating cruft helpers.
 # Existing indexes only: package, query architecture, version, URI, suite/component.
-function apt_packages_output_archives() {
+function apt_packages_output_repository_versions() {
   local inventory=$1 native=$2 directory=$3 architecture package arch status _ architectures
   architectures=$(awk -F '\t' -v native="$native" '$1 ~ / installed$/ { print ($3 == "all" ? native : $3) }' "$inventory" | LC_ALL=C sort -u) || return 1
   for architecture in $architectures; do
@@ -5215,8 +5215,8 @@ function apt_packages_output_archives() {
   done
 }
 
-# An exact installed version must occur only at matching active official sources.
-function upgrade_obsolete_output_provenance() {
+# List installed versions that match official repositories, excluding ambiguous vendor matches.
+function apt_packages_output_official_installed_versions() {
   local family=$1 release=$2 native=$3 sources=$4 inventory=$5 archive_records=$6
   awk -F '\t' -v OFS='\t' -v family="$family" -v release="$release" -v native="$native" '
     # Old APT removes path, credentials and port from index descriptions.
@@ -5262,20 +5262,20 @@ function apt_packages_output_classifications() {
     FILENAME == ARGV[2] { previous[$1 SUBSEP $2 SUBSEP $3]=1; next }
     FILENAME == ARGV[3] { current[$1 SUBSEP $2 SUBSEP $3]=1; next }
     {
-      key=$2 SUBSEP $3; class=""; reason=""
+      version_key=$2 SUBSEP $3 SUBSEP $4
       if ($1 ~ / not-installed$/) next
       if ($1 ~ / config-files$/) {
         class="residual-config"; reason="removed package retains configuration; purge safety is unverified"
       } else if ($1 !~ /^(install|hold) ok installed$/) {
         class="incomplete"; reason="package state or pending selection requires review"
       } else if (!(($2 SUBSEP ($3 == "all" ? native : $3)) in available)) {
-        if ((key SUBSEP $4) in previous) {
+        if (version_key in previous) {
           class="obsolete"; reason="installed version matched the previous official release; no binary version in current indexes"
         } else {
           class="unavailable"; reason="no binary version in current indexes; official origin is unverified"
         }
       # oldlibs alone includes real libraries; use only the installed short description.
-      } else if ((key SUBSEP $4) in current && tolower($8) ~ /(^|[^a-z])(transitional( dummy)?|dummy( transitional)?) package([^a-z]|$)/) {
+      } else if (version_key in current && tolower($7) ~ /(^|[^a-z])(transitional( dummy)?|dummy( transitional)?) package([^a-z]|$)/) {
         class="transitional"; reason="official installed version describes a transitional package; replacement and removal safety need review"
       } else {
         class="available"; reason="binary version exists in current indexes"
@@ -5285,7 +5285,7 @@ function apt_packages_output_classifications() {
   ' "$archive_records" "$previous_provenance" "$current_provenance" "$inventory"
 }
 
-function upgrade_obsolete_prepare() {
+function upgrade_record_package_origins() {
 (
   umask 077
   set -o pipefail
@@ -5302,15 +5302,15 @@ function upgrade_obsolete_prepare() {
   printf '%s\n' "$native" > "$directory/native" || return 1
   apt_sources_list > "$directory/sources.before" || return 1
   apt_packages_output_inventory > "$directory/packages.before" || return 1
-  apt_packages_output_archives "$directory/packages.before" "$native" "$directory" > "$directory/archives.before" || return 1
-  upgrade_obsolete_output_provenance "$family" "$from" "$native" "$directory/sources.before" "$directory/packages.before" "$directory/archives.before" \
+  apt_packages_output_repository_versions "$directory/packages.before" "$native" "$directory" > "$directory/archives.before" || return 1
+  apt_packages_output_official_installed_versions "$family" "$from" "$native" "$directory/sources.before" "$directory/packages.before" "$directory/archives.before" \
     > "$directory/provenance" || return 1
   : > "$directory/prepared"
 )
 }
 
 # Reject package installation/configuration; status 3 identifies unapproved removals for the bounded fallback.
-function upgrade_obsolete_output_removals() {
+function upgrade_cleanup_output_removals() {
   local plan=$1 allowed=$2 native=$3
   awk -F '\t' -v native="$native" '
     FILENAME == ARGV[1] { allowed[$1 ":" $2]=1; next }
@@ -5329,7 +5329,7 @@ function upgrade_obsolete_output_removals() {
 }
 
 # Base/transitional exceptions allow documentation; MariaDB may retain its exact obsolete logcheck filters.
-function upgrade_obsolete_payload_is_documentation() {
+function upgrade_cleanup_payload_is_documentation() {
   local package=${1%:*} files=$2 logcheck=${3:-} file found=false
   while IFS= read -r file; do
     [ -n "$file" ] || continue
@@ -5426,7 +5426,7 @@ function upgrade_packages_backup_modified_files() {
 }
 
 # Status 3 preserves a protected package; metadata failures remain fatal.
-function upgrade_obsolete_output_safe_package() {
+function upgrade_cleanup_output_safe_package() {
   local package=$1 native=$2 qualified_packages=$3 inventory=$4 query_package files file logcheck documentation_only=false status
   local gcc_base_pattern='^gcc-[0-9]+([.][0-9]+)?-base$' mariadb_transition_pattern='^mariadb-server-[0-9]+([.][0-9]+)+$'
   case "${package%:*}" in
@@ -5449,7 +5449,7 @@ function upgrade_obsolete_output_safe_package() {
   if $documentation_only || [[ "${package%:*}" =~ $gcc_base_pattern ]]; then
     logcheck=
     if $documentation_only; then logcheck=${package%:*}; logcheck=${logcheck//./_}; fi
-    if ! upgrade_obsolete_payload_is_documentation "$package" "$files" "$logcheck"; then
+    if ! upgrade_cleanup_payload_is_documentation "$package" "$files" "$logcheck"; then
       echo "dss:warn: Preserving unverified base/transitional payload for $package." >&2; return 3
     fi
   fi
@@ -5472,7 +5472,7 @@ function upgrade_cleanup_record() {
   (umask 077; printf '%s\t%s\t%s\t%s\n' "$1" "$2" "${3:--}" "${4:-}" >> "$file")
 }
 
-function upgrade_remove_obsolete_packages() {
+function upgrade_remove_retired_packages() {
 (
   local package_umask
   package_umask=$(umask) || return 1
@@ -5507,23 +5507,21 @@ function upgrade_remove_obsolete_packages() {
   [ -n "$signature" ] || return 1
   apt_sources_list > "$attempt/sources" || return 1
   apt_packages_output_inventory > "$attempt/packages" || return 1
-  apt_packages_output_archives "$attempt/packages" "$native" "$attempt" > "$attempt/archives" || return 1
-  upgrade_obsolete_output_provenance "$family" "$to" "$native" "$attempt/sources" "$attempt/packages" "$attempt/archives" > "$attempt/provenance" || return 1
-  # Current official dependencies may autoremove; absent names need their original exact proof.
-  awk -F '\t' -v OFS='\t' -v native="$native" '
-    FILENAME == ARGV[1] { original[$1 SUBSEP $2]=$3; next }
+  apt_packages_output_repository_versions "$attempt/packages" "$native" "$attempt" > "$attempt/archives" || return 1
+  apt_packages_output_official_installed_versions "$family" "$to" "$native" "$attempt/sources" "$attempt/packages" "$attempt/archives" > "$attempt/provenance" || return 1
+  apt_packages_output_classifications "$attempt/packages" "$native" "$attempt/archives" "$directory/provenance" "$attempt/provenance" \
+    > "$attempt/classifications" || return 1
+  # Removal closures may include current official dependencies; unknown packages stay protected.
+  awk -F '\t' -v OFS='\t' '
+    FILENAME == ARGV[1] { if ($4 == "obsolete") retired[$1 SUBSEP $2]=$3; next }
     FILENAME == ARGV[2] { current[$1 SUBSEP $2]=$3; next }
-    FILENAME == ARGV[3] { available[$1 SUBSEP $2]=1; next }
     $1 == "install ok installed" && $5 != "yes" {
-      key=$2 SUBSEP $3
-      obsolete=((key in original) && $4 == original[key] && !(($2 SUBSEP ($3 == "all" ? native : $3)) in available))
+      key=$2 SUBSEP $3; obsolete=(retired[key] == $4)
       # Retired GCC base packages can be required despite containing only documentation.
       if (($6 != "required" && $6 != "important") || (obsolete && $2 ~ /^gcc-[0-9]+([.][0-9]+)?-base$/))
         if ($4 == current[key] || obsolete) print $2, $3, $4
     }
-  ' "$directory/provenance" "$attempt/provenance" "$attempt/archives" "$attempt/packages" > "$attempt/eligible" || return 1
-  apt_packages_output_classifications "$attempt/packages" "$native" "$attempt/archives" "$directory/provenance" "$attempt/provenance" \
-    > "$attempt/classifications" || return 1
+  ' "$attempt/classifications" "$attempt/provenance" "$attempt/packages" > "$attempt/eligible" || return 1
   awk -F '\t' '$4 == "obsolete" { print $1 ":" $2 }' "$attempt/classifications" > "$attempt/obsolete" || return 1
   while IFS= read -r package; do
     [ -n "$package" ] || continue
@@ -5556,7 +5554,7 @@ function upgrade_remove_obsolete_packages() {
       ' "$attempt/eligible" "$attempt/obsolete" > "$attempt/obsolete.candidates" || return 1
       while IFS=$'\t' read -r name architecture version; do
         package="$name:$architecture"
-        if upgrade_obsolete_output_safe_package "$package" "$native" "$qualified_packages" "$attempt/packages" > /dev/null; then
+        if upgrade_cleanup_output_safe_package "$package" "$native" "$qualified_packages" "$attempt/packages" > /dev/null; then
           printf '%s\t%s\t%s\n' "$name" "$architecture" "$version" >> "$allowed" || return 1
           # Packages omitted from this private file are manual roots during simulation only.
           printf 'Package: %s\nArchitecture: %s\nAuto-Installed: 1\n\n' "$name" "$architecture" >> "$attempt/extended_states" || return 1
@@ -5577,7 +5575,7 @@ function upgrade_remove_obsolete_packages() {
     rejection=
     LC_ALL=C apt-get "${options[@]}" "${planning_options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
       -o APT::Get::AutomaticRemove="$planning_automatic" --simulate remove "${planning_packages[@]}" > "$plan" 2>&1 || return 1
-    if removals=$(upgrade_obsolete_output_removals "$plan" "$allowed" "$native"); then :
+    if removals=$(upgrade_cleanup_output_removals "$plan" "$allowed" "$native"); then :
     else
       status=$?
       if [ "$status" -ne 3 ]; then
@@ -5602,7 +5600,7 @@ function upgrade_remove_obsolete_packages() {
         return 0
       fi
       while IFS= read -r package; do
-        if query_package=$(upgrade_obsolete_output_safe_package "$package" "$native" "$qualified_packages" "$attempt/packages"); then selected+=("$query_package")
+        if query_package=$(upgrade_cleanup_output_safe_package "$package" "$native" "$qualified_packages" "$attempt/packages"); then selected+=("$query_package")
         else
           status=$?
           [ "$status" -eq 3 ] || return 1
@@ -5620,7 +5618,7 @@ function upgrade_remove_obsolete_packages() {
   # Recheck exact explicit removals with autoremove disabled before allowing package changes.
   LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
     -o APT::Get::AutomaticRemove=false --simulate remove "${selected[@]}" > "$attempt/final.plan" 2>&1 || return 1
-  upgrade_obsolete_output_removals "$attempt/final.plan" <(printf '%s\n' "$removals" | tr ':' '\t') "$native" > "$attempt/removals.requested" || return 1
+  upgrade_cleanup_output_removals "$attempt/final.plan" <(printf '%s\n' "$removals" | tr ':' '\t') "$native" > "$attempt/removals.requested" || return 1
   [ "$(LC_ALL=C sort "$attempt/removals.requested")" = "$(printf '%s\n' "$removals" | LC_ALL=C sort)" ] || return 1
   upgrade_packages_backup_modified_files "$attempt" "${selected[@]}" || { echo "dss:error: Cannot preserve local package-file changes before obsolete cleanup; removal stopped. Review $attempt." >&2; return 1; }
   (umask 077; tar -C / -czpf "$attempt/configuration.tar.gz" etc) || return 1
@@ -5687,7 +5685,7 @@ function upgrade_autoremove_packages() {
   umask "$package_umask"
   LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
     -o APT::Get::AutomaticRemove=true --simulate remove > "$directory/plan.auto" 2>&1 || return 1
-  removals=$(upgrade_obsolete_output_removals "$directory/plan.auto" "$directory/installed" "$native") || {
+  removals=$(upgrade_cleanup_output_removals "$directory/plan.auto" "$directory/installed" "$native") || {
     echo "dss:error: Autoremove proposed non-removal work or packages outside the installed snapshot. Review $directory/plan.auto." >&2; return 1;
   }
   if [ -z "$removals" ]; then printf 'autoremove\tnone\t-\tno unused packages\n' > "$directory/outcomes"; return $?; fi
@@ -5702,7 +5700,7 @@ function upgrade_autoremove_packages() {
     else case "$priority" in required|important) reason="priority $priority";; esac
     fi
     if [ -z "$reason" ]; then
-      if upgrade_obsolete_output_safe_package "$package" "$native" "$qualified_packages" "$directory/packages.before" > /dev/null 2> "$directory/reason"; then :
+      if upgrade_cleanup_output_safe_package "$package" "$native" "$qualified_packages" "$directory/packages.before" > /dev/null 2> "$directory/reason"; then :
       else
         status=$?; cat "$directory/reason" >&2 || return 1
         [ "$status" -eq 3 ] || return 1
@@ -5722,7 +5720,7 @@ function upgrade_autoremove_packages() {
   LC_ALL=C apt-get "${options[@]}" -o Dir::State::extended_states="$directory/extended_states" \
     -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false -o APT::Get::AutomaticRemove=true \
     --simulate remove > "$directory/plan.protected" 2>&1 || return 1
-  removals=$(upgrade_obsolete_output_removals "$directory/plan.protected" "$directory/safe" "$native") || return 1
+  removals=$(upgrade_cleanup_output_removals "$directory/plan.protected" "$directory/safe" "$native") || return 1
   printf '%s\n' "$removals" > "$directory/removals.protected" || return 1
   awk -F '\t' 'FILENAME == ARGV[1] { removed[$0]=1; next } !(($1 ":" $2) in removed) { print $1 ":" $2 }' \
     "$directory/removals.protected" "$directory/safe" > "$directory/deferred.dependencies" || return 1
@@ -5733,12 +5731,12 @@ function upgrade_autoremove_packages() {
   done < "$directory/deferred.dependencies"
   if [ -z "$removals" ]; then printf 'autoremove\tnone\t-\tunused packages retained by protected roots\n' >> "$directory/outcomes"; return $?; fi
   while IFS= read -r package; do
-    query_package=$(upgrade_obsolete_output_safe_package "$package" "$native" "$qualified_packages" "$directory/packages.before") || return 1
+    query_package=$(upgrade_cleanup_output_safe_package "$package" "$native" "$qualified_packages" "$directory/packages.before") || return 1
     selected+=("$query_package")
   done <<< "$removals"
   LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
     -o APT::Get::AutomaticRemove=false --simulate remove "${selected[@]}" > "$directory/plan.final" 2>&1 || return 1
-  upgrade_obsolete_output_removals "$directory/plan.final" "$directory/safe" "$native" > "$directory/removals.final" || return 1
+  upgrade_cleanup_output_removals "$directory/plan.final" "$directory/safe" "$native" > "$directory/removals.final" || return 1
   [ "$(LC_ALL=C sort "$directory/removals.final")" = "$(LC_ALL=C sort "$directory/removals.protected")" ] || return 1
   upgrade_packages_backup_modified_files "$directory" "${selected[@]}" || { echo "dss:error: Cannot preserve local package-file changes before autoremove; removal stopped. Review $directory." >&2; return 1; }
   (umask 077; tar -C / -czpf "$directory/configuration.tar.gz" etc) || return 1
@@ -5760,7 +5758,7 @@ function upgrade_autoremove_packages() {
 )
 }
 
-function print_installed_packages_without_available_versions() {
+function apt_packages_print_review() {
 (
   [ -f /etc/debian_version ] || return 0
   umask 077
@@ -5770,7 +5768,7 @@ function print_installed_packages_without_available_versions() {
   directory=$(mktemp -d) || return 1
   trap 'rm -rf -- "$directory"' EXIT
   apt_packages_output_inventory > "$directory/status" || return 1
-  if ! apt_packages_output_archives "$directory/status" "$native" "$directory" > "$directory/available"; then
+  if ! apt_packages_output_repository_versions "$directory/status" "$native" "$directory" > "$directory/available"; then
     echo 'dss:error: Cannot assess installed package availability from existing APT indexes; no packages were changed.' >&2
     return 1
   fi
@@ -5778,7 +5776,7 @@ function print_installed_packages_without_available_versions() {
   case " $ALL_DEBIAN " in *" $current "*) family=debian;; esac
   case " $ALL_UBUNTU " in *" $current "*) family=ubuntu;; esac
   apt_sources_list > "$directory/sources" || return 1
-  upgrade_obsolete_output_provenance "$family" "$current" "$native" "$directory/sources" "$directory/status" "$directory/available" \
+  apt_packages_output_official_installed_versions "$family" "$current" "$native" "$directory/sources" "$directory/status" "$directory/available" \
     > "$directory/current" || return 1
   : > "$directory/previous" || return 1
   if baseline=$(config_state_output_baseline); then
@@ -6161,7 +6159,7 @@ if [ $ret -ne 0 ]; then
   return 1
 fi
 apt-get clean
-upgrade_obsolete_prepare debian "$old_distro" "$new_distro" || return 1
+upgrade_record_package_origins debian "$old_distro" "$new_distro" || return 1
 # Lenny's release notes require transferring Etch aptitude marks before switching to APT.
 if [ "$old_distro:$new_distro" = etch:lenny ] && command -v aptitude >/dev/null; then
   aptitude search '?false' >/dev/null || return 1
@@ -6189,7 +6187,7 @@ if [ $ret -eq 0 ]; then
 	  debian_check_release_completion "$new_distro" || {
 	    upgrade_outcome_record cleanup deferred "release verification did not complete"; return 1;
 	  }
-	  upgrade_remove_obsolete_packages debian "$old_distro" "$new_distro" || {
+	  upgrade_remove_retired_packages debian "$old_distro" "$new_distro" || {
 	    upgrade_outcome_record cleanup failed "obsolete cleanup"; return 1;
 	  }
 	  echo "dss:stage: Checking unused packages after verifying $new_distro" >&2
@@ -6288,7 +6286,7 @@ function print_config_state_changes() {
   prepare_output_dir
   local availability_ret=0 report_status now fromfile=$1 file files post_recorded=false
   local -a pipeline_status=()
-  print_installed_packages_without_available_versions || availability_ret=$?
+  apt_packages_print_review || availability_ret=$?
   if ! now=$(date +%s); then
     echo 'dss:error: Cannot timestamp the current configuration report.' >&2
     [ "$availability_ret" -ne 0 ] || availability_ret=1
@@ -6722,7 +6720,7 @@ function dist_upgrade_ubuntu_to_latest() {
     upgrade_prepare_php_source_retry ubuntu "$next" || return 1
     apt_get_upgrade "on $current before switching releases" || return 1
     retain_etc_networking_naming_re_enX0
-    upgrade_obsolete_prepare ubuntu "$current" "$next" || return 1
+    upgrade_record_package_origins ubuntu "$current" "$next" || return 1
     apt_sources_upgrade ubuntu "$current" "$next" || return 1
     apt_get_update "after switching sources to $next" || return 1
     if ! is_distro_name_older "$next" xenial; then
@@ -6738,7 +6736,7 @@ function dist_upgrade_ubuntu_to_latest() {
     upgrade_check_crossgrade_checkpoint ubuntu "$next" || {
       upgrade_outcome_record cleanup deferred "release verification did not complete"; return 1;
     }
-    upgrade_remove_obsolete_packages ubuntu "$current" "$next" || {
+    upgrade_remove_retired_packages ubuntu "$current" "$next" || {
       upgrade_outcome_record cleanup failed "obsolete cleanup"; return 1;
     }
     echo "dss:stage: Checking unused packages after verifying $next" >&2
@@ -7708,7 +7706,7 @@ function upgrade_print_report() {
     }' || status=1
   else printf '%s\n' 'Unknown: source inventory failed.'; status=1; fi
   printf '\n%s\n' 'Package availability and transitional packages (existing APT indexes; no refresh):'
-  print_installed_packages_without_available_versions || status=1
+  apt_packages_print_review || status=1
   printf '\n%s\n' 'APT preferences (package/pin/priority only):'
   for file in "/etc/apt/preferences" "/etc/apt/preferences.d/"*; do
     [ -f "$file" ] || continue

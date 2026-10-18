@@ -1,0 +1,24 @@
+# Local credentials and generated upgrade evidence.
+.env
+.env.*
+*.log
+*.log.*
+*.key
+*.pem
+*.gz
+*.tgz
+*.tar
+*.zip
+*.enc
+*.sql
+*.deb
+id_rsa*
+id_ed25519*
+.ssh/
+server-image-*
+/distrorejuveinfo/
+/deghostinfo/
+/manifest.json
+/manifest.txt
+/manifest.review
+/upgrade-report*.txt

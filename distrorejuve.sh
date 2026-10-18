@@ -74,6 +74,9 @@ Run with --dist-update to update packages on the current distro version (no dist
 Run with --upgrade-report to collect a read-only handover for developer/application upgrade review.
 Add --no-dns to skip its bounded DNS checks. It does not test application compatibility.
 
+Run with --support-report [RUN_DIRECTORY] to print a minimal report for a public bug report.
+Review it before posting. It omits raw logs, configuration and host identifiers; no upload occurs.
+
 Run with --manifest or --manifest-json to collect a read-only application/service inventory.
 Add --no-dns to skip bounded DNS lookups. MANIFEST_MAIL_METRICS=false skips mail size/count probes.
 
@@ -7734,13 +7737,119 @@ function upgrade_print_report() {
 
 # End application/service manifest.
 
+# Public reports select fixed fields; raw logs/configuration are never copied or redacted.
+function support_print_report() {
+(
+  set -o pipefail
+  local directory=${1:-} status=0 release family=unknown architecture kernel digest run_digest=unknown
+  local exit_status=unknown action=unknown crossgrade=unknown target=unknown verification=not_recorded counts available mount
+  if [ -n "$directory" ]; then
+    if [ ! -d "$directory" ] || [ -L "$directory" ] || [ -L "$directory/support.context" ] || [ -L "$directory/output.log" ]; then
+      printf '%s\n' 'dss:error: Choose an existing run directory without linked report files.' >&2; return 1
+    fi
+    if [ -f "$directory/support.context" ]; then
+      IFS=$'\t' read -r exit_status action run_digest crossgrade target < "$directory/support.context" || status=1
+    fi
+  fi
+  case "$exit_status" in ''|*[!0-9]*) exit_status=unknown;; *)
+    if [ "${#exit_status}" -gt 3 ] || [ "$exit_status" -gt 255 ]; then exit_status=unknown; fi;;
+  esac
+  case "$action" in
+    --upgrade|--dist-update|--dist-upgrade|--to-squeeze|--to-wheezy|--to-jessie|--to-debian-release|--to-latest-debian|--to-latest-lts|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages) :;;
+    *) action=unknown;;
+  esac
+  case "$crossgrade" in true|false) :;; *) crossgrade=unknown;; esac
+  [ "$action" != --to-64bit ] || crossgrade=true
+  if [ "$action" = --to-debian-release ]; then
+    case "$target" in 6|7|8|9|10|11|12|13) :;; *) target=unknown;; esac
+  else target=unknown; fi
+  if [ -n "$directory" ] && [ -f "$directory/outcome.incomplete" ] && [ ! -L "$directory/outcome.incomplete" ]; then verification=incomplete; fi
+  digest=$(sha256sum -- "${BASH_SOURCE[0]}" 2>/dev/null) || digest=unknown
+  digest=${digest%% *}
+  case "$digest" in *[!a-f0-9]*|'') digest=unknown;; *) [ "${#digest}" -eq 64 ] || digest=unknown;; esac
+  case "$run_digest" in *[!a-f0-9]*|'') run_digest=unknown;; *) [ "${#run_digest}" -eq 64 ] || run_digest=unknown;; esac
+  [ "$digest" != unknown ] || status=1
+  release=$(distro_output_codename 2>/dev/null) || release=unknown
+  case "$release" in ''|*[!a-z]*) release=unknown;; esac
+  case " $ALL_DEBIAN " in *" $release "*) family=debian;; esac
+  case " $ALL_UBUNTU " in *" $release "*) family=ubuntu;; esac
+  if [ "$family" = unknown ]; then release=unknown; status=1; fi
+  architecture=$(dpkg --print-architecture 2>/dev/null) || architecture=unknown
+  case "$architecture" in amd64|i386|arm64|armhf|armel|ppc64el|s390x|riscv64|mips|mipsel|mips64el) :;; *) architecture=unknown; status=1;; esac
+  kernel=$(uname -r 2>/dev/null | awk 'match($0,/^[0-9]+[.][0-9]+/) { print substr($0,RSTART,RLENGTH); exit }') || kernel=unknown
+  if [ -z "$kernel" ] || [ "$kernel" = unknown ]; then kernel=unknown; status=1; fi
+  printf '%s\n' 'distrorejuve support report v1' 'Review before posting. No raw logs, configuration, host identifiers or package names are included.'
+  printf 'collector_sha256: %s\nrun_script_sha256: %s\naction: %s\nexit_status: %s\n' "$digest" "$run_digest" "$action" "$exit_status"
+  printf 'crossgrade_requested: %s\nrequested_debian_release: %s\n' "$crossgrade" "$target"
+  printf 'recorded_completion_verification: %s\n' "$verification"
+  printf 'current_distribution: %s\ncurrent_release: %s\ncurrent_package_architecture: %s\ncurrent_kernel_series: %s\ncollector_bash_version: %s.%s.%s\n' \
+    "$family" "$release" "$architecture" "${kernel:-unknown}" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${BASH_VERSINFO[2]}"
+  if counts=$(LC_ALL=C dpkg-query -W -f='${Status}\n' 2>/dev/null | awk '
+    /^[a-z-]+ [a-z-]+ [a-z-]+$/ {
+      if ($0 ~ /^(install|hold) ok installed$/) { installed++; if ($1 == "hold") held++ }
+      else if ($3 == "config-files") residual++
+      else if ($3 != "not-installed") incomplete++
+      next
+    }
+    { bad=1 }
+    END { if (bad) exit 1; printf "installed=%d held=%d incomplete=%d residual_config=%d", installed, held, incomplete, residual }
+  '); then printf 'package_states: %s\n' "$counts"
+  else printf '%s\n' 'package_states: unknown'; status=1; fi
+  for mount in / /usr /var; do
+    available=$(LC_ALL=C df -Pk -- "$mount" 2>/dev/null | awk 'END { if (NF >= 6 && $(NF-2) ~ /^[0-9]+$/) print int($(NF-2)/1024); else exit 1 }') || { available=unknown; status=1; }
+    printf 'free_mib%s: %s\n' "$mount" "$available"
+  done
+  if [ -n "$directory" ] && [ -f "$directory/output.log" ]; then
+    # Match known messages to fixed labels; never print a matching line or capture group.
+    LC_ALL=C awk '
+      /^dss:stage[: ]/ {
+        if (/Checking complete requested upgrade path|Rechecking .* before this release transition/) stage="preflight"
+        else if (/Refreshing APT package indexes/) stage="apt_update"
+        else if (/Checking package dependencies|Rechecking dependencies/) stage="dependency_check"
+        else if (/Performing full package upgrade|Rechecking the full upgrade|Retrying the full upgrade/) stage="full_upgrade"
+        else if (/Upgrading current packages/) stage="package_upgrade"
+        else if (/Updating installed PHP packages/) stage="php_migration"
+        else if (/Checking unused packages/) stage="autoremove"
+      }
+      { line=tolower($0)
+        if (line ~ /unmet dependencies|held broken packages/) errors["dependencies"]=1
+        if (line ~ /hash sum mismatch/) errors["download_checksum"]=1
+        if (line ~ /no_pubkey|expkeysig|signatures couldn.t be verified/) errors["repository_signature"]=1
+        if (line ~ /does not have a release file|404[ :]+not found/) errors["repository_unavailable"]=1
+        if (line ~ /could not get lock|unable to acquire.*lock/) errors["package_lock"]=1
+        if (line ~ /no space left on device|insufficient.*space/) errors["disk_space"]=1
+        if (line ~ /trying to overwrite/) errors["package_file_conflict"]=1
+        if (line ~ /^dss:error.*(service|socket|runtime|previously active)/) errors["service_or_runtime"]=1
+        if (line ~ /^dss:error.*(configuration|incompatible)/) errors["configuration_compatibility"]=1
+        if (line ~ /dpkg: error|dpkg returned an error/) errors["dpkg"]=1
+      }
+      END {
+        printf "last_recognised_stage: %s\n", (stage == "" ? "unknown" : stage)
+        printf "observed_error_categories:"
+        for (error in errors) { printf " %s", error; found=1 }
+        if (!found) printf " unclassified_or_none"
+        print ""
+      }
+    ' "$directory/output.log" 2>/dev/null || status=1
+  else
+    printf '%s\n' 'last_recognised_stage: unknown' 'observed_error_categories: unknown'
+    [ -z "$directory" ] || status=1
+  fi
+  printf '%s\n' 'Error categories are observations from the run, not a current service-health check.'
+  printf '%s\n' 'Submit the reviewed report at https://github.com/pbkwee/distrorejuve/issues/new'
+  printf '%s\n' 'Describe expected versus actual behavior. Do not attach private logs, traces, manifests or configurations.'
+  if [ "$status" -ne 0 ]; then printf '%s\n' 'collector_complete: no (some fields are unknown)'; fi
+  return "$status"
+)
+}
+
 # Detailed logging and console progress.
 # Only mutating actions use this wrapper; read-only reports retain normal stdout.
 # LOG_VERBOSE and LOG_TRACE are validated booleans set by the main option parser.
 function logging_run() (
 	local logging_root="${DISTROREJUVE_LOG_DIR:-/root/distrorejuveinfo/runs}"
 	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
-	local logging_dir logging_log logging_line logging_status logging_original_umask logging_action_status=0
+	local logging_dir logging_log logging_line logging_status logging_original_umask logging_digest logging_action_status=0
 	local logging_color=false logging_summarize=false logging_level logging_required
 	local -a logging_pipeline_status
 
@@ -7792,6 +7901,8 @@ function logging_run() (
 			return 1
 		fi
 	fi
+	logging_digest=$(sha256sum -- "${BASH_SOURCE[0]}" 2>/dev/null) || logging_digest=unknown
+	logging_digest=${logging_digest%% *}
 	printf 'dss:stage Detailed run log: %s\n' "$logging_log" >&2
 
 	# The subshell contains traps, tracing and callback exits; caller state is intact.
@@ -7855,6 +7966,17 @@ function logging_run() (
 	else
 		printf 'dss:stage Action complete; details: %s\n' "$logging_log" >&2
 	fi
+	if ! (umask 077; printf '%s\t%s\t%s\t%s\t%s\n' "$logging_status" "${ACTION:-${2:-}}" "$logging_digest" "${UPGRADE_CROSSGRADE:-false}" "${3:-unknown}" > "$logging_dir/support.context" && chmod 600 -- "$logging_dir/support.context"); then
+		printf '%s\n' 'dss:warn Cannot record support-report context.' >&2
+	fi
+	if [ "$logging_status" -ne 0 ] || [ -f "$logging_dir/outcome.incomplete" ]; then
+		if declare -F support_print_report >/dev/null; then
+			if (umask 077; : > "$logging_dir/support-report.txt" && chmod 600 -- "$logging_dir/support-report.txt" && support_print_report "$logging_dir" > "$logging_dir/support-report.txt"); then
+				printf 'dss:stage Review the minimal support report before posting: %s/support-report.txt\n' "$logging_dir" >&2
+			else printf 'dss:warn Support report is incomplete; review %s/support-report.txt.\n' "$logging_dir" >&2; fi
+		fi
+		printf '%s\n' 'dss:stage Report the problem at https://github.com/pbkwee/distrorejuve/issues/new; do not attach private detailed logs or configuration.' >&2
+	fi
 	return "$logging_status"
 )
 
@@ -7862,6 +7984,11 @@ function logging_run() (
 
 function distrorejuve_main() {
 ret=0
+if [ "${ACTION:-$1}" = --support-report ]; then
+  [ "$#" -le 2 ] || { printf '%s\n' 'dss:error: Use --support-report [RUN_DIRECTORY].' >&2; return 1; }
+  support_print_report "${2:-}"
+  return $?
+fi
 [ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ] || [ "${ACTION:-$1}" = --upgrade-report ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
 if [ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ] || [ "${ACTION:-$1}" = --upgrade-report ]; then
   manifest_dns_enabled=true
@@ -8060,6 +8187,12 @@ fi
 
 function distrorejuve_run() {
   local argument action LOG_VERBOSE=false LOG_TRACE=false UPGRADE_CROSSGRADE=false
+  # An explicit public-report command must not enter an inherited upgrade ACTION.
+  if [ "${1:-}" = --support-report ]; then
+    local ACTION=--support-report
+    distrorejuve_main "$@"
+    return $?
+  fi
   case "${ALLOW_CROSSGRADE_BLOCKERS-false}" in
     true|false) :;;
     *) echo 'dss:error: ALLOW_CROSSGRADE_BLOCKERS must be true or false.' >&2; return 1;;

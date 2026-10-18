@@ -41,6 +41,7 @@ sudo bash distrorejuve.sh --dist-upgrade
 | `--to-next-ubuntu` | Upgrade Ubuntu to its next release, or next LTS when starting from an LTS. |
 | `--crossgrade` | Add to a release upgrade to permit i386 → amd64 conversion at the last native i386 release, then continue. Requires a running x86_64 kernel. |
 | `--to-64bit` | Attempt an experimental crossgrade from 32-bit to 64-bit. |
+| `--support-report [RUN_DIRECTORY]` | Print a minimal report for a public bug report. Review it before posting. |
 | `--upgrade-report` | Collect a read-only developer handover with package, repository, configuration and application facts. Add `--no-dns` to skip DNS checks. |
 | `--manifest` / `--manifest-json` | Report applications and services as text or JSON. Add `--no-dns` to skip DNS checks. |
 | `--show-changes` | Report differences from the pre-upgrade configuration and system state. |
@@ -85,5 +86,11 @@ sudo env MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --dist-upgrade
 `SKIP_DISK_SPACE_CHECK`, `ALLOW_CROSSGRADE_BLOCKERS`, `PURGE_INCOMPATIBLE_PACKAGES`, `PREFER_PACKAGED_USRMERGE_FILES`, `REMOVE_OBSOLETE_CROSSGRADE_PACKAGES` and `MANIFEST_MAIL_METRICS` accept only `true` or `false`.
 For the `IGNORE*` variables, `REMOVEX11` and `ENABLE_UBUNTU_CROSSGRADE`, any nonempty value enables
 the control, including `false` or `0`. Use `unset` to disable one of these controls.
+
+## Reporting problems
+
+Failed upgrades save a minimal support report beside the private detailed log. Review that report before
+[opening an issue](https://github.com/pbkwee/distrorejuve/issues/new). Do not post private logs or configuration.
+See [reporting problems](docs/reporting-problems.md) for the command and included fields.
 
 Written by Peter Bryant at http://launchtimevps.com.

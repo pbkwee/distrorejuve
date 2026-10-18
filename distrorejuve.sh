@@ -2809,6 +2809,8 @@ function upgrade_check_crossgrade_package_blockers() {
 
 
 function upgrade_check_path() {
+  # The logging callback distinguishes an explicit refusal from an unexpected failure.
+  upgrade_preflight_blocked=false
   if [ "${4:-requested}" = transition ]; then
     echo "dss:stage: Rechecking $2 -> $3 before this release transition" >&2
   elif [ "$2" = "$3" ]; then
@@ -2817,7 +2819,9 @@ function upgrade_check_path() {
     echo "dss:stage: Checking complete requested upgrade path $2 -> $3" >&2
   fi
   local family=$1 current=$2 target=$3 issues action rule boundary packages remedy arch crossgrade_release blocked=false
-  local purge=${PURGE_INCOMPATIBLE_PACKAGES-false}
+  local purge=${PURGE_INCOMPATIBLE_PACKAGES-false} retry_purge=false retry_crossgrade=false
+  # The collision checker records whether the packaged-file preference would help.
+  local usrmerge_preference_needed=false
   local remove_obsolete=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} obsolete
   case "$remove_obsolete" in true|false) :;; *) echo 'dss:error: REMOVE_OBSOLETE_CROSSGRADE_PACKAGES must be true or false.' >&2; return 1;; esac
   case "$purge" in true|false) :;; *) echo 'dss:error: PURGE_INCOMPATIBLE_PACKAGES must be true or false.' >&2; return 1;; esac
@@ -2841,7 +2845,10 @@ function upgrade_check_path() {
   arch=$(dpkg --print-architecture) || return 1
   if [ "$family" = debian ] && ! is_distro_name_older "$target" trixie; then
     case "$arch" in i386)
-      if [ -z "$crossgrade_release" ]; then blocked=true; fi;;
+      if [ -z "$crossgrade_release" ]; then
+        blocked=true
+        ${UPGRADE_CROSSGRADE-false} || retry_crossgrade=true
+      fi;;
       mipsel|mips64el)
       echo "dss:error: Requested path $current -> $target reaches Debian 13, which cannot upgrade native $arch. Migrate or crossgrade first." >&2
       blocked=true;;
@@ -2850,6 +2857,7 @@ function upgrade_check_path() {
   if [ "$family" = ubuntu ] && [ "$arch" = i386 ] && is_distro_name_newer "$target" bionic && [ -z "$crossgrade_release" ]; then
     echo "dss:error: Requested path $current -> $target exceeds Ubuntu 18.04 native i386 support. Migrate or crossgrade first." >&2
     blocked=true
+    ${UPGRADE_CROSSGRADE-false} || retry_crossgrade=true
   fi
   if [ "$family" = debian ] && [ "$arch" = i386 ] && is_distro_name_older "$current" bullseye && ! is_distro_name_older "$target" bullseye && [ -r /sys/hypervisor/guest_type ] && [ "$(cat /sys/hypervisor/guest_type)" = PV ] && [[ "$(uname -m)" == i?86 ]]; then
     echo 'dss:error: Debian 11 drops 32-bit Xen PV guests; change the guest boot mode before upgrading.' >&2
@@ -2865,11 +2873,27 @@ function upgrade_check_path() {
         blocked=true;;
       purge)
         printf 'dss:warn: [%s at %s] %s Packages: %s.\n' "$rule" "$boundary" "$remedy" "$packages" >&2
-        if ! $purge; then blocked=true; fi;;
+        if ! $purge; then blocked=true; retry_purge=true; fi;;
     esac
   done <<< "$issues"
   if $blocked; then
     echo "dss:error: Requested upgrade path $current -> $target blocked before changes. PURGE_INCOMPATIBLE_PACKAGES=true backs up and purges config-only blockers; manual migrations cannot be bypassed with it." >&2
+    if [ "${4:-requested}" = requested ]; then
+      upgrade_preflight_blocked=true
+      if [ "${#upgrade_retry_command[@]}" -gt 0 ] && { $retry_purge || $usrmerge_preference_needed || $retry_crossgrade; }; then
+        printf '%s\n' 'dss:stage: Review the choices above before retrying; resolve any remaining manual checks.' >&2
+        {
+          printf 'dss:stage: Suggested retry: '
+          if $purge || $retry_purge; then printf 'PURGE_INCOMPATIBLE_PACKAGES=true '; fi
+          if [ "${PREFER_PACKAGED_USRMERGE_FILES-false}" = true ] || $usrmerge_preference_needed; then printf 'PREFER_PACKAGED_USRMERGE_FILES=true '; fi
+          if [ -n "${ACTION:-}" ]; then printf 'ACTION=%q ' "$ACTION"; fi
+          printf '%q' "${upgrade_retry_command[0]}"
+          printf ' %q' "${upgrade_retry_command[@]:1}"
+          if $retry_crossgrade; then printf ' %s' --crossgrade; fi
+          printf '\n'
+        } >&2
+      fi
+    fi
     return 1
   fi
   local repository_target='' release found=false
@@ -3240,7 +3264,10 @@ function usrmerge_check_collisions() {
       echo "dss:warn: usrmerge will archive unowned $source and retain $target ($owner)." >&2
     else
       echo "dss:error: usrmerge collision: $source and $target ($owner)." >&2
-      [ "$action" != archive ] || echo 'dss:error: Review the unowned executable; PREFER_PACKAGED_USRMERGE_FILES=true explicitly archives it and keeps the packaged counterpart.' >&2
+      if [ "$action" = archive ]; then
+        echo 'dss:error: Review the unowned executable; PREFER_PACKAGED_USRMERGE_FILES=true explicitly archives it and keeps the packaged counterpart.' >&2
+        usrmerge_preference_needed=true
+      fi
       blocked=true
     fi
   done <<< "$collisions"
@@ -7889,6 +7916,7 @@ function logging_run() (
 	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
 	local logging_dir logging_log logging_line logging_status logging_original_umask logging_digest logging_action_status=0
 	local logging_color=false logging_summarize=false logging_level logging_required
+	local logging_expected_stop=false
 	local -a logging_pipeline_status
 
 	case "$logging_verbose:$logging_trace" in
@@ -7953,12 +7981,19 @@ function logging_run() (
 		if $logging_summarize; then
 			DISTROREJUVE_RUN_DIRECTORY=$logging_dir
 			export DISTROREJUVE_RUN_DIRECTORY
+			# Bash 3.1 unwinds function locals before EXIT traps; keep this child flag global.
+			upgrade_preflight_blocked=false
 			# Main dispatch can exit directly; retain its status and still report final health.
 			trap '
 				logging_action_status=$?
 				trap - EXIT
-				if declare -F upgrade_finish_run >/dev/null; then
-					upgrade_finish_run "$logging_action_status" "$logging_log"
+				if $upgrade_preflight_blocked && [ "$logging_action_status" -eq 1 ]; then
+					logging_status=$logging_action_status
+					if ! (umask 077; : > "$DISTROREJUVE_RUN_DIRECTORY/preflight.blocked.tmp" && chmod 600 -- "$DISTROREJUVE_RUN_DIRECTORY/preflight.blocked.tmp" && mv -- "$DISTROREJUVE_RUN_DIRECTORY/preflight.blocked.tmp" "$DISTROREJUVE_RUN_DIRECTORY/preflight.blocked"); then
+						printf "dss:error Cannot record the preflight refusal.\n" >&2
+					fi
+				elif declare -F upgrade_finish_run >/dev/null; then
+					upgrade_finish_run "$logging_action_status" "$DISTROREJUVE_RUN_DIRECTORY/output.log"
 					logging_status=$?
 				else
 					printf "dss:error Completion reporting is unavailable: upgrade_finish_run is missing; package and service health remain unverified.\n" >&2
@@ -7997,7 +8032,12 @@ function logging_run() (
 		printf 'dss:error Detailed logging or console output failed; inspect %s\n' "$logging_log" >&2
 		if [ "$logging_status" -eq 0 ]; then logging_status=1; fi
 	fi
-	if [ "$logging_status" -ne 0 ]; then
+	if [ -f "$logging_dir/preflight.blocked" ] && [ "${logging_pipeline_status[1]}" -eq 0 ] && [ "${logging_pipeline_status[2]}" -eq 0 ]; then
+		logging_expected_stop=true
+	fi
+	if $logging_expected_stop; then
+		printf 'dss:stage Upgrade not started; resolve the preflight checks above and retry. Details: %s\n' "$logging_log" >&2
+	elif [ "$logging_status" -ne 0 ]; then
 		printf 'dss:error Action failed (status %s); details: %s\n' "$logging_status" "$logging_log" >&2
 	elif [ -f "$logging_dir/outcome.incomplete" ]; then
 		printf 'dss:warn Action finished with incomplete service verification; details: %s\n' "$logging_log" >&2
@@ -8007,7 +8047,7 @@ function logging_run() (
 	if ! (umask 077; printf '%s\t%s\t%s\t%s\t%s\n' "$logging_status" "${ACTION:-${2:-}}" "$logging_digest" "${UPGRADE_CROSSGRADE:-false}" "${3:-unknown}" > "$logging_dir/support.context" && chmod 600 -- "$logging_dir/support.context"); then
 		printf '%s\n' 'dss:warn Cannot record support-report context.' >&2
 	fi
-	if [ "$logging_status" -ne 0 ] || [ -f "$logging_dir/outcome.incomplete" ]; then
+	if ! $logging_expected_stop && { [ "$logging_status" -ne 0 ] || [ -f "$logging_dir/outcome.incomplete" ]; }; then
 		if declare -F support_print_report >/dev/null; then
 			if (umask 077; : > "$logging_dir/support-report.txt" && chmod 600 -- "$logging_dir/support-report.txt" && support_print_report "$logging_dir" > "$logging_dir/support-report.txt"); then
 				printf 'dss:stage Review the minimal support report before posting: %s/support-report.txt\n' "$logging_dir" >&2
@@ -8236,6 +8276,7 @@ function distrorejuve_run() {
     *) echo 'dss:error: ALLOW_CROSSGRADE_BLOCKERS must be true or false.' >&2; return 1;;
   esac
   local -a arguments=()
+  local -a upgrade_retry_command=(bash "$0" "$@")
   for argument in "$@"; do
     case "$argument" in
       --verbose) LOG_VERBOSE=true;;

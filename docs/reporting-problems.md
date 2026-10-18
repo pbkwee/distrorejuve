@@ -1,7 +1,9 @@
 # Reporting an upgrade problem
 
-Failed upgrade commands save a small `support-report.txt` beside the private detailed log.
+Unexpected upgrade failures save a small `support-report.txt` beside the private detailed log.
 The console prints the report path and the project's issue link.
+Expected preflight refusals keep their diagnostic and log path without suggesting an issue.
+When a supported option addresses a blocker, the console suggests a retry command for review.
 Runs with incomplete service verification also produce this report.
 
 Review the file before posting it at [distrorejuve issues](https://github.com/pbkwee/distrorejuve/issues/new).

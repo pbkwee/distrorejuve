@@ -79,6 +79,8 @@ Review it before posting. It omits raw logs, configuration and host identifiers;
 
 Run with --manifest or --manifest-json to collect a read-only application/service inventory.
 Add --no-dns to skip bounded DNS lookups. MANIFEST_MAIL_METRICS=false skips mail size/count probes.
+Website records include the primary configured URL and local certificate-file presence.
+Missing names, indirect configuration and automatically managed certificates may remain unknown.
 
 Upgrade commands automatically retain private detailed logs in /root/distrorejuveinfo/runs.
 Use --verbose to show command output too, or --trace to write a separate Bash trace.
@@ -7356,7 +7358,20 @@ function manifest_application() {
 function manifest_website() {
   local name_port_pattern='^([^:]+|\[[^]]+\]):([0-9]+)$'
   local server="$1" names="$2" port="$3" tls="$4" document_root="$5" user="$6" runtime="$7" config="$8"
-  local name url scheme=http runtime_version=unknown runtime_source=unknown runtime_package=unknown i
+  local name url scheme=http primary_url=unknown primary=true runtime_version=unknown runtime_source=unknown runtime_package=unknown i
+  local certificate_file=${9:-unknown} certificate_file_present=unknown
+  local url_host_pattern='^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f:.]+\])$'
+  # shortcut: Check direct paths only; resolve includes/automatic TLS if richer inventory is needed.
+  case "$certificate_file" in
+    *'$'*|*'%'*|*'{'*|*'}'*|*'"'*|*"'"*) certificate_file=unknown;;
+    /*)
+      if [ -f "$manifest_root$certificate_file" ] && [ -s "$manifest_root$certificate_file" ]; then
+        certificate_file_present=true
+      else
+        certificate_file_present=false
+      fi;;
+    *) certificate_file=unknown;;
+  esac
   for ((i=0; i<${#manifest_fpm_sockets[@]}; i++)); do
     if [[ "$runtime" == *"${manifest_fpm_sockets[i]}"* ]] && [ "${manifest_fpm_sockets[i]}" != unknown ]; then
       user=${manifest_fpm_users[i]}; runtime_version=${manifest_fpm_versions[i]}; runtime=php-fpm
@@ -7385,8 +7400,12 @@ function manifest_website() {
     url="$scheme://$name"
     case "$scheme:$port" in http:80|https:443|*:unknown) ;; *) url="$url:$port" ;; esac
     case "$name" in unknown|_) url=unknown;; esac
+    if $primary; then
+      if [[ "$name" =~ $url_host_pattern ]]; then primary_url=$url; fi
+      primary=false
+    fi
     manifest_dns "$name"
-    manifest_emit website server "$server" name "$name" port "$port" tls "$tls" url "$url" document_root "$document_root" user "$user" runtime "$runtime" runtime_version "$runtime_version" runtime_version_source "$runtime_source" runtime_package "$runtime_package" config "$config" dns "$manifest_dns_result" dns_addresses "$manifest_dns_addresses" dns_reason "$manifest_dns_reason" proxy unknown
+    manifest_emit website server "$server" name "$name" port "$port" tls "$tls" url "$url" primary_url "$primary_url" certificate_file "$certificate_file" certificate_file_present "$certificate_file_present" document_root "$document_root" user "$user" runtime "$runtime" runtime_version "$runtime_version" runtime_version_source "$runtime_source" runtime_package "$runtime_package" config "$config" dns "$manifest_dns_result" dns_addresses "$manifest_dns_addresses" dns_reason "$manifest_dns_reason" proxy unknown
   done
   case "|$manifest_seen_roots|" in *"|$document_root|"*) ;; *)
     manifest_seen_roots="$manifest_seen_roots|$document_root"
@@ -7395,7 +7414,7 @@ function manifest_website() {
 }
 
 function manifest_websites() {
-  local server file names port tls document_root user runtime default_user
+  local server file names port tls document_root user runtime certificate default_user
   for server in apache nginx caddy; do
     default_user=unknown
     case "$server" in
@@ -7411,15 +7430,24 @@ function manifest_websites() {
         fi ;;
     esac
     while IFS= read -r file; do
-      while IFS=$'\t' read -r names port tls document_root user runtime; do
+      while IFS=$'\t' read -r names port tls document_root user runtime certificate; do
         [ -n "$names" ] || continue
-        manifest_website "$server" "$names" "$port" "$tls" "$document_root" "$user" "$runtime" "${file#"$manifest_root"}"
+        manifest_website "$server" "$names" "$port" "$tls" "$document_root" "$user" "$runtime" "${file#"$manifest_root"}" "$certificate"
       done < <(awk -v server="$server" -v default_user="$default_user" '
-        function reset( i) { names="unknown"; port="unknown"; tls="unknown"; root="unknown"; user=default_user; runtime="unknown"; listeners=0; for (i in ports) delete ports[i]; for (i in secure) delete secure[i] }
+        function reset( i) { names="unknown"; port="unknown"; tls="unknown"; root="unknown"; user=default_user; runtime="unknown"; certificate="unknown"; listeners=0; for (i in ports) delete ports[i]; for (i in secure) delete secure[i] }
         function emit( i) {
           if (!active) return
-          if (!listeners) print names "\t" port "\t" tls "\t" root "\t" user "\t" runtime
-          else for (i=1; i<=listeners; i++) print names "\t" ports[i] "\t" secure[i] "\t" root "\t" user "\t" runtime
+          if (!listeners) print names "\t" port "\t" tls "\t" root "\t" user "\t" runtime "\t" certificate
+          else for (i=1; i<=listeners; i++) print names "\t" ports[i] "\t" secure[i] "\t" root "\t" user "\t" runtime "\t" certificate
+        }
+        function certificate_path(value) {
+          sub(/^[ \t]*[^ \t]+[ \t]+/,"",value); sub(/[; \t]+$/,"",value)
+          return value
+        }
+        function record_certificate(value) {
+          gsub(/^[\042\047]|[\042\047]$/,"",value)
+          if (certificate == "unknown") certificate=value
+          else if (certificate != value) certificate="multiple"
         }
         function append_names(start, stop, i, v) {
           for (i=start; i<=stop; i++) { v=$i; gsub(/[;\042\047]/,"",v); if (v != "") { if (names == "unknown") names=v; else names=names "," v } }
@@ -7434,7 +7462,13 @@ function manifest_websites() {
             if (key == "<virtualhost") { emit(); reset(); active=1; port=$2; gsub(/[>]/,"",port); sub(/^.*:/,"",port); next }
             if (key == "</virtualhost>") { emit(); active=0; next }
             if (!active) next
-            if (key == "servername" || key == "serveralias") append_names(2,NF)
+            # ServerName is primary even when ServerAlias appears first.
+            if (key == "servername") {
+              value=$2; gsub(/[;\042\047]/,"",value)
+              if (names == "unknown") names=value; else names=value "," names
+            }
+            if (key == "serveralias") append_names(2,NF)
+            if (key == "sslcertificatefile") record_certificate(certificate_path($0))
             if (key == "documentroot") { root=$0; sub(/^[ \t]*[^ \t]+[ \t]+/,"",root); gsub(/^[\042\047]|[\042\047][ \t]*$/,"",root) }
             if (key == "suexecusergroup" || key == "assignuserid") user=$2
             if (key == "sslengine" && tolower($2) == "on") tls="true"
@@ -7457,7 +7491,7 @@ function manifest_websites() {
                 listeners++; ports[listeners]=port; secure[listeners]="false"
                 if ($0 ~ /(^|[ \t])ssl([ \t;]|$)/) secure[listeners]="true"
               }
-              if ($1 == "ssl_certificate") tls="true"
+              if ($1 == "ssl_certificate") { tls="true"; record_certificate(certificate_path($0)) }
               if ($1 == "root" && depth == 1) { root=$0; sub(/^[ \t]*root[ \t]+/,"",root); sub(/;[ \t]*$/,"",root); gsub(/^[\042\047]|[\042\047]$/,"",root) }
               if ($1 == "user") user=$2
               if ($1 == "fastcgi_pass") { runtime=$2; sub(/^unix:/,"",runtime); gsub(/;/,"",runtime) }
@@ -7471,6 +7505,10 @@ function manifest_websites() {
             if (!active && opens > 0 && $1 !~ /^\(/ && $1 != "{") { reset(); active=1; depth=0; append_names(1,NF-1); port="443"; tls="true"; if ($1 ~ /^http:\/\//) { port="80"; tls="false" }; sub(/^https?:\/\//,"",names) }
             if (active) {
               if ($1 == "root") { root=$0; sub(/^[ \t]*root[ \t]+(\*[ \t]+)?/,"",root); gsub(/^[\042\047]|[\042\047][ \t]*$/,"",root) }
+              if ($1 == "tls" && NF >= 3 && $3 != "{") {
+                if ($2 ~ /^[\042\047]/ && $2 !~ /[\042\047]$/) certificate="unresolved"
+                else record_certificate($2)
+              }
               if ($1 == "php_fastcgi") { runtime=$2; sub(/^unix\//,"",runtime) }
               if ($1 == "reverse_proxy") runtime="reverse_proxy"
               depth += opens-closes
@@ -7591,7 +7629,7 @@ function manifest_output() (
   manifest_fpm_pools
   manifest_mail
   manifest_websites
-  manifest_emit warning area interpretation reason 'Static inventory: conventional config files only (200 files per server, 1 MiB/20000 lines per file); includes, variables and dynamic application settings may be unresolved. Bindings do not prove Internet reachability; DNS may point at a proxy. Application dates are filesystem metadata. No application code was executed.'
+  manifest_emit warning area interpretation reason 'Static inventory: conventional config files only (200 files per server, 1 MiB/20000 lines per file); includes, variables and dynamic application settings may be unresolved. Bindings do not prove Internet reachability; DNS may point at a proxy. Application dates are filesystem metadata. Certificate files are checked for presence only; expiry, trust and active TLS are not verified. No application code was executed.'
   [ "$manifest_format" != json ] || printf ']}\n' || return 1
   # Ordinary inventories retain partial findings; comparisons require their core collectors to succeed.
   [ -z "$manifest_review_file" ] || ! $manifest_collection_failed

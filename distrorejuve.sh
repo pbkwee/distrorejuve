@@ -71,6 +71,9 @@ Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc
 
 Run with --dist-update to update packages on the current distro version (no distro version change).
 
+Run with --upgrade-report to collect a read-only handover for developer/application upgrade review.
+Add --no-dns to skip its bounded DNS checks. It does not test application compatibility.
+
 Run with --manifest or --manifest-json to collect a read-only application/service inventory.
 Add --no-dns to skip bounded DNS lookups. MANIFEST_MAIL_METRICS=false skips mail size/count probes.
 
@@ -7570,6 +7573,75 @@ function manifest_compare_baseline() {
 # TODO: allow a small declarative before/after assertion file once its format is agreed.
 # Keep customer application checks opt-in and separate from package/service verification.
 
+# Read-only handover facts for a developer or AI; existing APT indexes may be stale.
+function upgrade_print_report() {
+  local dns=${1:-true} current=unknown family=unknown target=unknown native=unknown status=0 records audit file release crossgrade_release=''
+  case "$dns" in true|false) :;; *) return 1;; esac
+  printf '%s\n' 'distrorejuve upgrade review' "Captured UTC: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  current=$(distro_output_codename) || { current=unknown; status=1; }
+  native=$(dpkg --print-architecture) || { native=unknown; status=1; }
+  case " $ALL_DEBIAN " in *" $current "*) family=debian; target=trixie;; esac
+  case " $ALL_UBUNTU " in *" $current "*)
+    family=ubuntu; target=$current
+    for release in $LTS_UBUNTU; do
+      if is_distro_name_newer "$release" "$target"; then target=$release; fi
+    done;;
+  esac
+  printf 'Release: %s %s; review target: %s; package architecture: %s; running kernel: %s\n' "$family" "$current" "$target" "$native" "$(uname -rm)"
+  if [ "$native" = i386 ]; then
+    case "$family" in
+      debian) crossgrade_release=bookworm; printf '%s\n' 'Architecture review: native i386 upgrades stop at bookworm; a later target needs an explicit amd64 crossgrade and a running x86_64 kernel.';;
+      ubuntu) crossgrade_release=bionic; printf '%s\n' 'Architecture review: native i386 upgrades stop at bionic; later releases need an experimental crossgrade.';;
+    esac
+  fi
+  printf '\n%s\n' 'Known configuration migration concerns (target above; not an upgrade authorization):'
+  if [ "$family" = unknown ]; then
+    printf '%s\n' 'Unknown distribution: release-path concerns could not be evaluated.'; status=1
+  elif records=$(IGNORE_DOVECOT_ERROR='' upgrade_output_compatibility_issues "$family" "$current" "$target"); then
+    printf '%s\n' "${records:-No matching known configuration blockers. Application compatibility is not assessed.}"
+  else printf '%s\n' 'Unknown: compatibility-rule collection failed.'; status=1; fi
+  printf '\n%s\n' 'Package database health:'
+  if audit=$(LC_ALL=C dpkg --audit 2>&1); then
+    printf '%s\n' "${audit:-No incomplete packages reported by dpkg.}"
+  else printf 'Unknown: dpkg audit failed: %s\n' "$audit"; status=1; fi
+  printf '\n%s\n' 'Installed/partial packages: name, version, architecture, selection/state (hold means held):'
+  if records=$(dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\t${Status}\n'); then
+    printf '%s\n' "$records" | awk -F '\t' '$4 !~ / (not-installed|config-files)$/ {print}' || status=1
+  else printf '%s\n' 'Unknown: package inventory failed.'; status=1; fi
+  printf '\n%s\n' 'Active APT sources: file, line, provider, type, URL, suite, components, architecture filters:'
+  if records=$(apt_sources_list); then
+    # Keep origin/path for review, without URL credentials, query strings or fragments.
+    printf '%s\n' "$records" | awk -F '\t' 'BEGIN {OFS="\t"} NF {
+      sub(/\/\/[^\/]*@/, "//[redacted]@", $5); sub(/[?#].*$/, "", $5); print
+    }' || status=1
+  else printf '%s\n' 'Unknown: source inventory failed.'; status=1; fi
+  printf '\n%s\n' 'Packages absent from existing APT indexes (indexes were not refreshed):'
+  print_installed_packages_without_available_versions || status=1
+  printf '\n%s\n' 'APT preferences (package/pin/priority only):'
+  for file in "/etc/apt/preferences" "/etc/apt/preferences.d/"*; do
+    [ -f "$file" ] || continue
+    printf 'File: %s\n' "$file"
+    awk '/^[ \t\r\f\013]*(Package|Pin|Pin-Priority):/ {
+      sub(/\/\/[^\/]*@/, "//[redacted]@"); sub(/[?#].*$/, ""); gsub(/[\001-\037\177]/, " "); print
+    }' "$file" || status=1
+  done
+  printf '\n%s\n' 'Modified/missing package configuration (paths only; contents omitted):'
+  print_pkg_to_modified_diff summary || status=1
+  printf '\n%s\n' 'Local executable, service and scheduled-task file paths (at most 200 per directory, depth 2; ownership not inferred):'
+  for file in "/usr/local/bin" "/usr/local/sbin" "/opt" "/etc/systemd/system" "/etc/init.d" "/etc/cron.d"; do
+    [ -d "$file" ] || continue
+    # Names only: do not expose command arguments, environment files or cron contents.
+    if records=$(find "$file" -maxdepth 2 -type f -print 2>/dev/null); then
+      printf '%s\n' "$records" | LC_ALL=C sort | head -n 200
+    else printf 'Unknown: cannot list %s\n' "$file"; status=1; fi
+  done
+  printf '\n%s\n' 'Applications, websites, runtime associations, mail storage and listeners:'
+  manifest_output text "$dns" || status=1
+  printf '\n%s\n' 'Review limits: package/configuration facts only; conventional paths and bounded scans. Custom includes, containers, external services and application compatibility may require manual review. No packages, sources, configurations or services were changed. Treat this report as private.'
+  [ "$status" -eq 0 ] || printf '%s\n' 'Report incomplete: one or more collectors failed; unknown facts must be checked separately.'
+  return "$status"
+}
+
 # End application/service manifest.
 
 # Detailed logging and console progress.
@@ -7700,12 +7772,13 @@ function logging_run() (
 
 function distrorejuve_main() {
 ret=0
-[ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
-if [ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ]; then
+[ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ] || [ "${ACTION:-$1}" = --upgrade-report ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
+if [ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ] || [ "${ACTION:-$1}" = --upgrade-report ]; then
   manifest_dns_enabled=true
   case "${2:-}" in --no-dns) manifest_dns_enabled=false;; '') :;; *) print_usage; exit 1;; esac
   [ -z "${3:-}" ] || { print_usage; exit 1; }
-  if [ "${ACTION:-$1}" = --manifest-json ]; then manifest_output json "$manifest_dns_enabled"
+  if [ "${ACTION:-$1}" = --upgrade-report ]; then upgrade_print_report "$manifest_dns_enabled"
+  elif [ "${ACTION:-$1}" = --manifest-json ]; then manifest_output json "$manifest_dns_enabled"
   else manifest_output text "$manifest_dns_enabled"; fi
   exit $?
 elif [ "--usage" = "${ACTION:-$1}" ] || [ "--help" = "${ACTION:-$1}" ]; then

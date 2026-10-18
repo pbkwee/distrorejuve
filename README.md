@@ -41,6 +41,7 @@ sudo bash distrorejuve.sh --dist-upgrade
 | `--to-next-ubuntu` | Upgrade Ubuntu to its next release, or next LTS when starting from an LTS. |
 | `--crossgrade` | Add to a release upgrade to permit i386 → amd64 conversion at the last native i386 release, then continue. Requires a running x86_64 kernel. |
 | `--to-64bit` | Attempt an experimental crossgrade from 32-bit to 64-bit. |
+| `--upgrade-report` | Collect a read-only developer handover with package, repository, configuration and application facts. Add `--no-dns` to skip DNS checks. |
 | `--manifest` / `--manifest-json` | Report applications and services as text or JSON. Add `--no-dns` to skip DNS checks. |
 | `--show-changes` | Report differences from the pre-upgrade configuration and system state. |
 | `--show-cruft` | List packages left over from older releases or architectures. |

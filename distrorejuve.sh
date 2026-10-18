@@ -7535,9 +7535,12 @@ function manifest_output() (
 function manifest_capture() {
 (
   umask 077
-  local directory=$1
-  mkdir -m 700 -- "$directory" || return 1
-  : > "$directory/records.tmp" || return 1
+  local directory=$1 file
+  mkdir -m 700 -- "$directory" && chmod 700 -- "$directory" || return 1
+  # A parent's default ACL can override umask; secure files before writing private records.
+  for file in records.tmp manifest.json.tmp manifest.review.tmp; do
+    : > "$directory/$file" && chmod 600 -- "$directory/$file" || return 1
+  done
   MANIFEST_MAIL_METRICS=false manifest_output json false "${2:-/}" "$directory/records.tmp" > "$directory/manifest.json.tmp" || return 1
   printf '%s\n' manifest-review-v1 > "$directory/manifest.review.tmp" || return 1
   LC_ALL=C sort "$directory/records.tmp" >> "$directory/manifest.review.tmp" || return 1
@@ -7551,17 +7554,35 @@ function manifest_capture() {
 function manifest_compare_baseline() {
 (
   umask 077
-  local baseline=$1 original="$1.applications" directory result
+  local baseline=$1 original="$1.applications" directory result file
   if [ -z "$baseline" ] || [ -L "$original" ] || [ ! -f "$original/manifest.json" ] ||
       [ -L "$original/manifest.json" ] || [ ! -f "$original/manifest.review" ] || [ -L "$original/manifest.review" ] ||
       [ "$(head -n 1 -- "$original/manifest.review")" != manifest-review-v1 ]; then
     printf 'dss:warn: Manifest comparison unavailable: no comparable original inventory at %s. No baseline was reconstructed.\n' "$original" >&2
     return 2
   fi
+  if [ "$(stat -c '%u' -- "$original")" != 0 ]; then
+    echo 'dss:warn: Manifest comparison unavailable: original inventory directory is not root-owned.' >&2; return 2
+  fi
+  for file in "$original/manifest.json" "$original/manifest.review"; do
+    if [ "$(stat -c '%u:%h' -- "$file")" != 0:1 ]; then
+      echo 'dss:warn: Manifest comparison unavailable: original inventory owner/links require review.' >&2; return 2
+    fi
+  done
+  # Repair inherited file modes without replacing or retimestamping the original observations.
+  if ! chmod 700 -- "$original" || ! chmod 600 -- "$original/manifest.json" "$original/manifest.review"; then
+    echo 'dss:warn: Manifest comparison unavailable: cannot secure the original inventory.' >&2; return 2
+  fi
   directory=$(mktemp -d "$original/review.XXXXXX") || return 2
+  if ! chmod 700 -- "$directory"; then
+    echo 'dss:warn: Manifest comparison unavailable: cannot secure the review directory.' >&2; return 2
+  fi
   if ! manifest_capture "$directory/current" "${2:-/}"; then
     printf 'dss:warn: Manifest comparison incomplete: current inventory failed; review %s.\n' "$directory" >&2
     return 2
+  fi
+  if ! { : > "$directory/changes.diff" && chmod 600 -- "$directory/changes.diff"; }; then
+    echo 'dss:warn: Manifest comparison unavailable: cannot create a private changes report.' >&2; return 2
   fi
   diff -u --label original-manifest --label current-manifest "$original/manifest.review" "$directory/current/manifest.review" > "$directory/changes.diff"
   result=$?

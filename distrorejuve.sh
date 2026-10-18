@@ -884,7 +884,7 @@ function upgrade_precondition_checks() {
     # install ok installed utils zip
     # install ok installed vcs cvs
     # install ok installed vcs patch
-    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'xorg-sgml-doctools|libx11|libx11-data|x11-common|theme-ubuntu-text|xauth|xfonts-encodings|xfonts-utils|msttcorefonts|gnome$|gnome-icon-theme|libsoup|gsettings-desktop|adwaita-icon-th|lib-xkd|mesa-util|xkb-data|icon-the|ubuntu-mono|plymouth|x11proto|xtrans-dev' | tr '\r\n' ' ')"
+    local libx11="$(dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print $2}' | egrep -v 'xorg-sgml-doctools|libx11|libx11-data|x11-common|theme-ubuntu-text|xauth|xfonts-encodings|xfonts-utils|msttcorefonts|gnome$|gnome-icon-theme|^gnome-(accessibility-themes|themes-extra(-data)?)(:[a-z0-9-]+)?$|libsoup|gsettings-desktop|adwaita-icon-th|lib-xkd|mesa-util|xkb-data|icon-the|ubuntu-mono|plymouth|x11proto|xtrans-dev' | tr '\r\n' ' ')"
   fi
   if [  ! -z "$libx11" ]; then
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
@@ -1316,6 +1316,13 @@ function apt_get_apply() {
     fi
     if [ "$attempt" -eq 1 ] && [ "$status" -ne 0 ] && grep -qF "trying to overwrite shared '" "$directory/output"; then
       if rm_overwrite_files "$directory/output"; then continue; fi
+    fi
+    if [ "$status" -ne 0 ]; then
+      awk '
+        /trying to overwrite / { reason=$0; exit }
+        /^E:/ { if (reason == "") reason=$0 }
+        END { if (reason != "") print "dss:error: " reason }
+      ' "$directory/output" >&2
     fi
     return "$status"
   done
@@ -2814,7 +2821,7 @@ function upgrade_check_path() {
   if [ "${4:-requested}" = transition ]; then
     echo "dss:stage: Rechecking $2 -> $3 before this release transition" >&2
   elif [ "$2" = "$3" ]; then
-    echo "dss:stage: Checking requested release $3 (already installed; no release transition)" >&2
+    echo "dss:stage: Checking requested release $3 and any unfinished upgrade work" >&2
   else
     echo "dss:stage: Checking complete requested upgrade path $2 -> $3" >&2
   fi
@@ -3671,7 +3678,7 @@ function apt_get_install() {
 
 function apt_get_f_install() {
   pause_check
-  local tmplog signature
+  local tmplog signature audit
   signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
   if [ -n "$signature" ] && [ "$signature" = "${apt_state_healthy:-}" ]; then
     echo "dss:trace:apt_get_f_install: dependency state already checked."
@@ -3702,9 +3709,15 @@ function apt_get_f_install() {
 
   rm -f "$tmplog"
   if [ $ret -ne 0 ]; then
-    echo "dss:warn: dpkg results showing packages with issues."
-    dpkg -l  | egrep -v '^ii|^rc|^iU' | awk '{print "dss:warn:apt_get_f_install: " $0}'
-    echo "dss:info: as a last resort you can move away the failed dpkg status files at /var/lib/dpkg/info/pkngname*"
+    if audit=$(LC_ALL=C dpkg --audit); then
+      if [ -n "$audit" ]; then
+        printf '%s\n' "$audit" | awk '{ print "dss:warn: " $0 }'
+      else
+        echo 'dss:warn: APT dependency repair failed; dpkg reports no incomplete package configurations.' >&2
+      fi
+    else
+      echo 'dss:warn: Cannot inspect incomplete package configurations after APT failed.' >&2
+    fi
   fi
   if [ "$ret" -eq 0 ]; then apt_state_record_healthy; fi
   return $ret
@@ -4294,6 +4307,8 @@ function crossgrade_bookworm_can_retain_legacy() {
       /usr/share/doc/*|/usr/share/lintian/overrides/*) :;;
       /usr/share/locale/*/LC_MESSAGES/libapt-*.mo)
         case "$package" in libapt-inst1.5|libapt-pkg4.12) :;; *) return 1;; esac;;
+      # Jessie shipped this CLI helper inside the library package, not a separate utility.
+      /usr/lib/i386-linux-gnu/lognorm/lognormalizer) [ "$package" = liblognorm1 ] || return 1;;
       /usr/lib/ssl/engines/*.so) [ "$package" = libssl0.9.8 ] || return 1;;
       /usr/lib/i386-linux-gnu/openssl-1.0.0/engines/*.so) [ "$package" = libssl1.0.0 ] || return 1;;
       /usr/lib/i386-linux-gnu/openssl-1.0.2/engines/*.so) [ "$package" = libssl1.0.2 ] || return 1;;
@@ -4331,12 +4346,13 @@ function upgrade_output_crossgrade_obsolete_packages() {
 # Default removal still requires verified compiler roles, library/doc payloads and a backup.
 function crossgrade_bookworm_prepare_obsolete() {
   local compiler_pattern='^(gcc|cpp)-[0-9]+([.][0-9]+)?$|^libgcc-[0-9]+([.][0-9]+)?-dev$'
-  local directory=$1 blockers=$2 remove=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} package dependency reason packages compiler_role
+  local directory=$1 blockers=$2 remove=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} package dependency reason packages compiler_role level=trace
   local -a obsolete_packages=()
   case "$remove" in true|false) :;; *) echo 'dss:error: REMOVE_OBSOLETE_CROSSGRADE_PACKAGES must be true or false.' >&2; return 1;; esac
   [ -n "$blockers" ] || return 0
+  if ! $remove; then level=warn; fi
   while IFS=$'\t' read -r package dependency reason; do
-    echo "dss:warn: $package:i386 requires verified removal: $dependency; $reason." >&2
+    printf 'dss:%s: %s:i386 requires verified removal: %s; %s.\n' "$level" "$package" "$dependency" "$reason" >&2
   done <<< "$blockers"
   if ! $remove; then
     echo 'dss:error: Automatic obsolete-package removal is disabled. Remove or migrate these packages manually before crossgrading, or unset REMOVE_OBSOLETE_CROSSGRADE_PACKAGES to permit verified backed-up removal.' >&2
@@ -4378,7 +4394,8 @@ function crossgrade_bookworm_prepare_obsolete() {
     mv "$directory/obsolete.dependencies.new" "$directory/obsolete.dependencies" &&
       mv "$directory/obsolete.approved.new" "$directory/obsolete.approved" || exit 1
   ) || return 1
-  echo "dss:warn: Verified obsolete foreign package removal: ${packages//$'\n'/ }. Original configuration/package backup: $directory/pre-crossgrade.tar.gz." >&2
+  echo "dss:stage: Verified ${#obsolete_packages[@]} obsolete 32-bit packages for removal; backup: $directory/pre-crossgrade.tar.gz." >&2
+  echo "dss:trace: Verified obsolete foreign package removal: ${packages//$'\n'/ }." >&2
 }
 
 function print_crossgrade_obsolete_package_changes() {
@@ -4523,6 +4540,7 @@ function crossgrade_debian_bookworm() {
   fi
   : > "$directory/targets.new" || return 1
   : > "$directory/retained-i386.new" || return 1
+  echo "dss:stage: Checking 64-bit replacements for installed 32-bit packages" >&2
   while IFS=$'\t' read -r package installed_version essential priority multi_arch; do
     [ -n "$package" ] || continue
     # Previously reviewed removals need no vanished payload inspection on completion retries.
@@ -4544,7 +4562,7 @@ function crossgrade_debian_bookworm() {
           *) echo "dss:error: Cannot inspect Apache module configuration for $package." >&2; return 1;;
         esac;;
       esac
-      echo "dss:warn: No native replacement for $package:i386 ($installed_version); verifying safe removal before conversion." >&2
+      echo "dss:trace: No native replacement for $package:i386 ($installed_version); verifying safe removal before conversion." >&2
     fi
   done < "$directory/original.i386"
   mv "$directory/targets.new" "$directory/targets" && mv "$directory/retained-i386.new" "$directory/retained-i386" || return 1
@@ -6122,7 +6140,7 @@ function debian_check_release_completion() {
 
 # A failed hop may leave target indexes active while the installed release is still old.
 function upgrade_prepare_php_source_retry() {
-  local family=$1 target=$2 records provider type suite _
+  local family=$1 target=$2 records provider type suite _ target_present=false old_present=false
   case "$family" in
     debian) is_distro_name_older "$target" stretch && return 0;;
     ubuntu) is_distro_name_older "$target" xenial && return 0;;
@@ -6130,15 +6148,17 @@ function upgrade_prepare_php_source_retry() {
   esac
   records=$(apt_sources_list) || return 1
   while IFS=$'\t' read -r _ _ provider type _ suite _ _; do
-    if [ "$provider" = "$family" ] && [ "$type" = deb ] && [ "${suite%%[-/]*}" = "$target" ]; then
-      apt_get_update "with $target sources already selected" || return 1
-      record_config_state || return 1
-      apt_get_install dpkg || return 1
-      upgrade_migrate_php_packages "$target" || return 1
-      return 0
-    fi
+    if [ "$provider" != "$family" ] || [ "$type" != deb ]; then continue; fi
+    if [ "${suite%%[-/]*}" = "$target" ]; then target_present=true; else old_present=true; fi
   done <<< "$records"
-  return 0
+  $target_present || return 0
+  # A target security source alone must not suppress rewriting an older base source.
+  if ! $old_present; then upgrade_target_sources_selected=true; fi
+  apt_get_update "with $target sources already present" || return 1
+  record_config_state || return 1
+  apt_get_f_install "before resuming package work on $target" || return 1
+  apt_get_install dpkg || return 1
+  upgrade_migrate_php_packages "$target"
 }
 
 function dist_upgrade_x_to_y() {
@@ -6146,14 +6166,24 @@ pause_check
 [ ! -f /etc/debian_version ] && return 0
 echo "dss:trace:dist_upgrade_x_to_y:checking:olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 
-local current apt_sources_transition_target=$new_distro apt_defer_autoremove=true upgrade_php_runtime_defer_check=true
+local current baseline checkpoint='' resuming=false upgrade_target_sources_selected=false
+local apt_sources_transition_target=$new_distro apt_defer_autoremove=true upgrade_php_runtime_defer_check=true
 current=$(distro_output_codename) || return 1
+if baseline=$(config_state_output_baseline); then
+  checkpoint="$baseline.obsolete-packages/debian-$old_distro-to-$new_distro"
+fi
 if [ "$current" != "$old_distro" ]; then
-  echo "dss:info: Installed release is $current; skipping $old_distro to $new_distro."
-  return 0
+  # base-files can report the new release before its package work and cleanup finish.
+  if [ "$current" = "$new_distro" ] && [ -n "$checkpoint" ] && [ -f "$checkpoint/prepared" ] && [ ! -e "$checkpoint/completed" ]; then
+    resuming=true
+  else
+    echo "dss:info: Installed release is $current; skipping $old_distro to $new_distro."
+    return 0
+  fi
 fi
 
-echo "dss:stage: Upgrading Debian $old_distro -> $new_distro"
+if $resuming; then echo "dss:stage: Finishing interrupted Debian $old_distro -> $new_distro"
+else echo "dss:stage: Upgrading Debian $old_distro -> $new_distro"; fi
 check_disk_space || return 1
 upgrade_prepare_nss_lookup
 
@@ -6184,29 +6214,36 @@ fix_missing_lsb_release || return 1
 
 upgrade_prepare_php_source_retry debian "$new_distro" || return 1
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_upgrade:old:$old_distro:new:$new_distro"
-apt_get_upgrade "on $old_distro before switching releases"
-local ret=$?
-if [ $ret -ne 0 ]; then
-  echo "dss:error: apt-get upgrade failed.  exiting dist_upgrade_x_to_y:${old_distro}_to_${new_distro}"
-  return 1
+local ret=0
+if ! $upgrade_target_sources_selected; then
+  apt_get_upgrade "on $old_distro before switching releases"
+  ret=$?
+  if [ "$ret" -ne 0 ]; then
+    echo "dss:error: Package upgrade on $old_distro failed; sources were not advanced to $new_distro." >&2
+    return "$ret"
+  fi
+  apt-get clean
 fi
-apt-get clean
 upgrade_record_package_origins debian "$old_distro" "$new_distro" || return 1
+baseline=$(config_state_output_baseline) || return 1
+checkpoint="$baseline.obsolete-packages/debian-$old_distro-to-$new_distro"
 # Lenny's release notes require transferring Etch aptitude marks before switching to APT.
 if [ "$old_distro:$new_distro" = etch:lenny ] && command -v aptitude >/dev/null; then
   aptitude search '?false' >/dev/null || return 1
 fi
 
-apt_sources_upgrade debian "$old_distro" "$new_distro" || return 1
-apt_get_update "after switching sources to $new_distro" || return 1
-if [ "$old_distro:$new_distro" = etch:lenny ]; then
-  # Upgrade APT itself before asking Etch's resolver to perform Lenny's full upgrade.
-  apt_get_install apt || return 1
-  apt_get_upgrade || return 1
-fi
-if ! is_distro_name_older "$new_distro" stretch; then
-  apt_get_install dpkg || return 1
-  upgrade_migrate_php_packages "$new_distro" || return 1
+if ! $upgrade_target_sources_selected; then
+  apt_sources_upgrade debian "$old_distro" "$new_distro" || return 1
+  apt_get_update "after switching sources to $new_distro" || return 1
+  if [ "$old_distro:$new_distro" = etch:lenny ]; then
+    # Upgrade APT itself before asking Etch's resolver to perform Lenny's full upgrade.
+    apt_get_install apt || return 1
+    apt_get_upgrade || return 1
+  fi
+  if ! is_distro_name_older "$new_distro" stretch; then
+    apt_get_install dpkg || return 1
+    upgrade_migrate_php_packages "$new_distro" || return 1
+  fi
 fi
 
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
@@ -6227,6 +6264,8 @@ if [ $ret -eq 0 ]; then
 	    upgrade_outcome_record cleanup failed "guarded autoremove"; return 1;
 	  }
 	  debian_check_release_completion "$new_distro" || return 1
+	  [ -d "$checkpoint" ] && [ ! -L "$checkpoint" ] && [ ! -L "$checkpoint/completed" ] || return 1
+	  (umask 077; : > "$checkpoint/completed") || return 1
 	  echo "dss:info: Debian $new_distro package upgrade and post-cleanup checks passed."
 	  return 0;
 	else
@@ -6616,7 +6655,7 @@ function apt_get_dist_upgrade() {
   [ ! -f /etc/debian_version ] && return 0
   upgrade_precondition_checks || return $?
   upgrade_php_runtime_prepare || return 1
-  local signature completed current first_ret upgrade_ret repair_ret cacheable=true
+  local signature completed current first_ret upgrade_ret repair_ret retry_log cacheable=true
   signature=$(apt_state_output_signature packages 2>/dev/null) || signature=
   if apt_state_repositories_are_current && [ -n "$signature" ] && [ "$signature" = "${apt_state_dist_upgraded:-}" ]; then
     ret=0
@@ -6641,11 +6680,21 @@ function apt_get_dist_upgrade() {
   if [ "$first_ret" -ne 0 ]; then
     cacheable=false; apt_state_healthy=
     echo "dss:stage: Retrying the full upgrade after APT failed (status $first_ret)" >&2
-    if apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade 2>&1 | grep -qai "Could not perform immediate configuration on "; then
+    retry_log=$(mktemp) || return 1
+    apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade 2>&1 | tee "$retry_log"
+    local -a retry_status=("${PIPESTATUS[@]}")
+    if [ "${retry_status[1]}" -ne 0 ]; then
+      rm -f -- "$retry_log"
+      echo 'dss:error: Cannot capture full-upgrade retry output.' >&2
+      [ "${retry_status[0]}" -eq 0 ] || return "${retry_status[0]}"
+      return "${retry_status[1]}"
+    fi
+    if [ "${retry_status[0]}" -ne 0 ] && grep -qai "Could not perform immediate configuration on " "$retry_log"; then
       apt_get_apply -f $APT_GET_INSTALL_OPTIONS install libc6-dev
       echo "dss:stage: Retrying the full upgrade after an immediate-configuration failure, with immediate configuration disabled" >&2
       apt_get_apply dist-upgrade -f -o APT::Immediate-Configure=0 $APT_GET_INSTALL_OPTIONS
     fi
+    rm -f -- "$retry_log"
   fi
   [ -e /var/log/syslog ] && [ -e /etc/my/my.cnf ] && if grep "unknown variable 'lc-messages-dir" /var/log/syslog; then
     echo "dss: info: commenting out the my.cnf lc-messages-dir directive in case it is causing problems"

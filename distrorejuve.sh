@@ -309,6 +309,7 @@ function apt_sources_process() {
       if (uri ~ /\/debian(-security)?\/?$/) return "debian"
       if (uri ~ /\/ubuntu\/?$/) return "ubuntu"
     }
+    if (uri ~ /^https:\/\/downloads[.]claude[.]ai\/claude-code\/apt\/(stable|latest)\/?$/) return "claude"
     if (host == "packages.sury.org") return "sury"
     if (host == "ppa.launchpad.net" || host == "ppa.launchpadcontent.net") {
       if (uri ~ /\/ondrej\/php\/ubuntu\/?$/) return "sury"
@@ -650,9 +651,48 @@ function apt_repo_ppa_support() {
   return 2
 }
 
+# Claude Code channels are OS-independent; this checks repository support, not its signing key.
+# https://code.claude.com/docs/en/setup#install-with-linux-package-managers
+function apt_repo_claude_support() {
+  case "$3" in amd64|arm64) :;; *) return 1;; esac
+  case "$1:$2" in
+    debian:buster|debian:bullseye|debian:bookworm|debian:trixie) return 0;;
+    ubuntu:focal|ubuntu:groovy|ubuntu:hirsute|ubuntu:impish|ubuntu:jammy|ubuntu:kinetic|ubuntu:lunar|ubuntu:mantic|ubuntu:noble|ubuntu:oracular|ubuntu:plucky|ubuntu:questing|ubuntu:resolute|ubuntu:stonking) return 0;;
+  esac
+  return 1
+}
+
+function apt_sources_check_claude() {
+  local family=$1 current=$2 target=$3 type=$4 uri=$5 suite=$6 components=$7 filters=$8 native release base added removed arch
+  local -a requested=()
+  case "$suite" in stable|latest) :;; *) return 1;; esac
+  if [ "$type:$components" != deb:main ] || [ "${uri%/}" != "https://downloads.claude.ai/claude-code/apt/$suite" ]; then
+    echo 'dss:error: Claude Code requires a binary source with matching stable/latest URL and suite, and component main.' >&2
+    return 1
+  fi
+  native=$(dpkg --print-architecture) || return 1
+  for release in "$current" "${target:-$current}"; do
+    if ! apt_repo_claude_support "$family" "$release" "$native"; then
+      echo "dss:error: Claude Code requires Debian 10+ or Ubuntu 20.04+ on native amd64/arm64; review $family $release ($native)." >&2
+      return 1
+    fi
+  done
+  [ "$filters" != '*' ] || return 0
+  IFS='|' read -r base added removed <<< "${filters//,/ }"
+  read -r -a requested <<< "$base $added"
+  for arch in "${requested[@]}"; do
+    case "$arch" in amd64|arm64) :;; *) echo "dss:error: Claude Code source requests unsupported architecture $arch; use amd64/arm64." >&2; return 1;; esac
+  done
+  case " $removed " in *" $native "*) echo "dss:error: Claude Code source excludes native architecture $native." >&2; return 1;; esac
+  if [ -n "$base" ]; then
+    case " $base $added " in *" $native "*) :;; *) echo "dss:error: Claude Code source does not include native architecture $native." >&2; return 1;; esac
+  fi
+  return 0
+}
+
 # Check official suite consistency/base sources/backports and vendor upgrade blockers.
 function apt_sources_check_releases_and_vendors() {
-  local target=${1:-${apt_sources_transition_target:-}} current family records file line provider type suite base
+  local target=${1:-${apt_sources_transition_target:-}} current family records file line provider type uri suite components architectures base
   local ret=0 official=0 seen=' ' support status
   records=$(apt_sources_list) || return 1
   if [ -n "$target" ] && { command -v plesk >/dev/null 2>&1 || [ -e /usr/local/cpanel/cpanel ]; }; then
@@ -662,7 +702,7 @@ function apt_sources_check_releases_and_vendors() {
   current=$(distro_output_codename) || current=
   family=debian
   case " $ALL_UBUNTU " in *" $current "*) [ -n "$current" ] && family=ubuntu;; esac
-  while IFS=$'\t' read -r file line provider type _ suite _ _; do
+  while IFS=$'\t' read -r file line provider type uri suite components architectures; do
     [ -n "$file" ] || continue
     if [ "$provider" = debian ] || [ "$provider" = ubuntu ]; then
       base=${suite%%[-/]*}
@@ -683,6 +723,15 @@ function apt_sources_check_releases_and_vendors() {
           echo "dss:warn: $file:$line enables backports ($suite); disable before upgrading or export IGNOREBACKPORTS=Y." >&2; ret=1
         fi;;
       esac
+      continue
+    fi
+    if [ "$provider" = claude ]; then
+      if apt_sources_check_claude "$family" "$current" "$target" "$type" "$uri" "$suite" "$components" "$architectures"; then
+        echo "dss:info: $file:$line: Claude Code $suite repository supports ${target:-$current}; channel and source options are unchanged."
+      else
+        echo "dss:warn: Review or disable Claude Code source at $file:$line before continuing; sources are unchanged." >&2
+        ret=1
+      fi
       continue
     fi
     [ -z "$target" ] && [ -n "$IGNOREOTHERREPOS" ] && continue

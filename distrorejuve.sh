@@ -5166,6 +5166,23 @@ function remove_cruft_packages() {
    return $ret
 }
 
+# Keep the six cleanup fields first; Description is multiline on historical dpkg.
+function apt_packages_output_inventory() {
+(
+  set -o pipefail
+  LC_ALL=C dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\t${Section}\t${Description}\n' |
+    awk -F '\t' -v OFS='\t' '
+      $1 ~ / not-installed$/ { next }
+      $1 ~ /^[a-z-]+ [a-z-]+ [a-z-]+$/ && $2 ~ /^[a-z0-9][a-z0-9+.-]*$/ && $3 ~ /^[a-z0-9][a-z0-9-]*$/ && $4 != "" {
+        print $1, $2, $3, $4, $5, $6, $7, $8; next
+      }
+      /^[ \t]/ || !NF { next }
+      { bad=1 }
+      END { exit bad }
+    '
+)
+}
+
 # Report from existing indexes only; this deliberately does not use the mutating cruft helpers.
 # Existing indexes only: package, query architecture, version, URI, suite/component.
 function apt_packages_output_archives() {
@@ -5236,6 +5253,38 @@ function upgrade_obsolete_output_provenance() {
   ' "$sources" "$inventory" "$archive_records"
 }
 
+# Classification is evidence, not removal permission. Inputs retain installed-version metadata.
+# Output: package, architecture, installed version, class, reason (tab-separated).
+function apt_packages_output_classifications() {
+  local inventory=$1 native=$2 archive_records=$3 previous_provenance=${4:-/dev/null} current_provenance=${5:-/dev/null}
+  awk -F '\t' -v OFS='\t' -v native="$native" '
+    FILENAME == ARGV[1] { available[$1 SUBSEP $2]=1; next }
+    FILENAME == ARGV[2] { previous[$1 SUBSEP $2 SUBSEP $3]=1; next }
+    FILENAME == ARGV[3] { current[$1 SUBSEP $2 SUBSEP $3]=1; next }
+    {
+      key=$2 SUBSEP $3; class=""; reason=""
+      if ($1 ~ / not-installed$/) next
+      if ($1 ~ / config-files$/) {
+        class="residual-config"; reason="removed package retains configuration; purge safety is unverified"
+      } else if ($1 !~ /^(install|hold) ok installed$/) {
+        class="incomplete"; reason="package state or pending selection requires review"
+      } else if (!(($2 SUBSEP ($3 == "all" ? native : $3)) in available)) {
+        if ((key SUBSEP $4) in previous) {
+          class="obsolete"; reason="installed version matched the previous official release; no binary version in current indexes"
+        } else {
+          class="unavailable"; reason="no binary version in current indexes; official origin is unverified"
+        }
+      # oldlibs alone includes real libraries; use only the installed short description.
+      } else if ((key SUBSEP $4) in current && tolower($8) ~ /(^|[^a-z])(transitional( dummy)?|dummy( transitional)?) package([^a-z]|$)/) {
+        class="transitional"; reason="official installed version describes a transitional package; replacement and removal safety need review"
+      } else {
+        class="available"; reason="binary version exists in current indexes"
+      }
+      print $2, $3, $4, class, reason
+    }
+  ' "$archive_records" "$previous_provenance" "$current_provenance" "$inventory"
+}
+
 function upgrade_obsolete_prepare() {
 (
   umask 077
@@ -5252,7 +5301,7 @@ function upgrade_obsolete_prepare() {
   native=$(dpkg --print-architecture) || return 1
   printf '%s\n' "$native" > "$directory/native" || return 1
   apt_sources_list > "$directory/sources.before" || return 1
-  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\n' > "$directory/packages.before" || return 1
+  apt_packages_output_inventory > "$directory/packages.before" || return 1
   apt_packages_output_archives "$directory/packages.before" "$native" "$directory" > "$directory/archives.before" || return 1
   upgrade_obsolete_output_provenance "$family" "$from" "$native" "$directory/sources.before" "$directory/packages.before" "$directory/archives.before" \
     > "$directory/provenance" || return 1
@@ -5457,7 +5506,7 @@ function upgrade_remove_obsolete_packages() {
   signature=$(apt_state_output_signature packages) || return 1
   [ -n "$signature" ] || return 1
   apt_sources_list > "$attempt/sources" || return 1
-  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\n' > "$attempt/packages" || return 1
+  apt_packages_output_inventory > "$attempt/packages" || return 1
   apt_packages_output_archives "$attempt/packages" "$native" "$attempt" > "$attempt/archives" || return 1
   upgrade_obsolete_output_provenance "$family" "$to" "$native" "$attempt/sources" "$attempt/packages" "$attempt/archives" > "$attempt/provenance" || return 1
   # Current official dependencies may autoremove; absent names need their original exact proof.
@@ -5473,11 +5522,9 @@ function upgrade_remove_obsolete_packages() {
         if ($4 == current[key] || obsolete) print $2, $3, $4
     }
   ' "$directory/provenance" "$attempt/provenance" "$attempt/archives" "$attempt/packages" > "$attempt/eligible" || return 1
-  awk -F '\t' -v native="$native" '
-    FILENAME == ARGV[1] { original[$1 SUBSEP $2]=$3; next }
-    FILENAME == ARGV[2] { available[$1 SUBSEP $2]=1; next }
-    $1 ~ / installed$/ && $4 == original[$2 SUBSEP $3] && !(($2 SUBSEP ($3 == "all" ? native : $3)) in available) { print $2 ":" $3 }
-  ' "$directory/provenance" "$attempt/archives" "$attempt/packages" > "$attempt/obsolete" || return 1
+  apt_packages_output_classifications "$attempt/packages" "$native" "$attempt/archives" "$directory/provenance" "$attempt/provenance" \
+    > "$attempt/classifications" || return 1
+  awk -F '\t' '$4 == "obsolete" { print $1 ":" $2 }' "$attempt/classifications" > "$attempt/obsolete" || return 1
   while IFS= read -r package; do
     [ -n "$package" ] || continue
     if $qualified_packages; then obsolete+=("$package")
@@ -5718,21 +5765,39 @@ function print_installed_packages_without_available_versions() {
   [ -f /etc/debian_version ] || return 0
   umask 077
   set -o pipefail
-  local directory native
+  local directory native current family=unknown baseline file
   native=$(dpkg --print-architecture) || return 1
   directory=$(mktemp -d) || return 1
   trap 'rm -rf -- "$directory"' EXIT
-  dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n' > "$directory/status" || return 1
+  apt_packages_output_inventory > "$directory/status" || return 1
   if ! apt_packages_output_archives "$directory/status" "$native" "$directory" > "$directory/available"; then
     echo 'dss:error: Cannot assess installed package availability from existing APT indexes; no packages were changed.' >&2
     return 1
   fi
-  awk -F '\t' -v native="$native" '
-    FILENAME == ARGV[1] { available[$1 SUBSEP $2]=1; next }
-    $1 ~ / installed$/ && !(($2 SUBSEP ($3 == "all" ? native : $3)) in available) {
-      print "dss:warn: Installed package " $2 ":" $3 " (" $4 ") has no versions in active APT indexes. Review manually and migrate if needed; package preserved."
+  current=$(distro_output_codename) || return 1
+  case " $ALL_DEBIAN " in *" $current "*) family=debian;; esac
+  case " $ALL_UBUNTU " in *" $current "*) family=ubuntu;; esac
+  apt_sources_list > "$directory/sources" || return 1
+  upgrade_obsolete_output_provenance "$family" "$current" "$native" "$directory/sources" "$directory/status" "$directory/available" \
+    > "$directory/current" || return 1
+  : > "$directory/previous" || return 1
+  if baseline=$(config_state_output_baseline); then
+    for file in "$baseline.obsolete-packages/$family-"*"-to-$current/provenance"; do
+      if [ -f "$file" ] && [ ! -L "$file" ]; then
+        cat -- "$file" >> "$directory/previous" || return 1
+      fi
+    done
+  fi
+  apt_packages_output_classifications "$directory/status" "$native" "$directory/available" "$directory/previous" "$directory/current" \
+    > "$directory/classifications" || return 1
+  awk -F '\t' '
+    $4 == "obsolete" || $4 == "unavailable" {
+      print "dss:warn: Installed package " $1 ":" $2 " (" $3 ") has no versions in active APT indexes. Classification: " $4 ". " $5 ". Review manually and migrate if needed; package preserved."
     }
-  ' "$directory/available" "$directory/status"
+    $4 == "transitional" {
+      print "dss:info: Transitional package " $1 ":" $2 " (" $3 "). " $5 "; package preserved."
+    }
+  ' "$directory/classifications"
 )
 }
 
@@ -7642,7 +7707,7 @@ function upgrade_print_report() {
       sub(/\/\/[^\/]*@/, "//[redacted]@", $5); sub(/[?#].*$/, "", $5); print
     }' || status=1
   else printf '%s\n' 'Unknown: source inventory failed.'; status=1; fi
-  printf '\n%s\n' 'Packages absent from existing APT indexes (indexes were not refreshed):'
+  printf '\n%s\n' 'Package availability and transitional packages (existing APT indexes; no refresh):'
   print_installed_packages_without_available_versions || status=1
   printf '\n%s\n' 'APT preferences (package/pin/priority only):'
   for file in "/etc/apt/preferences" "/etc/apt/preferences.d/"*; do

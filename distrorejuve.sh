@@ -2389,6 +2389,8 @@ function upgrade_finish_run() {
     else echo 'dss:warn: Removed PHP extension availability could not be summarized.' >&2; fi
   fi
   printf 'dss:stage: Cleanup: %s.\n' "${cleanup:-not run (no release transition reached cleanup in this run)}" >&2
+  # Inventory changes are observations; package/service checks determine operational success.
+  manifest_compare_baseline "$baseline" || :
   printf 'dss:stage: Detailed run log: %s\n' "$logfile" >&2
   return "$status"
 }
@@ -6342,12 +6344,7 @@ function record_config_state() {
     (umask 077; mkdir -m 700 -- "$file.php-runtime" && upgrade_php_runtime_snapshot "$file.php-runtime") || return 1
     (umask 077; mkdir -m 700 -- "$file.services" && upgrade_services_snapshot "$file.services") || return 1
     # Save original site/runtime relationships once, without DNS or mail-store traversal.
-    if ! (
-      umask 077
-      mkdir -m 700 -- "$file.applications" &&
-        MANIFEST_MAIL_METRICS=false manifest_output json false > "$file.applications/manifest.json.tmp" &&
-        mv -- "$file.applications/manifest.json.tmp" "$file.applications/manifest.json"
-    ); then
+    if ! manifest_capture "$file.applications"; then
       echo "dss:warn: Original application manifest was not completed; review $file.applications before relying on it." >&2
     fi;;
   esac
@@ -6951,7 +6948,24 @@ function manifest_json_string() {
   printf '"'
 }
 
+# Stable records for review; omit timestamps and DNS observations from upgrade comparisons.
+function manifest_output_review_record() {
+  local type=$1 key value
+  shift
+  printf '%s' "$type"
+  while [ "$#" -ge 2 ]; do
+    key=$1; value=$2; shift 2
+    case "$key" in generated_utc|version_file_modified|date_basis|dns|dns_addresses|dns_reason) continue;; esac
+    printf '\t%s=' "$key"
+    manifest_json_string "$value"
+  done
+  printf '\n'
+}
+
 function manifest_emit() {
+  if [ -n "${manifest_review_file:-}" ]; then
+    manifest_output_review_record "$@" >> "$manifest_review_file" || manifest_collection_failed=true
+  fi
   local record_type="$1" key value
   shift
   if [ "$manifest_format" = json ]; then
@@ -6976,17 +6990,37 @@ function manifest_emit() {
 }
 
 function manifest_listeners() {
-  local raw source protocol address port program scope application
+  local raw parsed source protocol address port program scope application
   if command -v ss >/dev/null 2>&1 && raw=$(ss -lntp 2>/dev/null); then
     source=ss
   elif command -v netstat >/dev/null 2>&1 && raw=$(netstat -lntp 2>/dev/null); then
     source=netstat
   else
     manifest_emit warning area listeners reason 'ss/netstat unavailable or permission denied'
+    manifest_collection_failed=true
     return
   fi
   # ss: LISTEN 0 128 127.0.0.1:25 *:* users:(("master",pid=12,fd=3))
   # netstat: tcp 0 0 0.0.0.0:80 0.0.0.0:* LISTEN 12/apache2
+  if ! parsed=$(printf '%s\n' "$raw" | awk -v source="$source" '
+    source == "ss" && $1 == "LISTEN" {
+      endpoint=$4; program="unknown"
+      if (match($0, /users:\(\("[^"]+/)) {
+        program=substr($0, RSTART+9, RLENGTH-9)
+      }
+      port=endpoint; sub(/^.*:/,"",port); address=endpoint; sub(/:[^:]*$/,"",address)
+      print "tcp\t" address "\t" port "\t" program
+    }
+    source == "netstat" && $1 ~ /^tcp/ && $6 == "LISTEN" {
+      endpoint=$4; program=$7; sub(/^[0-9]+\//,"",program)
+      if (program == "-" || program == "") program="unknown"
+      port=endpoint; sub(/^.*:/,"",port); address=endpoint; sub(/:[^:]*$/,"",address)
+      print "tcp\t" address "\t" port "\t" program
+    }'); then
+    manifest_emit warning area listeners reason 'listener parser failed; inventory unknown'
+    manifest_collection_failed=true
+    return
+  fi
   while IFS=$'\t' read -r protocol address port program; do
     [ -n "$port" ] || continue
     case "$address" in
@@ -7013,27 +7047,19 @@ function manifest_listeners() {
       *) protocol=tcp ;;
     esac
     manifest_emit listener service "$protocol" address "$address" port "$port" program "$program" application "$application" binding "$scope" reachability unknown
-  done < <(printf '%s\n' "$raw" | awk -v source="$source" '
-    source == "ss" && $1 == "LISTEN" {
-      endpoint=$4; program="unknown"
-      if (match($0, /users:\(\("[^"]+/)) {
-        program=substr($0, RSTART+9, RLENGTH-9)
-      }
-      port=endpoint; sub(/^.*:/,"",port); address=endpoint; sub(/:[^:]*$/,"",address)
-      print "tcp\t" address "\t" port "\t" program
-    }
-    source == "netstat" && $1 ~ /^tcp/ && $6 == "LISTEN" {
-      endpoint=$4; program=$7; sub(/^[0-9]+\//,"",program)
-      if (program == "-" || program == "") program="unknown"
-      port=endpoint; sub(/^.*:/,"",port); address=endpoint; sub(/:[^:]*$/,"",address)
-      print "tcp\t" address "\t" port "\t" program
-    }')
+  done <<< "$parsed"
 }
 
 function manifest_packages() {
-  local package version status
+  local package version status records
   if ! command -v dpkg-query >/dev/null 2>&1; then
     manifest_emit warning area packages reason 'dpkg-query unavailable'
+    manifest_collection_failed=true
+    return
+  fi
+  if ! records=$(dpkg-query -W -f='${Package}\t${Version}\t${Status}\n' 2>/dev/null); then
+    manifest_emit warning area packages reason 'dpkg-query failed; package inventory unknown'
+    manifest_collection_failed=true
     return
   fi
   while IFS=$'\t' read -r package version status; do
@@ -7043,7 +7069,7 @@ function manifest_packages() {
       apache2|apache2-bin|libapache2-mod-php*|nginx|nginx-core|nginx-full|nginx-light|caddy|postfix|exim4*|sendmail*|dovecot*|courier*|php[0-9]*|php-fpm|ruby|ruby[0-9]*|python[23]*|nodejs|mysql-server*|mariadb-server*|postgresql-[0-9]*|redis-server|mailman*|fail2ban)
         manifest_emit package name "$package" version "$version" ;;
     esac
-  done < <(dpkg-query -W -f='${Package}\t${Version}\t${Status}\n' 2>/dev/null)
+  done <<< "$records"
 }
 
 function manifest_read_metadata() {
@@ -7458,6 +7484,7 @@ function manifest_mail() {
 function manifest_output() (
   local manifest_format="${1:-text}" manifest_dns_enabled="${2:-true}" manifest_root="${3:-/}"
   local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
+  local manifest_review_file=${4:-} manifest_collection_failed=false
   local manifest_dns_limit=20 manifest_mail_metrics="${MANIFEST_MAIL_METRICS:-true}"
   local manifest_dns_addresses manifest_dns_result manifest_dns_reason
   local manifest_apache_php_available=false manifest_apache_php_version=unknown manifest_apache_php_package=unknown
@@ -7487,8 +7514,58 @@ function manifest_output() (
   manifest_mail
   manifest_websites
   manifest_emit warning area interpretation reason 'Static inventory: conventional config files only (200 files per server, 1 MiB/20000 lines per file); includes, variables and dynamic application settings may be unresolved. Bindings do not prove Internet reachability; DNS may point at a proxy. Application dates are filesystem metadata. No application code was executed.'
-  [ "$manifest_format" != json ] || printf ']}\n'
+  [ "$manifest_format" != json ] || printf ']}\n' || return 1
+  # Ordinary inventories retain partial findings; comparisons require their core collectors to succeed.
+  [ -z "$manifest_review_file" ] || ! $manifest_collection_failed
 )
+
+# Publish a paired JSON inventory and sorted review file only after collection succeeds.
+function manifest_capture() {
+(
+  umask 077
+  local directory=$1
+  mkdir -m 700 -- "$directory" || return 1
+  : > "$directory/records.tmp" || return 1
+  MANIFEST_MAIL_METRICS=false manifest_output json false "${2:-/}" "$directory/records.tmp" > "$directory/manifest.json.tmp" || return 1
+  printf '%s\n' manifest-review-v1 > "$directory/manifest.review.tmp" || return 1
+  LC_ALL=C sort "$directory/records.tmp" >> "$directory/manifest.review.tmp" || return 1
+  mv -- "$directory/manifest.review.tmp" "$directory/manifest.review" &&
+    mv -- "$directory/manifest.json.tmp" "$directory/manifest.json" || return 1
+  rm -f -- "$directory/records.tmp"
+)
+}
+
+# Status: 0 unchanged, 1 observations changed, 2 comparison unavailable. Never test application behaviour.
+function manifest_compare_baseline() {
+(
+  umask 077
+  local baseline=$1 original="$1.applications" directory result
+  if [ -z "$baseline" ] || [ -L "$original" ] || [ ! -f "$original/manifest.json" ] ||
+      [ -L "$original/manifest.json" ] || [ ! -f "$original/manifest.review" ] || [ -L "$original/manifest.review" ] ||
+      [ "$(head -n 1 -- "$original/manifest.review")" != manifest-review-v1 ]; then
+    printf 'dss:warn: Manifest comparison unavailable: no comparable original inventory at %s. No baseline was reconstructed.\n' "$original" >&2
+    return 2
+  fi
+  directory=$(mktemp -d "$original/review.XXXXXX") || return 2
+  if ! manifest_capture "$directory/current" "${2:-/}"; then
+    printf 'dss:warn: Manifest comparison incomplete: current inventory failed; review %s.\n' "$directory" >&2
+    return 2
+  fi
+  diff -u --label original-manifest --label current-manifest "$original/manifest.review" "$directory/current/manifest.review" > "$directory/changes.diff"
+  result=$?
+  case "$result" in
+    0) printf 'dss:stage: Manifest comparison: unchanged observed setup. Inventory: %s/current/manifest.json\n' "$directory" >&2;;
+    1)
+      printf 'dss:stage: Manifest comparison: changes observed; review %s/changes.diff. Changes alone are not failures.\n' "$directory" >&2
+      cat -- "$directory/changes.diff" || return 2;;
+    *) printf 'dss:warn: Manifest comparison failed; review %s.\n' "$directory" >&2; return 2;;
+  esac
+  return "$result"
+)
+}
+
+# TODO: allow a small declarative before/after assertion file once its format is agreed.
+# Keep customer application checks opt-in and separate from package/service verification.
 
 # End application/service manifest.
 

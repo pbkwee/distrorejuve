@@ -1434,6 +1434,32 @@ function upgrade_php_check_plan() {
   ' "$allowed" "$plan"
 }
 
+# Permit existing dependency upgrades already approved for the final PHP transaction.
+# New runtimes/Apache packages must wait until the old handler has been removed.
+function upgrade_php_check_apache_removal_plan() {
+  local directory=$1 native=$2 changes old_version new_version
+  upgrade_php_check_plan "$directory/apache.allowed-removals" "$directory/remove.plan" false "$native" || return 1
+  changes=$(awk -v native="$native" '
+    function key(name) { sub(":" native "$", "", name); sub(/:all$/, "", name); return name }
+    FILENAME == ARGV[1] && /^Inst / { approved[key($2) " " $3 " " $4]=1; next }
+    FILENAME == ARGV[2] && /^Inst / {
+      name=key($2)
+      if ($3 !~ /^\[[^]]+\]$/ || $4 !~ /^\(/ ||
+          name ~ /^(apache2($|[.-])|libapache2-mod-|php([0-9]|$))/ ||
+          !((name " " $3 " " $4) in approved)) { bad=1; next }
+      old=$3; sub(/^\[/, "", old); sub(/\]$/, "", old)
+      version=$4; sub(/^\(/, "", version); sub(/\)$/, "", version)
+      print old "\t" version
+    }
+    END { exit bad }
+  ' "$directory/install.plan" "$directory/remove.plan") || return 1
+  while IFS=$'\t' read -r old_version new_version; do
+    [ -n "$old_version" ] || continue
+    dpkg --compare-versions "$new_version" ge "$old_version" || return 1
+  done <<< "$changes"
+  return 0
+}
+
 function upgrade_php_output_pending_directory() {
   local file directory found=''
   for file in /root/distrorejuveinfo/*.php-migration/*/started /root/deghostinfo/*.php-migration/*/started; do
@@ -1658,7 +1684,7 @@ function upgrade_migrate_php_packages() {
   package_umask=$(umask) || return 1
   umask 077
   local target=$1 packages default baseline directory status package arch branch suffix replacement mode concrete
-  local apache='' audit file pending=false listed native preserved requested attempt additions
+  local apache='' audit file pending=false listed native preserved requested attempt additions original_packages
   local -a installs=()
   local -a removals=()
   local -a modules=()
@@ -1747,6 +1773,27 @@ function upgrade_migrate_php_packages() {
       sort -u "$directory/apache.remove" -o "$directory/apache.remove" || return 1
     fi
   fi
+  # Versionless PHP packages can disappear with the old handler; restore supported ones.
+  original_packages=$(cat "$directory/packages.before") || return 1
+  : > "$directory/apache.meta-removals" || return 1
+  while IFS=$'\t' read -r status package arch _; do
+    if [ "$status" != 'install ok installed' ] || [ "$arch" != all ]; then continue; fi
+    package=${package%%:*}
+    case "$package" in php-common) continue;; php|php-*) :;; *) continue;; esac
+    if [ "$package" = php ]; then
+      (umask "$package_umask" && upgrade_php_has_candidate "$package") || return 1
+      grep -qxF "$package" "$directory/install.packages" || printf '%s\n' "$package" >> "$directory/install.packages" || return 1
+    elif grep -qxF "$package" "$directory/install.packages"; then :
+    elif grep -qxF "$package:all" "$directory/remove.packages"; then :
+    elif upgrade_php_is_obsolete_extension_meta "$package" "$directory/mapping" "$original_packages"; then
+      printf '%s:all\n' "$package" >> "$directory/remove.packages" || return 1
+      echo "dss:warn: Removing obsolete PHP dependency package $package with its unavailable extension; configuration will not be purged." >&2
+    else
+      status=$?; [ "$status" -eq 1 ] || return 1
+      continue
+    fi
+    printf '%s:all\n' "$package" >> "$directory/apache.meta-removals" || return 1
+  done < "$directory/packages.before"
   while IFS= read -r package; do [ -z "$package" ] || installs+=("$package"); done < "$directory/install.packages"
   listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
   while IFS= read -r package; do [ -z "$package" ] || removals+=("$package"); done <<< "$listed"
@@ -1765,7 +1812,7 @@ function upgrade_migrate_php_packages() {
     [ "$status" -le 1 ] || return 1
     if [ "$status" -eq 0 ]; then
       # Delete only this invocation's unstarted mktemp records; no backup or mutation occurred.
-      rm -f -- "$directory/"{packages.before,target,branch,mapping,retained,install.packages,remove.packages,apache.remove,apache.package} || return 1
+      rm -f -- "$directory/"{packages.before,target,branch,mapping,retained,install.packages,remove.packages,apache.remove,apache.package,apache.meta-removals} || return 1
       rmdir -- "$directory" || return 1
       return 0
     fi
@@ -1789,6 +1836,7 @@ function upgrade_migrate_php_packages() {
   for package in "${removals[@]}"; do arguments+=("$package-"); done
   native=$(dpkg --print-architecture) || return 1
   [[ "$native" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+  echo "dss:stage: Checking package changes for PHP $default" >&2
   if [ ! -f "$directory/normal-dist-upgrade.plan" ]; then
     (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate dist-upgrade) > "$directory/normal-dist-upgrade.plan.new" 2>&1 || return 1
     mv "$directory/normal-dist-upgrade.plan.new" "$directory/normal-dist-upgrade.plan" || return 1
@@ -1852,8 +1900,11 @@ function upgrade_migrate_php_packages() {
   done
   if [ "${#modules[@]}" -gt 0 ]; then
     (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate remove "${modules[@]}") > "$directory/remove.plan" 2>&1 || return 1
-    cat "$directory/remove.packages" "$directory/apache.remove" > "$directory/apache.allowed-removals" || return 1
-    upgrade_php_check_plan "$directory/apache.allowed-removals" "$directory/remove.plan" true "$native" || return 1
+    cat "$directory/remove.packages" "$directory/apache.remove" "$directory/apache.meta-removals" > "$directory/apache.allowed-removals" || return 1
+    upgrade_php_check_apache_removal_plan "$directory" "$native" || {
+      echo "dss:error: Apache/PHP removal plan was rejected; only approved removals and checked existing-package upgrades are allowed. Review $directory/remove.plan, $directory/apache.allowed-removals and $directory/install.plan before retrying." >&2
+      return 1
+    }
   fi
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --download-only --reinstall install "${arguments[@]}") || return 1
   : > "$directory/started" || return 1
@@ -8095,12 +8146,13 @@ function support_print_report() {
         else if (/Checking package dependencies|Rechecking dependencies/) stage="dependency_check"
         else if (/Performing full package upgrade|Rechecking the full upgrade|Retrying the full upgrade/) stage="full_upgrade"
         else if (/Upgrading current packages/) stage="package_upgrade"
-        else if (/Updating installed PHP packages/) stage="php_migration"
+        else if (/Checking package changes for PHP|Updating installed PHP packages/) stage="php_migration"
         else if (/Checking unused packages/) stage="autoremove"
       }
       { line=tolower($0)
         if (line ~ /unmet dependencies|held broken packages/) errors["dependencies"]=1
         if (line ~ /hash sum mismatch/) errors["download_checksum"]=1
+        if (line ~ /^dss:error: apache\/php removal plan was rejected/) errors["php_migration_plan"]=1
         if (line ~ /no_pubkey|expkeysig|keyexpired|signatures couldn.t be verified|signatures were invalid|public key is not available|repository.* is not signed/) errors["repository_signature"]=1
         if (line ~ /release file.*expired|release file.*not valid yet/) errors["repository_freshness"]=1
         if (line ~ /does not have a release file|no longer has a release file|404[ :]+not found/) errors["repository_unavailable"]=1

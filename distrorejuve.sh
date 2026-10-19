@@ -1416,20 +1416,25 @@ function apt_get_apply() {
 }
 
 function upgrade_php_check_plan() {
-  local allowed=$1 plan=$2 removal_only=${3:-false} native=${4:-}
-  awk -v removal_only="$removal_only" -v native="$native" '
+  local allowed=$1 plan=$2 removal_only=${3:-false} native=${4:-} diagnostic=${5:-}
+  awk -v removal_only="$removal_only" -v native="$native" -v diagnostic="$diagnostic" '
+    function reject(reason, detail) {
+      bad=1
+      if (diagnostic != "") printf "dss:error: %s rejected (%s): %s.\n", diagnostic, reason, detail > "/dev/stderr"
+    }
     function key(name) {
       if (native == "") sub(/:.*/, "", name)
       else if (name !~ /:/) name=name ":" native
       return name
     }
     FILENAME == ARGV[1] { allowed[key($1)]=1; next }
-    /^Purg / { bad=1 }
+    /^Purg / { reject("purge", "purging " $2 " is not permitted") }
     /^Remv / {
       name=$2
-      if (!(key(name) in allowed) && !(native != "" && name !~ /:/ && ((name ":all") in allowed))) bad=1
+      if (!(key(name) in allowed) && !(native != "" && name !~ /:/ && ((name ":all") in allowed)))
+        reject("unapproved_removal", "removing " name " was not approved")
     }
-    /^Inst / { if (removal_only == "true") bad=1 }
+    /^Inst / { if (removal_only == "true") reject("unexpected_install", "installing " $2 " is not permitted") }
     END { exit bad }
   ' "$allowed" "$plan"
 }
@@ -1437,25 +1442,39 @@ function upgrade_php_check_plan() {
 # Permit existing dependency upgrades already approved for the final PHP transaction.
 # New runtimes/Apache packages must wait until the old handler has been removed.
 function upgrade_php_check_apache_removal_plan() {
-  local directory=$1 native=$2 changes old_version new_version
-  upgrade_php_check_plan "$directory/apache.allowed-removals" "$directory/remove.plan" false "$native" || return 1
+  local directory=$1 native=$2 changes old_version new_version package
+  upgrade_php_check_plan "$directory/apache.allowed-removals" "$directory/remove.plan" false "$native" 'Apache/PHP removal plan' || return 1
+  # APT simulation: Inst libedit2 [1.0] (2.0 Debian [amd64]); compare both versions.
   changes=$(awk -v native="$native" '
+    function reject(reason, detail) {
+      bad=1
+      printf "dss:error: Apache/PHP removal plan rejected (%s): %s.\n", reason, detail > "/dev/stderr"
+    }
     function key(name) { sub(":" native "$", "", name); sub(/:all$/, "", name); return name }
     FILENAME == ARGV[1] && /^Inst / { approved[key($2) " " $3 " " $4]=1; next }
     FILENAME == ARGV[2] && /^Inst / {
       name=key($2)
-      if ($3 !~ /^\[[^]]+\]$/ || $4 !~ /^\(/ ||
-          name ~ /^(apache2($|[.-])|libapache2-mod-|php([0-9]|$))/ ||
-          !((name " " $3 " " $4) in approved)) { bad=1; next }
+      if ($3 !~ /^\[[^]]+\]$/ || $4 !~ /^\(/) {
+        reject("unverified_install", "cannot verify old/target versions for " $2); next
+      }
+      if (name ~ /^(apache2($|[.-])|libapache2-mod-|php([0-9]|$))/) {
+        reject("early_runtime_change", $2 " would change before the old Apache PHP handler is removed"); next
+      }
+      if (!((name " " $3 " " $4) in approved)) {
+        reject("unapproved_upgrade", $2 " " $3 " " $4 " does not match the checked installation plan"); next
+      }
       old=$3; sub(/^\[/, "", old); sub(/\]$/, "", old)
       version=$4; sub(/^\(/, "", version); sub(/\)$/, "", version)
-      print old "\t" version
+      print old "\t" version "\t" $2
     }
     END { exit bad }
   ' "$directory/install.plan" "$directory/remove.plan") || return 1
-  while IFS=$'\t' read -r old_version new_version; do
+  while IFS=$'\t' read -r old_version new_version package; do
     [ -n "$old_version" ] || continue
-    dpkg --compare-versions "$new_version" ge "$old_version" || return 1
+    dpkg --compare-versions "$new_version" ge "$old_version" || {
+      printf 'dss:error: Apache/PHP removal plan rejected (version_check_failed): cannot permit %s changing from %s to %s.\n' "$package" "$old_version" "$new_version" >&2
+      return 1
+    }
   done <<< "$changes"
   return 0
 }
@@ -1687,7 +1706,7 @@ function upgrade_migrate_php_packages() {
   local apache='' audit file pending=false listed native preserved requested attempt additions original_packages
   local -a installs=()
   local -a removals=()
-  local -a modules=()
+  local -a handoff_removals=()
   local -a arguments=()
   local -a apt_options=()
   local -a backups=()
@@ -1798,7 +1817,7 @@ function upgrade_migrate_php_packages() {
   listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
   while IFS= read -r package; do [ -z "$package" ] || removals+=("$package"); done <<< "$listed"
   listed=$(upgrade_php_output_pending_removals "$directory/apache.remove" "$packages") || return 1
-  while IFS= read -r package; do [ -z "$package" ] || modules+=("$package"); done <<< "$listed"
+  while IFS= read -r package; do [ -z "$package" ] || handoff_removals+=("$package"); done <<< "$listed"
   if [ -f "$directory/apache.package" ]; then apache=$(cat "$directory/apache.package") || return 1; fi
   # Configured concrete default roles need no reinstall merely to add optional versionless metas.
   # Mapping/candidate checks above still reject unavailable roles; partial PHP state needs repair.
@@ -1818,7 +1837,7 @@ function upgrade_migrate_php_packages() {
     fi
   fi
   if [ -n "$apache" ]; then
-    if [ "${#modules[@]}" -gt 0 ] || $pending; then : > "$directory/apache.handoff" || return 1
+    if [ "${#handoff_removals[@]}" -gt 0 ] || $pending; then : > "$directory/apache.handoff" || return 1
     elif upgrade_php_apache_module_is_enabled "$apache"; then :
     else
       status=$?; [ "$status" -eq 1 ] || return 1
@@ -1898,9 +1917,14 @@ function upgrade_migrate_php_packages() {
       arguments+=("$package")
     done <<< "$preserved"
   done
-  if [ "${#modules[@]}" -gt 0 ]; then
-    (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate remove "${modules[@]}") > "$directory/remove.plan" 2>&1 || return 1
+  if [ "${#handoff_removals[@]}" -gt 0 ]; then
+    # Retained PHP selectors can pull in the new handler; remove approved PHP packages explicitly.
     cat "$directory/remove.packages" "$directory/apache.remove" "$directory/apache.meta-removals" > "$directory/apache.allowed-removals" || return 1
+    sort -u "$directory/apache.allowed-removals" -o "$directory/apache.allowed-removals" || return 1
+    listed=$(upgrade_php_output_pending_removals "$directory/apache.allowed-removals" "$packages") || return 1
+    handoff_removals=()
+    while IFS= read -r package; do [ -z "$package" ] || handoff_removals+=("$package"); done <<< "$listed"
+    (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate remove "${handoff_removals[@]}") > "$directory/remove.plan" 2>&1 || return 1
     upgrade_php_check_apache_removal_plan "$directory" "$native" || {
       echo "dss:error: Apache/PHP removal plan was rejected; only approved removals and checked existing-package upgrades are allowed. Review $directory/remove.plan, $directory/apache.allowed-removals and $directory/install.plan before retrying." >&2
       return 1
@@ -1911,8 +1935,8 @@ function upgrade_migrate_php_packages() {
   echo "dss:stage: Updating installed PHP packages to the distribution's default PHP version ($default); configs/inventory: $directory" >&2
   if [ -f "$directory/apache.handoff" ]; then
     upgrade_php_apache_control "$directory" prepare || return 1
-    if [ "${#modules[@]}" -gt 0 ]; then
-      (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false remove "${modules[@]}") || return 1
+    if [ "${#handoff_removals[@]}" -gt 0 ]; then
+      (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false remove "${handoff_removals[@]}") || return 1
       # Removing the old handler can also remove its no-conffile PHP metapackage.
       packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
       listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
@@ -8152,7 +8176,13 @@ function support_print_report() {
       { line=tolower($0)
         if (line ~ /unmet dependencies|held broken packages/) errors["dependencies"]=1
         if (line ~ /hash sum mismatch/) errors["download_checksum"]=1
-        if (line ~ /^dss:error: apache\/php removal plan was rejected/) errors["php_migration_plan"]=1
+        if (line ~ /^dss:error: apache\/php removal plan (was rejected|rejected [(])/) {
+          errors["php_migration_plan"]=1
+          count=split("purge unapproved_removal unexpected_install unverified_install early_runtime_change unapproved_upgrade version_check_failed", php_reasons, " ")
+          for (i=1; i<=count; i++)
+            if (index(line, "dss:error: apache/php removal plan rejected (" php_reasons[i] "): ") == 1)
+              errors["php_plan_" php_reasons[i]]=1
+        }
         if (line ~ /no_pubkey|expkeysig|keyexpired|signatures couldn.t be verified|signatures were invalid|public key is not available|repository.* is not signed/) errors["repository_signature"]=1
         if (line ~ /release file.*expired|release file.*not valid yet/) errors["repository_freshness"]=1
         if (line ~ /does not have a release file|no longer has a release file|404[ :]+not found/) errors["repository_unavailable"]=1
@@ -8177,7 +8207,7 @@ function support_print_report() {
         if (line ~ /could not get lock|unable to acquire.*lock/) errors["package_lock"]=1
         if (line ~ /no space left on device|insufficient.*space/) errors["disk_space"]=1
         if (line ~ /trying to overwrite/) errors["package_file_conflict"]=1
-        if (line ~ /^dss:error.*(service|socket|runtime|previously active)/) errors["service_or_runtime"]=1
+        if (line ~ /^dss:error.*(service|socket|runtime|previously active)/ && line !~ /^dss:error: apache\/php removal plan rejected/) errors["service_or_runtime"]=1
         if (line ~ /^dss:error.*(configuration|incompatible)/) errors["configuration_compatibility"]=1
         if (line ~ /dpkg: error|dpkg returned an error/) errors["dpkg"]=1
       }

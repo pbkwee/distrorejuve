@@ -192,13 +192,10 @@ function wordlisttoegreparg() {
 }
 
 function replace() {
-   which replace &>/dev/null >/dev/null
-   if [ $? -eq 0 ]; then
-     # the double quotes are needed else you get:
-      # /usr/local/mysql/bin/replace 1 2 3 e f g -- b
-      # instead of:
-      # /usr/local/mysql/bin/replace '1 2 3' 'e f g' -- b
-     $(which replace) "$@"
+   local replace_command
+   # command -v would find this function; search PATH for the external tool instead.
+   if replace_command=$(type -P replace); then
+     "$replace_command" "$@"
      return $?
    fi
    local from=$1
@@ -241,7 +238,7 @@ function print_info() {
   echo "dss:Redhat-release: $([ ! -f /etc/redhat-release ] && echo 'NA'; [ -f /etc/redhat-release ] && cat /etc/redhat-release)"
   echo "dss:Debian-version: $([ ! -f /etc/debian_version ] && echo 'NA'; [ -f /etc/debian_version ] && cat /etc/debian_version)"
   print_distro_info
-  if which lsb_release >/dev/null 2>&1; then
+  if command -v lsb_release >/dev/null 2>&1; then
     echo "dss:lsbreleasecommand: $(lsb_release -a 2>/dev/null)"
     #Distributor ID: Ubuntu Description: Ubuntu 11.10 Release: 11.10 Codename: oneiric
   else
@@ -260,7 +257,7 @@ function print_info() {
   ps auxf | egrep -v '[g]host|]$' | awk '{print "dss:psauxf:" $0}'
   echo "dss:info: Checking for disk space on host"
   df -m | awk '{print "dss:dfm:" $0}'
-  which dpkg-query >/dev/null && dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
+  command -v dpkg-query >/dev/null && dpkg-query -W -f='${Conffiles}\n' '*' | grep -v obsolete  | awk 'OFS="  "{print $2,$1}' | LANG=C md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK$/{print $1}' | sort | awk '{print "dss:modifiedconfigs:" $0}'
   apt_sources_list | awk -F "\t" '{print "dss:aptsources:" $1 ":" $2 ":" $3 ":" $6}'
   for i in /etc/apache2 /etc/httpd ; do
     [ ! -d "$i" ] && continue
@@ -961,7 +958,7 @@ function upgrade_precondition_checks() {
   [ ! -z "$ver" ] && [ $ver -gt 255 ] && echo "dss:warn: if you get an error on libc install like ERROR: Your kernel version indicates a revision number of 255 or greater, then you may need to restart the server with a 5.10 kernel, or a kernel with a version smaller than 255.  You are currently on $(uname -r)" >&2
   # ii  dmidecode                       2.9-1.2build1                           Dump Desktop Management Interface data
   local libx11=
-  which dpkg >/dev/null 2>&1 && if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
+  command -v dpkg >/dev/null 2>&1 && if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
     # ignoring some packages since they are 'fine'.  and typically some of them (eg libx11) are required by things like imagemagick and php-gd
     # install ok installed utils zip
     # install ok installed vcs cvs
@@ -6071,7 +6068,7 @@ function tweak_broken_configs() {
   # => do we need to if -d /var/run; then mv -f /var/run/* /run/; rm -rf /var/run; ln -s /run /var/run; fi
   while true; do
     # not debian-ish
-    if ! which dpkg >/dev/null 2>&1; then break; fi
+    if ! command -v dpkg >/dev/null 2>&1; then break; fi
 
     # Core binaries alone do not provide the server service or its upgrade scripts.
     if dpkg -l | egrep -qai '^ii[[:space:]]+(mysql|mariadb)-server(-[0-9]+([.][0-9]+)*)?(:[a-z0-9-]+)?[[:space:]]'; then break; fi
@@ -6147,7 +6144,7 @@ exit 0' > "$i" || return 1
   # fix missing udev
   while true; do
     # not debian-ish
-    if ! which dpkg >/dev/null 2>&1; then break; fi
+    if ! command -v dpkg >/dev/null 2>&1; then break; fi
 
     # dpkg -l | grep '/dev'
     # ii  makedev                          2.3.1-93                       all          creates device files in /dev
@@ -6356,22 +6353,47 @@ function print_minimal_config() {
 }
 function print_pkg_to_modified_diff() {
   local mode=${1:-} records line package=unknown file checksum actual state sidecar status report_status=0 sidecars=0
+  local package_status since stamp summary_state seen=''
   local -a pipeline_status=()
-  case "$mode" in ''|summary) :;; *) echo 'dss:error: Unknown configuration report mode.' >&2; return 1;; esac
-  records=$(LC_ALL=C dpkg-query -W -f='Package: ${Package}\n${Conffiles}\n' '*') || {
+  case "$mode" in
+    ''|summary) :;;
+    review) since=$(stat -c %Y -- "$2") || return 1;;
+    *) echo 'dss:error: Unknown configuration report mode.' >&2; return 1;;
+  esac
+  records=$(LC_ALL=C dpkg-query -W -f='Package: ${Package}\t${Status}\n${Conffiles}\n' '*') || {
     echo 'dss:error: Cannot query package conffiles; configuration verification is incomplete.' >&2; return 1;
   }
+  if [ "$mode" = review ] && [ -r /var/lib/ucf/registry ] && [ -r /var/lib/ucf/hashfile ]; then
+    # UCF: registry is "package /path"; hashfile is "md5 /path", including generated SSH configs.
+    records="$records"$'\n'"$(awk '
+      FILENAME == ARGV[1] {
+        if (/^Package: /) { split($0, parts, "\t"); installed[substr(parts[1],10)]=parts[2] }
+        next
+      }
+      FILENAME == ARGV[2] { path=$0; sub(/^[^ \t]+[ \t]+/, "", path); owner[path]=$1; next }
+      { path=$0; sub(/^[^ \t]+[ \t]+/, "", path); package=owner[path]
+        if (installed[package] ~ / ok installed$/) printf "Package: %s\t%s\n %s %s\n", package, installed[package], path, $1
+      }
+    ' <(printf '%s\n' "$records") /var/lib/ucf/registry /var/lib/ucf/hashfile)" || return 1
+  fi
   while IFS= read -r line; do
     case "$line" in
-      'Package: '*) package=${line#Package: }; continue;;
+      'Package: '*) package=${line#Package: }; package_status=${package#*$'\t'}; package=${package%%$'\t'*}; continue;;
       ' '*) line=${line# };;
       '') continue;;
       *) echo 'dss:warn: Unrecognized package conffile metadata; configuration verification is incomplete.' >&2; report_status=1; continue;;
     esac
+    if [ "$mode" = review ]; then case "$package_status" in *' ok installed') :;; *) continue;; esac; fi
     # Retired conffiles are not shipped, including newconffile remove-on-upgrade records.
     case "$line" in *' obsolete'|*' remove-on-upgrade') continue;; esac
     checksum=${line##* }; file=${line% *}
     case "$file" in /*) :;; *) echo 'dss:warn: Invalid conffile path in package metadata.' >&2; report_status=1; continue;; esac
+    if [ "$mode" = review ]; then
+      # Most installed configs have no replaced copy; avoid hashing them for this summary.
+      [ -e "$file.dpkg-old" ] || [ -e "$file.ucf-old" ] || [ -e "$file.rpmsave" ] || continue
+      case "$seen" in *$'\n'"$file"$'\n'*) continue;; esac
+      seen="$seen"$'\n'"$file"$'\n'
+    fi
     case "$checksum" in *[!0-9a-fA-F]*) checksum=;; esac
     state=unknown
     if [ "${#checksum}" -ne 32 ]; then :
@@ -6381,13 +6403,32 @@ function print_pkg_to_modified_diff() {
         if [ "${actual%% *}" = "$checksum" ]; then state=unchanged; else state=modified; fi
       fi
     fi
-    case "$state" in
-      modified) printf 'dss:info: Modified package conffile: %s (%s).\n' "$file" "$package";;
-      missing) printf 'dss:info: Missing package conffile: %s (%s); this may be intentional.\n' "$file" "$package";;
-      unknown) printf 'dss:warn: Cannot verify package conffile: %s (%s).\n' "$file" "$package" >&2; report_status=1;;
-    esac
+    if [ "$mode" != review ]; then
+      case "$state" in
+        modified) printf 'dss:info: Modified package conffile: %s (%s).\n' "$file" "$package";;
+        missing) printf 'dss:info: Missing package conffile: %s (%s); this may be intentional.\n' "$file" "$package";;
+        unknown) printf 'dss:warn: Cannot verify package conffile: %s (%s).\n' "$file" "$package" >&2; report_status=1;;
+      esac
+    fi
     for sidecar in "$file".dpkg-dist "$file".dpkg-old "$file".ucf-dist "$file".ucf-old "$file".rpmnew "$file".rpmsave; do
       [ -e "$sidecar" ] || [ -L "$sidecar" ] || continue
+      if [ "$mode" = review ]; then
+        case "$sidecar" in *.dpkg-old|*.ucf-old|*.rpmsave) :;; *) continue;; esac
+        # Rename/copy can preserve mtime; ctime identifies copies changed during this baseline.
+        stamp=$(stat -c %Z -- "$sidecar") || { report_status=1; continue; }
+        [ "$stamp" -ge "$since" ] || continue
+        [ "$state" != unknown ] || report_status=1
+        [ -f "$sidecar" ] || continue
+        if [ "$state" = missing ]; then
+          printf 'dss:warn: Review configuration: %s (%s) is missing. Previous copy: %s\n' "$file" "$package" "$sidecar"; continue
+        fi
+        [ -f "$file" ] || continue
+        cmp -s -- "$file" "$sidecar"; status=$?
+        case "$status" in 0) continue;; 1) :;; *) report_status=1; continue;; esac
+        if [ "$state" = unchanged ]; then summary_state='matches package defaults'; else summary_state='differs from the previous copy; defaults unconfirmed'; fi
+        printf 'dss:warn: Review configuration: %s (%s) %s. Previous copy: %s\n' "$file" "$package" "$summary_state" "$sidecar"
+        continue
+      fi
       sidecars=$((sidecars+1))
       printf 'dss:info: Existing configuration sidecar: %s.\n' "$sidecar"
       if [ "$mode" = summary ] || [ ! -f "$file" ] || [ ! -r "$file" ]; then continue; fi
@@ -6400,7 +6441,7 @@ function print_pkg_to_modified_diff() {
       fi
     done
   done <<< "$records"
-  if [ "$sidecars" -eq 0 ]; then
+  if [ "$mode" != review ] && [ "$sidecars" -eq 0 ]; then
     echo 'dss:info: No existing package conffile sidecars found; local configuration changes may still exist.'
   fi
   return "$report_status"
@@ -6710,7 +6751,7 @@ function apt_get_upgrade() {
 }
 
 function plesk_upgrade() {
-  which plesk >/dev/null 2>&1 || return 0
+  command -v plesk >/dev/null 2>&1 || return 0
   plesk installer --select-release-current --reinstall-patch --upgrade-installed-components
   local ret=$?
   [ "$ret" -ne 0 ] && echo "dss:error:plesk upgrade failed." >&2
@@ -6915,7 +6956,7 @@ return 0
 
 
 function fix_missing_lsb_release() {
-which lsb_release >/dev/null 2>&1 && return 0
+command -v lsb_release >/dev/null 2>&1 && return 0
 ! [ -f /etc/debian_version ] && return 0
 echo "dss:info: Missing lsb release command.  trying to install it."
 apt_get_update || return $?
@@ -6930,7 +6971,7 @@ function yum_upgrade() {
   [ ! -f /etc/redhat-release ] && return 0
   check_disk_space || return 1
   yum_enable_rhel4 || return 0
-  if ! which yum >/dev/null 2>&1; then echo "dss:info: yum not found."; return 1; fi
+  if ! command -v yum >/dev/null 2>&1; then echo "dss:info: yum not found."; return 1; fi
   local QOPT=" -q"
   echo "dss:trace:yum_upgrade"
 
@@ -6951,7 +6992,7 @@ function yum_upgrade() {
 function yum_enable_rhel4() {
 [ ! -f /etc/redhat-release ] && return 0
 ! grep -qai 'release.* 4' /etc/redhat-release && return 0
-if which yum >/dev/null 2>&1; then echo "dss:info: yum enabled on a rhel4 distro already."; return 0; fi
+if command -v yum >/dev/null 2>&1; then echo "dss:info: yum enabled on a rhel4 distro already."; return 0; fi
 echo "dss:info: yum not enabled on $(print_distro_info).  Trying to enable it."
 {
 rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/libxml2-2.6.16-12.6.i386.rpm
@@ -6983,7 +7024,7 @@ fi
 
 wget -nc -O /etc/yum.repos.d/CentOS-Base.repo http://vault.centos.org/4.9/CentOS-Base.repo
 }
-if which yum >/dev/null 2>&1; then echo "dss:info: yum enabled on a rhel4 distro."; return 0
+if command -v yum >/dev/null 2>&1; then echo "dss:info: yum enabled on a rhel4 distro."; return 0
 else echo "dss:info: yum install failed on a rhel4 distro."; return 1 ; fi
 return 0
 }
@@ -7046,7 +7087,7 @@ if [ ! -x /usr/bin/yum ] ; then
     echo "dss:warn: Cannot do a yum install on this host, yum not installed, no /etc/apt/sources.list either."
     return 1
   fi
-  if ! which apt-get >/dev/null 2>&1 ; then
+  if ! command -v apt-get >/dev/null 2>&1 ; then
     echo "dss:warn: Cannot do a yum install on this host, yum not installed, no apt-get either."
   fi
   echo "dss:info: Trying to install yum via apt-get"
@@ -7055,10 +7096,6 @@ fi
 if [ ! -x /usr/bin/yum ] ; then
   echo "dss:warn: Cannot do a yum install on this host, yum not installed"
   return 1
-fi
-if [ ! -x /usr/bin/which ]; then
-  echo "dss:warn: Which not installed.  Installing that with yum install which."
-  yum install -y which
 fi
 
 # this file was added by us, but with wrong name (ending in s).
@@ -7798,6 +7835,31 @@ function manifest_capture() {
 )
 }
 
+# Summarize recorded facts, without interpreting individual application settings.
+function manifest_print_key_changes() {
+  local baseline=$3
+  # Review records use tab-separated key="JSON value" fields; retain escaping in display text.
+  awk -F '\t' '
+    $1 == "listener" {
+      for (key in fields) delete fields[key]
+      for (i=2;i<=NF;i++) { key=$i; sub(/=.*/, "", key); value=substr($i,length(key)+2); fields[key]=substr(value,2,length(value)-2) }
+      address=fields["address"]; if (index(address, ":") && address !~ /^\[/) address="[" address "]"
+      endpoint=address ":" fields["port"]; name=fields["program"]
+      if (FILENAME == ARGV[1]) before[name SUBSEP endpoint]=1; else after[name SUBSEP endpoint]=1
+      names[name]=1
+    }
+    END {
+      for (name in names) {
+        removed=""; added=""
+        for (entry in before) if (!(entry in after)) { split(entry, parts, SUBSEP); if (parts[1] == name) removed=removed (removed ? ", " : "") parts[2] }
+        for (entry in after) if (!(entry in before)) { split(entry, parts, SUBSEP); if (parts[1] == name) added=added (added ? ", " : "") parts[2] }
+        if (removed != "" || added != "") printf "dss:stage: Listening changes: %s; no longer: %s; added: %s.\n", name, (removed ? removed : "none"), (added ? added : "none")
+      }
+    }
+  ' "$1" "$2" || return 1
+  print_pkg_to_modified_diff review "$baseline"
+}
+
 # Status: 0 unchanged, 1 observations changed, 2 comparison unavailable. Never test application behaviour.
 function manifest_compare_baseline() {
 (
@@ -7829,7 +7891,8 @@ function manifest_compare_baseline() {
     printf 'dss:warn: Manifest comparison incomplete: current inventory failed; review %s.\n' "$directory" >&2
     return 2
   fi
-  if ! { : > "$directory/changes.diff" && chmod 600 -- "$directory/changes.diff"; }; then
+  if ! { : > "$directory/changes.diff" && chmod 600 -- "$directory/changes.diff" &&
+      : > "$directory/summary.txt" && chmod 600 -- "$directory/summary.txt"; }; then
     echo 'dss:warn: Manifest comparison unavailable: cannot create a private changes report.' >&2; return 2
   fi
   diff -u --label original-manifest --label current-manifest "$original/manifest.review" "$directory/current/manifest.review" > "$directory/changes.diff"
@@ -7841,6 +7904,10 @@ function manifest_compare_baseline() {
       cat -- "$directory/changes.diff" || return 2;;
     *) printf 'dss:warn: Manifest comparison failed; review %s.\n' "$directory" >&2; return 2;;
   esac
+  if ! manifest_print_key_changes "$original/manifest.review" "$directory/current/manifest.review" "$baseline" > "$directory/summary.txt"; then
+    echo 'dss:warn: Key-change summary is incomplete; review the detailed configuration report.' >> "$directory/summary.txt" || return 2
+  fi
+  cat -- "$directory/summary.txt" >&2 || return 2
   return "$result"
 )
 }

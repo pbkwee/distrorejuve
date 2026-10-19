@@ -31,7 +31,7 @@ if [ -z "${UCF_FORCE_CONFFOLD:-}" ]; then
   export UCF_FORCE_CONFFNEW="${UCF_FORCE_CONFFNEW:-1}"
   export UCF_FORCE_CONFFMISS="${UCF_FORCE_CONFFMISS:-1}"
 fi
-APT_GET_INSTALL_OPTIONS=' -y -o DPkg::Lock::Timeout=-1 -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confmiss '
+APT_GET_INSTALL_OPTIONS=' -y -o DPkg::Lock::Timeout=-1 -o APT::Get::AllowUnauthenticated=false -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confmiss '
 # export this variable, e.g. to DAYS_UPGRADE_ONGOING=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
 DAYS_UPGRADE_ONGOING="${DAYS_UPGRADE_ONGOING:-7}"
 function print_usage() {
@@ -93,6 +93,10 @@ Run with --show-cruft to see packages that do not belong to the current distro. 
 Run with --remove-cruft to remove old packages and 32 bit applications on 64 bit distros.
 
 Run with --remove-deprecated-packages to remove old packages
+
+Package authentication is required by default. ALLOW_UNAUTHENTICATED_ARCHIVES=true permits
+unauthenticated installs only while every binary source is an official archived repository.
+It does not repair signing keys or change APT's handling of repository indexes.
 
 Add --crossgrade to a release-upgrade command to permit i386 to amd64 conversion at the last
 release supporting native i386 (Debian 12 or Ubuntu 18.04), then continue to the requested target.
@@ -489,6 +493,81 @@ function apt_sources_process() {
   ' "$file"
 }
 
+# Both caching and archive trust must inspect the paths APT actually uses.
+function apt_config_has_standard_paths() {
+  printf '%s\n' "$1" | awk -F '"' '
+    BEGIN {
+      expected["Dir"]="/"; expected["Dir::State"]="var/lib/apt"
+      expected["Dir::State::lists"]="lists/"; expected["Dir::State::status"]="/var/lib/dpkg/status"
+      expected["Dir::State::extended_states"]="extended_states"
+      expected["Dir::Cache"]="var/cache/apt"; expected["Dir::Cache::archives"]="archives/"
+      expected["Dir::Cache::pkgcache"]="pkgcache.bin"; expected["Dir::Cache::srcpkgcache"]="srcpkgcache.bin"
+      expected["Dir::Etc"]="etc/apt"; expected["Dir::Etc::sourcelist"]="sources.list"
+      expected["Dir::Etc::sourceparts"]="sources.list.d"; expected["Dir::Etc::main"]="apt.conf"
+      expected["Dir::Etc::parts"]="apt.conf.d"; expected["Dir::Etc::preferences"]="preferences"
+      expected["Dir::Etc::preferencesparts"]="preferences.d"
+      expected["Dir::Etc::trusted"]="trusted.gpg"; expected["Dir::Etc::trustedparts"]="trusted.gpg.d"
+    }
+    { key=$1; sub(/[ \t]+$/, "", key)
+      if ((key in expected) && $2 != expected[key] &&
+          !(key ~ /^Dir::Cache::(srcpkgcache|pkgcache)$/ && $2 == "")) bad=1
+      if (key == "RootDir" && $2 != "") bad=1
+      # APT applies binary-specific settings after the common configuration.
+      if (key ~ /^Binary::[^:]+::(Dir($|::)|RootDir$)/ && $2 != "") bad=1
+    }
+    END { exit bad }
+  '
+}
+
+# Expired archive signing keys need explicit consent; never extend it to live/vendor sources.
+function apt_configure_archive_authentication() {
+  local requested=${ALLOW_UNAUTHENTICATED_ARCHIVES-false} previous=${apt_archive_authentication_enabled:-false}
+  local records config provider type uri suite base _ found=false eligible=true
+  apt_archive_authentication_enabled=false
+  APT_GET_INSTALL_OPTIONS=${APT_GET_INSTALL_OPTIONS// -o APT::Get::AllowUnauthenticated=true/}
+  case "$requested" in
+    false) return 0;;
+    true) :;;
+    *) echo 'dss:error: ALLOW_UNAUTHENTICATED_ARCHIVES must be true or false.' >&2; return 1;;
+  esac
+  if [ -n "$APT_CONFIG$DPKG_ADMINDIR$DPKG_ROOT" ]; then
+    echo 'dss:error: Archive authentication exception cannot inspect custom APT/dpkg configuration.' >&2; return 1
+  fi
+  case "$APT_GET_INSTALL_OPTIONS" in *Dir::*|*--admindir*|*--root*)
+    echo 'dss:error: Archive authentication exception requires standard APT paths.' >&2; return 1;; esac
+  config=$(apt-config dump) || return 1
+  apt_config_has_standard_paths "$config" || {
+    echo 'dss:error: Archive authentication exception requires standard APT paths.' >&2; return 1;
+  }
+  records=$(apt_sources_list) || return 1
+  while IFS=$'\t' read -r _ _ provider type uri suite _ _; do
+    [ "$type" = deb ] || continue
+    found=true
+    uri=${uri%/}; base=${suite%%[-/]*}
+    case "$provider:$uri" in
+      debian:http://archive.debian.org/debian|debian:https://archive.debian.org/debian|\
+      debian:http://archive.debian.org/debian-security|debian:https://archive.debian.org/debian-security|\
+      debian:http://archive.debian.org/debian-backports|debian:https://archive.debian.org/debian-backports)
+        case " $DEBIAN_ARCHIVE " in *" $base "*) :;; *) eligible=false;; esac;;
+      ubuntu:http://old-releases.ubuntu.com/ubuntu|ubuntu:https://old-releases.ubuntu.com/ubuntu)
+        case " $OLD_RELEASES_UBUNTU " in *" $base "*) :;; *) eligible=false;; esac;;
+      *) eligible=false;;
+    esac
+  done <<< "$records"
+  if ! $found; then
+    echo 'dss:error: No active binary repositories; archive authentication exception was not enabled.' >&2; return 1
+  fi
+  if $eligible; then
+    apt_archive_authentication_enabled=true
+    APT_GET_INSTALL_OPTIONS="$APT_GET_INSTALL_OPTIONS -o APT::Get::AllowUnauthenticated=true"
+    if ! $previous; then
+      echo 'dss:warn: Explicitly allowing unauthenticated packages from official archived repositories; package authenticity is not guaranteed.' >&2
+    fi
+  else
+    echo 'dss:trace: Archive authentication exception does not apply to live, vendor or unknown repositories; authentication remains required.' >&2
+  fi
+}
+
 function apt_sources_list() {
   local file
   while IFS= read -r file; do
@@ -529,6 +608,9 @@ function apt_sources_rewrite() {
       rm -r -- "$stage"; return 1
     fi
   done
+  # Source changes revoke the previous invocation-only archive allowance before package work.
+  apt_archive_authentication_enabled=false
+  APT_GET_INSTALL_OPTIONS=${APT_GET_INSTALL_OPTIONS// -o APT::Get::AllowUnauthenticated=true/}
   apt_state_updated=
   apt_state_invalidate_packages
   for index in "${!source_files[@]}"; do
@@ -919,6 +1001,8 @@ function apt_ensure_archive_keyring() {
   echo "dss:stage: Installing/configuring the distribution archive keyring: $package" >&2
   # apt_get_install reads this dynamically scoped string; do not weaken existing trust to bootstrap it.
   # shellcheck disable=SC2034
+  local ALLOW_UNAUTHENTICATED_ARCHIVES=false
+  # shellcheck disable=SC2034
   local APT_GET_INSTALL_OPTIONS="$APT_GET_INSTALL_OPTIONS -o APT::Get::AllowUnauthenticated=false -o APT::Get::AutomaticRemove=false --no-remove"
   if apt_get_install "$package"; then :
   else
@@ -1284,6 +1368,11 @@ function apt_get_apply() {
 (
   local directory additions status package_umask attempt
   local -a pipeline_status=()
+  # Recheck sources even if the caller expanded options before they changed.
+  if [ "${ALLOW_UNAUTHENTICATED_ARCHIVES-false}" != false ]; then
+    apt_configure_archive_authentication || return 1
+    set -- "$@" -o APT::Get::AllowUnauthenticated="$apt_archive_authentication_enabled"
+  fi
   package_umask=$(umask) || return 1
   umask 077
   upgrade_php_runtime_prepare || return 1
@@ -3407,7 +3496,7 @@ function rm_overwrite_files() {
   fi
   local mysqlerrlogs="$([ -d /var/lib/mysql ] && [ -d /var/log/mysql ] && find /var/lib/mysql /var/log/mysql -type f -mmin -10 | egrep '\.err$|mysql/error.log')"
   if [ -d /var/lib/mysql ] ; then
-    mysqlerrlogs="$mysqlerrlog $tmplog"
+    mysqlerrlogs="$mysqlerrlogs $tmplog"
   fi
   if [ ! -z "$mysqlerrlogs" ] && grep -qai 'Thread stack overrun' $mysqlerrlogs; then
     echo "dss:warn: mysql Thread stack overrun.  Attempting to tweak 128K stacks to be bigger."
@@ -3525,26 +3614,7 @@ function apt_state_output_signature() {
   set -o pipefail
   config=$(apt-config dump) || return 1
   # Custom roots can move inputs outside the paths inspected below; run normally there.
-  printf '%s\n' "$config" | awk -F '"' '
-    BEGIN {
-      expected["Dir"]="/"; expected["Dir::State"]="var/lib/apt"
-      expected["Dir::State::lists"]="lists/"; expected["Dir::State::status"]="/var/lib/dpkg/status"
-      expected["Dir::State::extended_states"]="extended_states"
-      expected["Dir::Cache"]="var/cache/apt"; expected["Dir::Cache::archives"]="archives/"
-      expected["Dir::Cache::pkgcache"]="pkgcache.bin"; expected["Dir::Cache::srcpkgcache"]="srcpkgcache.bin"
-      expected["Dir::Etc"]="etc/apt"; expected["Dir::Etc::sourcelist"]="sources.list"
-      expected["Dir::Etc::sourceparts"]="sources.list.d"; expected["Dir::Etc::main"]="apt.conf"
-      expected["Dir::Etc::parts"]="apt.conf.d"; expected["Dir::Etc::preferences"]="preferences"
-      expected["Dir::Etc::preferencesparts"]="preferences.d"
-      expected["Dir::Etc::trusted"]="trusted.gpg"; expected["Dir::Etc::trustedparts"]="trusted.gpg.d"
-    }
-    { key=$1; sub(/[ \t]+$/, "", key)
-      if ((key in expected) && $2 != expected[key] &&
-          !(key ~ /^Dir::Cache::(srcpkgcache|pkgcache)$/ && $2 == "")) bad=1
-      if (key == "RootDir" && $2 != "") bad=1
-    }
-    END { exit bad }
-  ' || return 1
+  apt_config_has_standard_paths "$config" || return 1
   sources=$(apt_sources_files) || return 1
   {
     printf '%s\n' "$config" "$APT_GET_INSTALL_OPTIONS"
@@ -5883,7 +5953,7 @@ function print_no_available_versions() {
 # e.g. cruft_packages0 show 32bit
 function cruft_packages0() {
   [  ! -f /etc/debian_version ] && return 0
-  [  ! -x /usr/bin/apt-show-versions ] && apt-get $APT_GET_INSTALL_OPTIONS install apt-show-versions
+  if [ ! -x /usr/bin/apt-show-versions ]; then apt_get_install apt-show-versions || return $?; fi
   local cruftlog=$(mktemp "cruftpackages.log.XXXXXX")
   [ "$1" = "show" ] && local show="true"
   [ "$1" = "has" ] && local has="true" && local hasold="yes" && local has32bit="true"
@@ -5920,7 +5990,7 @@ function cruft_packages0() {
       # may also need to add skip-grant-tables to /etc/mysql/my.cnf [mysqld] section
       echo "$oldpkgstoremove" | grep -qai mysql-ser && apt_get_install mysql-server
       echo "$oldpkgstoremove" | grep -qai mariadb-server && apt_get_install mariadb-server
-      apt_get_remove $oldpkgstoremove
+      apt_get_remove $oldpkgstoremove || commandret=$((commandret+1))
       #apt-get $APT_GET_INSTALL_OPTIONS autoremove
     fi
   fi
@@ -5934,9 +6004,6 @@ function cruft_packages0() {
     fi
   fi
   if [  ! -z "$bit32" ]; then
-    if [ $(getconf LONG_BIT) -eq 32 ]; then
-      return 0
-    fi
     if [ $(getconf LONG_BIT) -eq 64 ]; then
       dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
       if [  $(cat "$cruftlog" | head | wc -l ) -gt 0 ]; then
@@ -6494,6 +6561,7 @@ function record_config_state() {
 
 function apt_get_update() {
 pause_check
+apt_configure_archive_authentication || return 1
 local tmplog signature completed inputs current_inputs warning_status
 signature=$(apt_state_output_signature repositories 2>/dev/null) || signature=
 if [ -n "$signature" ] && [ "$signature" = "${apt_state_updated:-}" ]; then
@@ -6527,7 +6595,7 @@ if [ "$ret" -ne 0 ]; then
     release_options=(-o Acquire::AllowReleaseInfoChange::Suite=true)
   fi
   echo "dss:stage: Retrying index refresh over IPv4 after APT update failed (status $ret)" >&2
-  apt-get -o Acquire::ForceIPv4=true -o APT::Get::AllowUnauthenticated=yes -o Acquire::Check-Valid-Until=false "${release_options[@]}" update 2>&1 | tee -a "$tmplog"
+  apt-get $APT_GET_INSTALL_OPTIONS -o Acquire::ForceIPv4=true "${release_options[@]}" update 2>&1 | tee -a "$tmplog"
   ret=${PIPESTATUS[0]}
 fi
 

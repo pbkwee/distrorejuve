@@ -12,7 +12,7 @@ Paste the report inside a code block. Remove anything you do not want to publish
 Nothing is uploaded automatically.
 
 If no report was created, for example after an interruption or with an older script, generate one yourself.
-Use the same script copy that ran the upgrade:
+Use the latest script copy to get current diagnostics, including for an older run:
 
 ```sh
 umask 077
@@ -21,18 +21,23 @@ less support-report.txt
 ```
 
 Replace `run.EXAMPLE` with the run directory printed by your failed command.
-Existing logs from older versions can be used; their exit status and original script checksum may be unknown.
+Keep the original run directory intact. The report distinguishes the collector checksum from the original run checksum.
+Older logs may lack the exit status, original checksum or operation-level failure status.
 Without a run directory, `--support-report` collects current system facts only.
 If a collector fails, the report marks the missing fields and returns a nonzero status.
 
 The report contains script checksums, the upgrade action and exit status when recorded,
-the crossgrade/target choice and recorded incomplete verification. It also contains current
-distribution/release, architecture, kernel series, Bash version, package-state counts and free space.
+the crossgrade/target choice, recorded release/package/service checks and available APT update failure phase/status.
+It also contains current distribution/release, architecture, kernel series, Bash/APT/dpkg versions,
+package-state counts, free space and exit statuses from read-only APT policy and upgrade simulations.
+The plan counts installation (including upgrades), removal, purge and configuration operations.
+Simulation counts describe the currently configured indexes; zero planned changes does not prove the requested upgrade completed.
+A current release label or clean package database does not establish successful release, package and service verification.
 Current system facts describe collection time; they are not the original pre-upgrade baseline.
 Known stage/error messages become fixed category labels. The report does not copy log excerpts.
 An observed error category can refer to an earlier failed attempt within the run; it does not prove a current fault.
 
-The report omits hostnames, IP/email addresses, repository URLs, usernames, package names,
+The report omits hostnames, IP/email addresses, repository URLs, usernames, installed package lists,
 application inventories, environment values, arbitrary paths and configuration contents.
 It performs no network requests, package changes or service changes.
 Software versions and system-state counts are still information about your system, so review them before publication.

@@ -6603,7 +6603,8 @@ function record_config_state() {
 function apt_get_update() {
 pause_check
 apt_configure_archive_authentication || return 1
-local tmplog signature completed inputs current_inputs warning_status
+local tmplog signature completed inputs current_inputs warning_status phase=indexes
+local -a update_status
 signature=$(apt_state_output_signature repositories 2>/dev/null) || signature=
 if [ -n "$signature" ] && [ "$signature" = "${apt_state_updated:-}" ]; then
   ret=0
@@ -6617,7 +6618,8 @@ apt_state_upgraded=
 apt_state_dist_upgraded=
 tmplog=$(mktemp "tmplog.aptgetupdate.log.XXXXXX") || return 1
 apt-get $APT_GET_INSTALL_OPTIONS update 2>&1 | tee "$tmplog"
-ret=${PIPESTATUS[0]}
+update_status=("${PIPESTATUS[@]}")
+ret=${update_status[0]}
 
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
 if [ "$ret" -ne 0 ]; then
@@ -6637,7 +6639,11 @@ if [ "$ret" -ne 0 ]; then
   fi
   echo "dss:stage: Retrying index refresh over IPv4 after APT update failed (status $ret)" >&2
   apt-get $APT_GET_INSTALL_OPTIONS -o Acquire::ForceIPv4=true "${release_options[@]}" update 2>&1 | tee -a "$tmplog"
-  ret=${PIPESTATUS[0]}
+  update_status=("${PIPESTATUS[@]}")
+  ret=${update_status[0]}
+fi
+if [ "$ret" -eq 0 ] && [ "${update_status[1]}" -ne 0 ]; then
+  ret=${update_status[1]}; phase=index_log_capture
 fi
 
 # https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.html#non-free-split
@@ -6647,6 +6653,7 @@ fi
 
 # A stale APT::Default-Release can break package selection even after a good update.
 if [ "$ret" -eq 0 ]; then
+  phase=policy
   apt-cache policy >/dev/null
   ret=$?
   [ "$ret" -ne 0 ] && echo "dss:error: APT policy is invalid. Review APT::Default-Release (apt-config dump) and release pins before retrying; policy files were not changed." >&2
@@ -6663,7 +6670,7 @@ if [ "$ret" -eq 0 ] && [ "$warning_status" -eq 1 ]; then
   fi
 fi
 rm -f "$tmplog"
-[ "$ret" -ne 0 ] && echo "dss:error:apt_get_update failed." >&2
+[ "$ret" -ne 0 ] && echo "dss:error:apt_get_update failed (phase $phase, status $ret)." >&2
 return $ret
 }
 
@@ -7992,6 +7999,7 @@ function support_print_report() {
   set -o pipefail
   local directory=${1:-} status=0 release family=unknown architecture kernel digest run_digest=unknown
   local exit_status=unknown action=unknown crossgrade=unknown target=unknown verification=not_recorded counts available mount
+  local tool version probe_status plan
   if [ -n "$directory" ]; then
     if [ ! -d "$directory" ] || [ -L "$directory" ] || [ -L "$directory/support.context" ] || [ -L "$directory/output.log" ]; then
       printf '%s\n' 'dss:error: Choose an existing run directory without linked report files.' >&2; return 1
@@ -8027,10 +8035,9 @@ function support_print_report() {
   case "$architecture" in amd64|i386|arm64|armhf|armel|ppc64el|s390x|riscv64|mips|mipsel|mips64el) :;; *) architecture=unknown; status=1;; esac
   kernel=$(uname -r 2>/dev/null | awk 'match($0,/^[0-9]+[.][0-9]+/) { print substr($0,RSTART,RLENGTH); exit }') || kernel=unknown
   if [ -z "$kernel" ] || [ "$kernel" = unknown ]; then kernel=unknown; status=1; fi
-  printf '%s\n' 'distrorejuve support report v1' 'Review before posting. No raw logs, configuration, host identifiers or package names are included.'
+  printf '%s\n' 'distrorejuve support report v1' 'Review before posting. No raw logs, configuration, host identifiers or installed package lists are included.'
   printf 'collector_sha256: %s\nrun_script_sha256: %s\naction: %s\nexit_status: %s\n' "$digest" "$run_digest" "$action" "$exit_status"
   printf 'crossgrade_requested: %s\nrequested_debian_release: %s\n' "$crossgrade" "$target"
-  printf 'recorded_completion_verification: %s\n' "$verification"
   printf 'current_distribution: %s\ncurrent_release: %s\ncurrent_package_architecture: %s\ncurrent_kernel_series: %s\ncollector_bash_version: %s.%s.%s\n' \
     "$family" "$release" "$architecture" "${kernel:-unknown}" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${BASH_VERSINFO[2]}"
   if counts=$(LC_ALL=C dpkg-query -W -f='${Status}\n' 2>/dev/null | awk '
@@ -8044,13 +8051,44 @@ function support_print_report() {
     END { if (bad) exit 1; printf "installed=%d held=%d incomplete=%d residual_config=%d", installed, held, incomplete, residual }
   '); then printf 'package_states: %s\n' "$counts"
   else printf '%s\n' 'package_states: unknown'; status=1; fi
+  for tool in apt dpkg; do
+    version=$(LC_ALL=C dpkg-query -W -f='${Version}\n' "$tool" 2>/dev/null | awk '
+      NR == 1 { sub(/^[0-9]+:/, ""); if (match($0, /^[0-9]+([.][0-9]+)+/)) print substr($0, RSTART, RLENGTH); else exit 1 }
+    ') || version=
+    if [ -z "$version" ]; then version=unknown; status=1; fi
+    printf 'current_%s_version: %s\n' "$tool" "$version"
+  done
+  LC_ALL=C apt-cache policy >/dev/null 2>&1
+  probe_status=$?
+  printf 'current_apt_policy_exit_status: %s\n' "$probe_status"
+  [ "$probe_status" -ne 127 ] || status=1
+  # A simulation describes current indexes, not completion of the requested release path.
+  plan=$(LC_ALL=C apt-get -s dist-upgrade 2>/dev/null)
+  probe_status=$?
+  printf 'current_index_dist_upgrade_exit_status: %s\n' "$probe_status"
+  if [ "$probe_status" -eq 0 ] && counts=$(printf '%s\n' "$plan" | awk '
+    /^[0-9]+ upgraded, [0-9]+ newly installed, [0-9]+ to remove/ { summary=1 }
+    /^Inst / { install++ } /^Remv / { remove++ } /^Purg / { purge++ } /^Conf / { configure++ }
+    END { if (!summary) exit 1; printf "install_or_upgrade=%d remove=%d purge=%d configure=%d", install, remove, purge, configure }
+  '); then printf 'current_index_package_plan: %s\n' "$counts"
+  else printf '%s\n' 'current_index_package_plan: unknown'; status=1; fi
   for mount in / /usr /var; do
     available=$(LC_ALL=C df -Pk -- "$mount" 2>/dev/null | awk 'END { if (NF >= 6 && $(NF-2) ~ /^[0-9]+$/) print int($(NF-2)/1024); else exit 1 }') || { available=unknown; status=1; }
     printf 'free_mib%s: %s\n' "$mount" "$available"
   done
   if [ -n "$directory" ] && [ -f "$directory/output.log" ]; then
     # Match known messages to fixed labels; never print a matching line or capture group.
-    LC_ALL=C awk '
+    LC_ALL=C awk -v verification="$verification" -v run_status="$exit_status" '
+      /^dss:stage: Outcome: release / {
+        release=packages=services="unknown"; outcome=1
+        if (/^dss:stage: Outcome: release verified [(]/) release="verified"
+        else if (/^dss:stage: Outcome: release not verified;/) release="not_verified"
+        if (/; packages verified [(]/) packages="verified"
+        else if (/; packages not verified;/) packages="not_verified"
+        else if (/; packages failed final verification;/) packages="failed"
+        if (/; services verified[.]$/) services="verified"
+        else if (/; services failed[.]$/) services="failed"
+      }
       /^dss:stage[: ]/ {
         if (/Checking complete requested upgrade path|Rechecking .* before this release transition/) stage="preflight"
         else if (/Refreshing APT package indexes/) stage="apt_update"
@@ -8063,8 +8101,27 @@ function support_print_report() {
       { line=tolower($0)
         if (line ~ /unmet dependencies|held broken packages/) errors["dependencies"]=1
         if (line ~ /hash sum mismatch/) errors["download_checksum"]=1
-        if (line ~ /no_pubkey|expkeysig|signatures couldn.t be verified/) errors["repository_signature"]=1
-        if (line ~ /does not have a release file|404[ :]+not found/) errors["repository_unavailable"]=1
+        if (line ~ /no_pubkey|expkeysig|keyexpired|signatures couldn.t be verified|signatures were invalid|public key is not available|repository.* is not signed/) errors["repository_signature"]=1
+        if (line ~ /release file.*expired|release file.*not valid yet/) errors["repository_freshness"]=1
+        if (line ~ /does not have a release file|no longer has a release file|404[ :]+not found/) errors["repository_unavailable"]=1
+        if (line ~ /401[ :]+unauthorized|403[ :]+forbidden/) errors["repository_access"]=1
+        if (line ~ /temporary failure resolving|could not resolve|could not resolve host/) errors["network_dns"]=1
+        if (line ~ /connection timed out|connection refused|could not connect|network is unreachable/) errors["network_connection"]=1
+        if (line ~ /certificate verification failed|certificate.*not trusted|tls.*handshake/) errors["network_tls"]=1
+        if (line ~ /failed to fetch|some index files failed to download/) errors["repository_fetch"]=1
+        if (line ~ /changed its .* value|allow-releaseinfo-change/) errors["repository_metadata_change"]=1
+        if (line ~ /apt::default-release|apt policy is invalid/) errors["apt_policy"]=1
+        if (line ~ /^e:/) errors["apt"]=1
+        if (line ~ /^dss:error:apt_get_update failed/) {
+          errors["apt_update"]=1; update_phase="unknown"; update_status="unknown"
+          if (line ~ /phase indexes,/) update_phase="indexes"
+          else if (line ~ /phase index_log_capture,/) update_phase="index_log_capture"
+          else if (line ~ /phase policy,/) update_phase="policy"
+          if (match(line, /status [0-9]+/)) {
+            code=substr(line, RSTART+7, RLENGTH-7)
+            if (length(code) <= 3 && code+0 > 0 && code+0 <= 255) update_status=code+0
+          }
+        }
         if (line ~ /could not get lock|unable to acquire.*lock/) errors["package_lock"]=1
         if (line ~ /no space left on device|insufficient.*space/) errors["disk_space"]=1
         if (line ~ /trying to overwrite/) errors["package_file_conflict"]=1
@@ -8073,15 +8130,23 @@ function support_print_report() {
         if (line ~ /dpkg: error|dpkg returned an error/) errors["dpkg"]=1
       }
       END {
+        if (outcome && verification != "incomplete")
+          verification=(run_status == "0" && release == "verified" && packages == "verified" && services == "verified" ? "verified" : "incomplete")
+        printf "recorded_completion_verification: %s\n", verification
+        printf "recorded_release_check: %s\nrecorded_package_check: %s\nrecorded_service_check: %s\n", (outcome ? release : "not_recorded"), (outcome ? packages : "not_recorded"), (outcome ? services : "not_recorded")
+        printf "last_recorded_apt_update_failure_phase: %s\nlast_recorded_apt_update_exit_status: %s\n", (update_phase == "" ? "not_recorded" : update_phase), (update_status == "" ? "not_recorded" : update_status)
         printf "last_recognised_stage: %s\n", (stage == "" ? "unknown" : stage)
         printf "observed_error_categories:"
         for (error in errors) { printf " %s", error; found=1 }
-        if (!found) printf " unclassified_or_none"
+        if (!found) printf " %s", (run_status == "0" ? "none_recognised" : (run_status == "unknown" ? "unclassified_or_none" : "unclassified_failure"))
         print ""
       }
     ' "$directory/output.log" 2>/dev/null || status=1
   else
-    printf '%s\n' 'last_recognised_stage: unknown' 'observed_error_categories: unknown'
+    printf 'recorded_completion_verification: %s\n' "$verification"
+    printf '%s\n' 'recorded_release_check: not_recorded' 'recorded_package_check: not_recorded' 'recorded_service_check: not_recorded' \
+      'last_recorded_apt_update_failure_phase: not_recorded' 'last_recorded_apt_update_exit_status: not_recorded' \
+      'last_recognised_stage: unknown' 'observed_error_categories: unknown'
     [ -z "$directory" ] || status=1
   fi
   printf '%s\n' 'Error categories are observations from the run, not a current service-health check.'

@@ -84,7 +84,7 @@ Missing names, indirect configuration and automatically managed certificates may
 
 Upgrade commands automatically retain private detailed logs in /root/distrorejuveinfo/runs.
 Use --verbose to show command output too, or --trace to write a separate Bash trace.
-DISTROREJUVE_LOG_DIR changes the log parent directory. Terminal colours respect NO_COLOR.
+DISTROREJUVE_LOG_DIR changes the log parent directory. NO_COLOR disables bold terminal labels.
 
 Run with --show-changes to report the differences pre/post upgrading (packages installed, config files, ports, etc).
 
@@ -1340,6 +1340,34 @@ function upgrade_php_apache_module_is_enabled() {
   return 1
 }
 
+# 0 Apache server present, 1 confirmed absent, 2 cannot safely establish its use.
+function upgrade_php_has_apache_server() {
+  local packages=$1 state processes status
+  if printf '%s\n' "$packages" | awk -F '\t' '
+    $1 ~ / (installed|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)$/ &&
+      $2 ~ /^(apache2|apache2[.]2-common|apache2-mpm-.*)(:[a-z0-9-]+)?$/ { found=1 }
+    END { exit !found }
+  '; then return 0
+  else status=$?; [ "$status" -eq 1 ] || return 2; fi
+  if [ -e /etc/init.d/apache2 ] || [ -e /etc/init/apache2.conf ]; then return 0; fi
+  if [ -d /run/systemd/system ]; then
+    state=$(readlink /proc/1/exe) || return 2
+    case "$state" in */systemd|*/'systemd (deleted)')
+      command -v systemctl >/dev/null || return 2
+      state=$(systemctl show -p LoadState -p ActiveState apache2.service) || return 2
+      printf '%s\n' "$state" | grep -Eq '^LoadState=(loaded|masked)$' && return 0
+      if ! printf '%s\n' "$state" | grep -qx LoadState=not-found ||
+         ! printf '%s\n' "$state" | grep -qx ActiveState=inactive; then return 2; fi;;
+    esac
+  fi
+  processes=$(LC_ALL=C ps -eo comm=) || return 2
+  if printf '%s\n' "$processes" | grep -Eq '^[[:space:]]*(apache2|httpd)[[:space:]]*$'; then
+    echo 'dss:error: Apache is running without a distribution service. Review its PHP module before upgrading.' >&2
+    return 2
+  else status=$?; [ "$status" -eq 1 ] || return 2; fi
+  return 1
+}
+
 # APT may choose mod_php before the separately requested FPM alternative.
 # Compare package status, not leftover Apache configuration or apache2-utils.
 function upgrade_php_output_new_apache_packages() {
@@ -1703,7 +1731,7 @@ function upgrade_migrate_php_packages() {
   package_umask=$(umask) || return 1
   umask 077
   local target=$1 packages default baseline directory status package arch branch suffix replacement mode concrete
-  local apache='' audit file pending=false listed native preserved requested attempt additions original_packages
+  local apache='' audit file pending=false listed native preserved requested attempt additions original_packages apache_inventory
   local -a installs=()
   local -a removals=()
   local -a handoff_removals=()
@@ -1782,6 +1810,58 @@ function upgrade_migrate_php_packages() {
     done < "$directory/mapping"
     sort -u "$directory/install.packages" -o "$directory/install.packages" || return 1
   fi
+  original_packages=$(cat "$directory/packages.before") || return 1
+  apache_inventory="$directory/packages.before"
+  if [ -f "$directory/apache.inventory" ]; then apache_inventory="$directory/apache.inventory"; fi
+  if [ -f "$directory/apache.package" ] || [ -f "$directory/apache.inventory" ]; then
+    if upgrade_php_has_apache_server "$packages"; then
+      if [ -f "$directory/apache.inventory" ]; then
+        echo "dss:error: Apache use changed during an unfinished PHP migration. Review $directory before retrying." >&2
+        return 1
+      fi
+    else
+      status=$?
+      [ "$status" -eq 1 ] || { echo 'dss:error: Cannot establish whether Apache is in use. PHP package changes stopped.' >&2; return 1; }
+      if [ -f "$directory/apache.state" ] || [ -f "$directory/apache.legacy" ] || [ -f "$directory/apache.mask-owned" ]; then
+        echo "dss:error: Apache handoff state already exists. Review $directory before removing unused modules." >&2
+        return 1
+      fi
+      # Recompute the optional php selector decision; current FPM/CGI may differ on a retry.
+      awk '$0 != "php:all"' "$directory/remove.packages" > "$directory/remove.packages.new" || return 1
+      # Current packages determine backend use; original packages supply removal provenance.
+      awk -F '\t' '
+        FILENAME == ARGV[1] {
+          if ($1 ~ / (installed|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)$/ &&
+              $2 ~ /^php(5|[0-9]+[.][0-9]+)-(fpm|cgi)(:[a-z0-9-]+)?$/) backend=1
+          next
+        }
+        $1 ~ / (installed|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)$/ {
+          name=$2; sub(/:.*/, "", name)
+          if (name ~ /^libapache2-mod-php/) handlers[name ":" $3]=1
+          if (name ~ /^php([0-9]+([.][0-9]+)?)?$/) selectors[name ":" $3]=1
+        }
+        END {
+          for (name in handlers) print name
+          if (!backend) for (name in selectors) print name
+        }
+      ' <(printf '%s\n' "$packages") "$directory/packages.before" >> "$directory/remove.packages.new" || return 1
+      sort -u "$directory/remove.packages.new" -o "$directory/remove.packages.new" || return 1
+      mv "$directory/remove.packages.new" "$directory/remove.packages" || return 1
+      awk '
+        FILENAME == ARGV[1] { name=$0; sub(/:.*/, "", name); removed[name]=1; next }
+        !($0 in removed) && $0 !~ /^libapache2-mod-php/ { print }
+      ' "$directory/remove.packages" "$directory/install.packages" > "$directory/install.packages.new" || return 1
+      mv "$directory/install.packages.new" "$directory/install.packages" || return 1
+      awk -F '\t' '
+        $2 !~ /^libapache2-mod-php/ && $2 !~ /^(apache2|apache2[.]2-common|apache2-mpm-.*)(:[a-z0-9-]+)?$/
+      ' "$directory/packages.before" > "$directory/apache.inventory" || return 1
+      apache_inventory="$directory/apache.inventory"
+      : > "$directory/apache.remove" || return 1
+      rm -f -- "$directory/"{apache.package,apache.handoff,apache.excluded,apache.allowed-removals,remove.plan} || return 1
+      apache=
+      echo 'dss:warn: Removing unused Apache PHP packages. Apache will not be installed. Installed PHP CLI and extension packages will still be upgraded.' >&2
+    fi
+  fi
   # Temporarily remove the installed Apache PHP meta so APT cannot upgrade its handler during removal.
   # The normal install plan restores it; it must never enter the permanent removal list.
   if [ -s "$directory/apache.remove" ]; then
@@ -1793,17 +1873,16 @@ function upgrade_migrate_php_packages() {
     fi
   fi
   # Versionless PHP packages can disappear with the old handler; restore supported ones.
-  original_packages=$(cat "$directory/packages.before") || return 1
   : > "$directory/apache.meta-removals" || return 1
   while IFS=$'\t' read -r status package arch _; do
     if [ "$status" != 'install ok installed' ] || [ "$arch" != all ]; then continue; fi
     package=${package%%:*}
     case "$package" in php-common) continue;; php|php-*) :;; *) continue;; esac
-    if [ "$package" = php ]; then
+    if grep -qxF "$package:all" "$directory/remove.packages"; then :
+    elif [ "$package" = php ]; then
       (umask "$package_umask" && upgrade_php_has_candidate "$package") || return 1
       grep -qxF "$package" "$directory/install.packages" || printf '%s\n' "$package" >> "$directory/install.packages" || return 1
     elif grep -qxF "$package" "$directory/install.packages"; then :
-    elif grep -qxF "$package:all" "$directory/remove.packages"; then :
     elif upgrade_php_is_obsolete_extension_meta "$package" "$directory/mapping" "$original_packages"; then
       printf '%s:all\n' "$package" >> "$directory/remove.packages" || return 1
       echo "dss:warn: Removing obsolete PHP dependency package $package with its unavailable extension; configuration will not be purged." >&2
@@ -1872,12 +1951,12 @@ function upgrade_migrate_php_packages() {
   mv "$directory/install.allowed-removals.new" "$directory/install.allowed-removals" || return 1
   # Negative constraints apply only to new Apache additions, never an existing server role.
   if [ ! -f "$directory/apache.excluded" ]; then
-    upgrade_php_output_new_apache_packages "$directory/packages.before" "$directory/normal-dist-upgrade.plan" > "$directory/apache.excluded" || return 1
+    upgrade_php_output_new_apache_packages "$apache_inventory" "$directory/normal-dist-upgrade.plan" > "$directory/apache.excluded" || return 1
   fi
   while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done < "$directory/apache.excluded"
   for ((attempt=0; attempt<8; attempt++)); do
     (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate --reinstall install "${arguments[@]}") > "$directory/install.plan" 2>&1 || return 1
-    additions=$(upgrade_php_output_new_apache_packages "$directory/packages.before" "$directory/install.plan") || return 1
+    additions=$(upgrade_php_output_new_apache_packages "$apache_inventory" "$directory/install.plan") || return 1
     if [ -n "$additions" ]; then
       [ "$attempt" -lt 7 ] || { echo "dss:error: Cannot preserve the existing web-server role; inspect $directory/install.plan." >&2; return 1; }
       while IFS= read -r package; do
@@ -1932,19 +2011,24 @@ function upgrade_migrate_php_packages() {
   fi
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --download-only --reinstall install "${arguments[@]}") || return 1
   : > "$directory/started" || return 1
-  echo "dss:stage: Updating installed PHP packages to the distribution's default PHP version ($default); configs/inventory: $directory" >&2
   if [ -f "$directory/apache.handoff" ]; then
-    upgrade_php_apache_control "$directory" prepare || return 1
-    if [ "${#handoff_removals[@]}" -gt 0 ]; then
-      (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false remove "${handoff_removals[@]}") || return 1
-      # Removing the old handler can also remove its no-conffile PHP metapackage.
-      packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
-      listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
-      arguments=("${installs[@]}")
-      [ -z "$apache" ] || arguments+=("$apache")
-      while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done <<< "$listed"
-      while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done < "$directory/apache.excluded"
-    fi
+    echo "dss:stage: Preparing Apache for PHP package changes; state: $directory" >&2
+    upgrade_php_apache_control "$directory" prepare || {
+      status=$?
+      printf 'dss:error: Apache/PHP preparation failed (status %s); review %s before retrying.\n' "$status" "$directory" >&2
+      return 1
+    }
+  fi
+  echo "dss:stage: Updating installed PHP packages to the distribution's default PHP version ($default); configs/inventory: $directory" >&2
+  if [ -f "$directory/apache.handoff" ] && [ "${#handoff_removals[@]}" -gt 0 ]; then
+    (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false remove "${handoff_removals[@]}") || return 1
+    # Removing the old handler can also remove its no-conffile PHP metapackage.
+    packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
+    listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
+    arguments=("${installs[@]}")
+    [ -z "$apache" ] || arguments+=("$apache")
+    while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done <<< "$listed"
+    while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done < "$directory/apache.excluded"
   fi
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --no-download --reinstall install "${arguments[@]}") || return 1
   for package in "${installs[@]}" "$apache"; do
@@ -1957,7 +2041,13 @@ function upgrade_migrate_php_packages() {
   audit=$(LC_ALL=C dpkg --audit 2>&1) || { printf '%s\n' "$audit" >&2; return 1; }
   [ -z "$audit" ] || { printf '%s\n' "$audit" >&2; return 1; }
   (umask "$package_umask" && LC_ALL=C apt-get check) || return 1
-  if [ -f "$directory/apache.state" ] || [ -f "$directory/apache.legacy" ]; then upgrade_php_apache_control "$directory" finish || return 1; fi
+  if [ -f "$directory/apache.state" ] || [ -f "$directory/apache.legacy" ]; then
+    upgrade_php_apache_control "$directory" finish || {
+      status=$?
+      printf 'dss:error: Apache/PHP completion failed (status %s); review %s before retrying.\n' "$status" "$directory" >&2
+      return 1
+    }
+  fi
   : > "$directory/completed" || return 1
 )
 }
@@ -8170,12 +8260,14 @@ function support_print_report() {
         else if (/Checking package dependencies|Rechecking dependencies/) stage="dependency_check"
         else if (/Performing full package upgrade|Rechecking the full upgrade|Retrying the full upgrade/) stage="full_upgrade"
         else if (/Upgrading current packages/) stage="package_upgrade"
-        else if (/Checking package changes for PHP|Updating installed PHP packages/) stage="php_migration"
+        else if (/Checking package changes for PHP|Preparing Apache for PHP package changes|Updating installed PHP packages/) stage="php_migration"
         else if (/Checking unused packages/) stage="autoremove"
       }
       { line=tolower($0)
         if (line ~ /unmet dependencies|held broken packages/) errors["dependencies"]=1
         if (line ~ /hash sum mismatch/) errors["download_checksum"]=1
+        if (line ~ /^dss:error: apache\/php (preparation|completion) failed/) errors["php_apache_handoff"]=1
+        if (line ~ /^dss:error: (cannot establish whether apache is in use|apache use changed)/) { errors["php_apache_usage"]=1; stage="php_migration" }
         if (line ~ /^dss:error: apache\/php removal plan (was rejected|rejected [(])/) {
           errors["php_migration_plan"]=1
           count=split("purge unapproved_removal unexpected_install unverified_install early_runtime_change unapproved_upgrade version_check_failed", php_reasons, " ")
@@ -8246,7 +8338,7 @@ function logging_run() (
 	local logging_root="${DISTROREJUVE_LOG_DIR:-/root/distrorejuveinfo/runs}"
 	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
 	local logging_dir logging_log logging_line logging_status logging_original_umask logging_digest logging_action_status=0
-	local logging_color=false logging_summarize=false logging_level logging_required
+	local logging_emphasis=false logging_summarize=false logging_level logging_required
 	local logging_expected_stop=false
 	local -a logging_pipeline_status
 
@@ -8277,7 +8369,7 @@ function logging_run() (
 	fi
 
 	logging_original_umask=$(umask)
-	if [ -t 2 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ]; then logging_color=true; fi
+	if [ -t 2 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ]; then logging_emphasis=true; fi
 	umask 077
 	if ! mkdir -p -- "$logging_root"; then
 		printf '%s\n' 'dss:error Cannot create the detailed-log directory; action was not started.' >&2
@@ -8346,12 +8438,13 @@ function logging_run() (
 		while IFS= read -r logging_line || [ -n "$logging_line" ]; do
 			logging_level=
 			case "$logging_line" in
-				dss:stage:*|dss:stage\ *) logging_level=36 ;;
-				dss:warn:*|dss:warn\ *) logging_level=33 ;;
-				dss:error:*|dss:error\ *) logging_level=31 ;;
+				dss:stage:*|dss:stage\ *) logging_level=stage ;;
+				dss:warn:*|dss:warn\ *) logging_level=warn ;;
+				dss:error:*|dss:error\ *) logging_level=error ;;
 			esac
-			if [ -n "$logging_level" ] && $logging_color; then
-				printf '\033[%sm%s\033[0m\n' "$logging_level" "$logging_line" >&2 || exit 1
+			if [ -n "$logging_level" ] && $logging_emphasis; then
+				# Keep the terminal palette; emphasise only the severity label.
+				printf '\033[1mdss:%s\033[22m%s\n' "$logging_level" "${logging_line#"dss:$logging_level"}" >&2 || exit 1
 			elif [ -n "$logging_level" ] || $logging_verbose; then
 				printf '%s\n' "$logging_line" >&2 || exit 1
 			fi

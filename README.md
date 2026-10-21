@@ -28,6 +28,35 @@ To upgrade Debian to the latest supported release, or Ubuntu to the latest suppo
 sudo bash distrorejuve.sh --dist-upgrade
 ```
 
+### Download failures on very old systems
+
+Old `wget`/OpenSSL versions, such as those on Ubuntu 6.06, can fail with
+`SSL23_GET_SERVER_HELLO:unknown protocol` or `Unable to establish SSL connection`.
+These clients cannot negotiate modern TLS. `--no-check-certificate` does not fix
+that protocol failure, and GitHub redirects plain HTTP downloads to HTTPS.
+
+Download on a newer computer, then copy the file to the old server over SSH.
+Replace `OLD_SERVER` with the server's address. Run these commands on the newer computer:
+
+```sh
+curl --fail --location --output distrorejuve.sh \
+  https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh &&
+scp -O distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
+```
+
+`-O` selects the legacy SCP transfer protocol for old SSH servers. If an older SCP
+client does not recognize `-O`, omit it. If SSH also reports a negotiation failure,
+add the required option to this SCP command:
+
+- If the host-key error offers `ssh-rsa`, add `-oHostKeyAlgorithms=+ssh-rsa`.
+- If the key-exchange error offers `diffie-hellman-group14-sha1`, add `-oKexAlgorithms=+diffie-hellman-group14-sha1`.
+  Use `-oKexAlgorithms=+diffie-hellman-group1-sha1` only if that is the available method.
+- If an existing RSA login key needs SHA-1 signatures, add `-oPubkeyAcceptedAlgorithms=+ssh-rsa`.
+
+Keep these legacy settings on the individual command. See the
+[OpenSSH legacy connection guide](https://www.openssh.org/legacy.html).
+After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /root/distrorejuve.sh --check`.
+
 ## Main options
 
 | Option | Purpose |

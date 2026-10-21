@@ -2261,6 +2261,9 @@ function upgrade_php_runtime_check_sockets() {
     else echo "dss:trace: $kind Unix socket exists: $value (listener/reachability not probed)." >&2; fi
   done <<< "$records"
   if [ "$kind" = fpm ] && [ "$endpoints" -eq 0 ]; then echo 'dss:warn: No literal PHP-FPM listener established; verification incomplete.' >&2; unknown=true; fi
+  if $failure && [ "$kind" = nginx ]; then
+    echo 'dss:warn: Compare NGINX fastcgi_pass with the installed PHP-FPM listen setting. Review old/new pool users, groups and socket permissions before restarting services.' >&2
+  fi
   $failure && return 1
   $unknown && return 2
   return 0
@@ -2336,6 +2339,7 @@ function upgrade_php_runtime_prepare() {
 
 function upgrade_php_runtime_verify() {
   local baseline status
+  echo 'dss:stage: Checking web services and PHP-FPM listeners after package changes' >&2
   if baseline=$(config_state_output_baseline); then
     upgrade_php_runtime_check "$baseline.php-runtime"
     status=$?
@@ -2647,7 +2651,10 @@ function upgrade_finish_run() {
   if $missing_provenance; then cleanup="$cleanup${cleanup:+; }obsolete skipped (no original provenance)"
   elif $cleanup_done; then cleanup="$cleanup${cleanup:+; }obsolete cleanup done"; fi
   if $cleanup_failed; then cleanup="$cleanup${cleanup:+; }cleanup failed (see detailed log)"
-  elif $cleanup_deferred; then cleanup="$cleanup${cleanup:+; }cleanup deferred (see detailed log)"; fi
+  elif $cleanup_deferred; then
+    if [ "$service_summary" = failed ]; then cleanup="$cleanup${cleanup:+; }cleanup deferred (service checks failed)"
+    else cleanup="$cleanup${cleanup:+; }cleanup deferred (see detailed log)"; fi
+  fi
   printf 'dss:stage: Outcome: release %s; packages %s; services %s.\n' "$release" "$packages" "$service_summary" >&2
   if [ -n "$baseline" ]; then
     if php_removals=$(upgrade_outcome_output_php_removals "$baseline"); then
@@ -8242,13 +8249,21 @@ function support_print_report() {
     printf 'free_mib%s: %s\n' "$mount" "$available"
   done
   if [ -n "$directory" ] && [ -f "$directory/output.log" ]; then
-    # Match known messages to fixed labels; never print a matching line or capture group.
-    LC_ALL=C awk -v verification="$verification" -v run_status="$exit_status" '
+    # Match known messages to fixed labels; only known distribution codenames may be copied.
+    LC_ALL=C awk -v verification="$verification" -v run_status="$exit_status" -v known_releases="$ALL_DEBIAN $ALL_UBUNTU" '
+      function codename(text) {
+        if (match(text, /[(][a-z]+[)]$/)) {
+          text=substr(text, RSTART+1, RLENGTH-2)
+          if (index(" " known_releases " ", " " text " ")) return text
+        }
+        return "unknown"
+      }
       /^dss:stage: Outcome: release / {
-        release=packages=services="unknown"; outcome=1
-        if (/^dss:stage: Outcome: release verified [(]/) release="verified"
+        release=packages=services=release_name=package_release_name="unknown"; outcome=1
+        split($0, checks, ";")
+        if (/^dss:stage: Outcome: release verified [(]/) { release="verified"; release_name=codename(checks[1]) }
         else if (/^dss:stage: Outcome: release not verified;/) release="not_verified"
-        if (/; packages verified [(]/) packages="verified"
+        if (/; packages verified [(]/) { packages="verified"; package_release_name=codename(checks[2]) }
         else if (/; packages not verified;/) packages="not_verified"
         else if (/; packages failed final verification;/) packages="failed"
         if (/; services verified[.]$/) services="verified"
@@ -8262,6 +8277,7 @@ function support_print_report() {
         else if (/Upgrading current packages/) stage="package_upgrade"
         else if (/Checking package changes for PHP|Preparing Apache for PHP package changes|Updating installed PHP packages/) stage="php_migration"
         else if (/Checking unused packages/) stage="autoremove"
+        else if (/Checking web services and PHP-FPM listeners/) stage="service_verification"
       }
       { line=tolower($0)
         if (line ~ /unmet dependencies|held broken packages/) errors["dependencies"]=1
@@ -8301,6 +8317,9 @@ function support_print_report() {
         if (line ~ /trying to overwrite/) errors["package_file_conflict"]=1
         if (line ~ /^dss:error.*(service|socket|runtime|previously active)/ && line !~ /^dss:error: apache\/php removal plan rejected/) errors["service_or_runtime"]=1
         if (line ~ /^dss:error.*(configuration|incompatible)/) errors["configuration_compatibility"]=1
+        if (line ~ /^dss:error: (nginx|fpm) configuration .* references missing unix socket /) {
+          errors["web_socket_missing"]=1; stage="service_verification"
+        }
         if (line ~ /dpkg: error|dpkg returned an error/) errors["dpkg"]=1
       }
       END {
@@ -8308,6 +8327,7 @@ function support_print_report() {
           verification=(run_status == "0" && release == "verified" && packages == "verified" && services == "verified" ? "verified" : "incomplete")
         printf "recorded_completion_verification: %s\n", verification
         printf "recorded_release_check: %s\nrecorded_package_check: %s\nrecorded_service_check: %s\n", (outcome ? release : "not_recorded"), (outcome ? packages : "not_recorded"), (outcome ? services : "not_recorded")
+        printf "recorded_release_codename: %s\nrecorded_package_release_codename: %s\n", (outcome ? release_name : "not_recorded"), (outcome ? package_release_name : "not_recorded")
         printf "last_recorded_apt_update_failure_phase: %s\nlast_recorded_apt_update_exit_status: %s\n", (update_phase == "" ? "not_recorded" : update_phase), (update_status == "" ? "not_recorded" : update_status)
         printf "last_recognised_stage: %s\n", (stage == "" ? "unknown" : stage)
         printf "observed_error_categories:"
@@ -8319,6 +8339,7 @@ function support_print_report() {
   else
     printf 'recorded_completion_verification: %s\n' "$verification"
     printf '%s\n' 'recorded_release_check: not_recorded' 'recorded_package_check: not_recorded' 'recorded_service_check: not_recorded' \
+      'recorded_release_codename: not_recorded' 'recorded_package_release_codename: not_recorded' \
       'last_recorded_apt_update_failure_phase: not_recorded' 'last_recorded_apt_update_exit_status: not_recorded' \
       'last_recognised_stage: unknown' 'observed_error_categories: unknown'
     [ -z "$directory" ] || status=1

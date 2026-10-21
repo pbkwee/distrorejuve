@@ -27,7 +27,9 @@ Without a run directory, `--support-report` collects current system facts only.
 If a collector fails, the report marks the missing fields and returns a nonzero status.
 
 The report contains script checksums, the upgrade action and exit status when recorded,
-the crossgrade/target choice, recorded release/package/service checks and available APT update failure phase/status.
+the crossgrade/target choice, recorded release/package/service checks and the release codenames those checks covered.
+A verified intermediate release does not mean that the final requested release was reached.
+Available APT update failure phase/status and missing web-socket failures are included as fixed labels.
 It also contains current distribution/release, architecture, kernel series, Bash/APT/dpkg versions,
 package-state counts, free space and exit statuses from read-only APT policy and upgrade simulations.
 The plan counts installation (including upgrades), removal, purge and configuration operations.

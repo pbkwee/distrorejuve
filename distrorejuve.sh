@@ -3100,15 +3100,15 @@ function upgrade_output_crossgrade_release() {
         core_issues=$(crossgrade_output_core_package_issues) || return 1
         state=0
         case "$core_issues" in architecture$'\t'*|*$'\n'architecture$'\t'*) state=1;; esac
-        if [ -n "$core_issues" ]; then
-          if [ "$state" -eq 0 ]; then
-            echo 'dss:warn: Native architecture is amd64 with 64-bit userspace. Core package configuration is unfinished; this does not require an architecture crossgrade.' >&2
-          else
-            echo 'dss:warn: Native architecture is amd64 with 64-bit userspace, but some core packages use another architecture.' >&2
-          fi
+        # Configuration repair belongs to the package pass, not these repeated architecture checks.
+        if [ "$state" -eq 1 ]; then
+          echo 'dss:warn: Native architecture is amd64 with 64-bit userspace, but some core packages use another architecture.' >&2
           printf '%s\n' "$core_issues" | awk -F '\t' '
-            NR <= 8 { printf "dss:warn: Core package %s: %s (%s).\n", $2, ($1 == "architecture" ? "expected amd64/all" : "needs configuration"), $3 }
-            END { if (NR > 8) printf "dss:warn: %d additional core package issues; inspect dpkg --audit and package architectures.\n", NR-8 }
+            $1 == "architecture" {
+              count++
+              if (count <= 8) printf "dss:warn: Core package %s: expected amd64/all (%s).\n", $2, $3
+            }
+            END { if (count > 8) printf "dss:warn: %d additional core package architecture issues.\n", count-8 }
           ' >&2 || return 1
         fi
       fi
@@ -7066,7 +7066,7 @@ function apt_get_upgrade() {
   apt_state_dist_upgraded=
   echo "dss:trace:apt_get_upgrade"
   record_config_state
-  echo "dss:trace: Configuring pending packages before the package upgrade (dpkg --configure -a)." >&2
+  echo "dss:info: Configuring pending packages before the package upgrade (dpkg --configure -a)." >&2
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
   fi
@@ -7173,7 +7173,7 @@ function apt_get_dist_upgrade() {
     echo "dss:info: Commenting out the my.cnf lc-messages-dir directive in case it is causing problems."
     sed -i "s@^lc-messages-dir\(.*\)@#lc-messages-dir\1@" /etc/my/my.cnf
   fi
-  echo "dss:trace: Rechecking package configuration after the full upgrade (dpkg --configure -a)." >&2
+  echo "dss:info: Rechecking package configuration after the full upgrade (dpkg --configure -a)." >&2
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
   fi

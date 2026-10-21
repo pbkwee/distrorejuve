@@ -53,6 +53,18 @@ add the required option to this SCP command:
   Use `-oKexAlgorithms=+diffie-hellman-group1-sha1` only if that is the available method.
 - If an existing RSA login key needs SHA-1 signatures, add `-oPubkeyAcceptedAlgorithms=+ssh-rsa`.
 
+To try the legacy RSA methods and both SHA-1 key exchanges in one command:
+
+```sh
+scp -O \
+  -oHostKeyAlgorithms=+ssh-rsa \
+  -oPubkeyAcceptedAlgorithms=+ssh-rsa \
+  -oKexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1 \
+  distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
+```
+
+The `+` adds these methods after the modern defaults. Host-key verification still applies.
+
 Keep these legacy settings on the individual command. See the
 [OpenSSH legacy connection guide](https://www.openssh.org/legacy.html).
 After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /root/distrorejuve.sh --check`.

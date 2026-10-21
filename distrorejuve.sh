@@ -2198,25 +2198,98 @@ function upgrade_php_runtime_output_directives() {
   ' "$file"
 }
 
-# Follow default configuration includes, bounded to 200 files and depth 16.
-# 0 no missing literal socket, 1 confirmed missing socket, 2 incomplete verification.
-function upgrade_php_runtime_check_sockets() {
+# Resolve enabled-site links before checking ownership; modified conffiles are local settings too.
+function upgrade_php_runtime_output_config_origin() {
+  local file owner status records checksum actual
+  file=$(readlink -f -- "$1") || return 1
+  [ -f "$file" ] && [ -r "$file" ] || return 1
+  if owner=$(packages_output_file_owner "$file"); then
+    records=$(LC_ALL=C dpkg-query -W -f='${Conffiles}\n' "$owner") || return 1
+    checksum=$(awk -v file="$file" '$1 == file && NF == 2 { print $2 }' <<< "$records") || return 1
+    if [ -n "$checksum" ]; then
+      case "$checksum" in *[!0-9a-fA-F]*) return 1;; esac
+      [ "${#checksum}" -eq 32 ] || return 1
+      actual=$(md5sum < "$file") || return 1
+      if [ "${actual%% *}" != "$checksum" ]; then printf '%s\n' modified; return 0; fi
+    fi
+    printf '%s\n' packaged
+  else
+    status=$?
+    [ "$status" -eq 1 ] || return 1
+    printf '%s\n' unowned
+  fi
+}
+
+# Collector calls inherit the current private staging file and release from upgrade_php_runtime_check.
+function upgrade_php_runtime_finding() {
+  local severity=$1 key=$2 message=$3 level=warn
+  case "$severity" in error) level=error;; warning|unknown) :;; *) return 1;; esac
+  case "$key$findings_release$message" in *$'\t'*|*$'\n'*|*$'\r'*)
+    echo 'dss:error: Cannot record a finding containing control separators.' >&2; return 1;; esac
+  printf 'dss:%s: %s\n' "$level" "$message" >&2
+  printf '%s\t%s\t%s\tcurrent\t%s\n' "$severity" "$key" "$findings_release" "$message" >> "$findings_file"
+}
+
+function upgrade_php_runtime_findings_complete() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ ! -e "$1.pending" ] && [ ! -L "$1.pending" ] &&
+    awk -F '\t' '
+      NF != 5 { bad=1 }
+      $1 == "check" { checks++; if ($2 != "php-runtime" || $4 != "complete") bad=1; next }
+      $1 !~ /^(error|warning)$/ || $4 != "current" { bad=1 }
+      END { exit (checks != 1 || bad) }' "$1"
+}
+
+# Replace the human checklist atomically; the detailed log retains earlier observations.
+function upgrade_php_runtime_write_review() {
 (
-  local kind=$1 main=$2 prefix=${2%/*} file depth records directive value pool match index=0 failure=false unknown=false found=false sockets='' pool_records='' endpoints=0
+  local findings=$1 directory=$2 temporary pending=false check_failed=${3:-false} target="$2/configuration-review.txt"
+  [ -f "$findings" ] && [ ! -L "$findings" ] || return 1
+  [ ! -L "$target" ] && { [ ! -e "$target" ] || { [ -f "$target" ] && [ "$(stat -c '%u:%h' -- "$target")" = 0:1 ]; }; } || return 1
+  temporary=$(umask 077; mktemp "$directory/.configuration-review.XXXXXX") || return 1
+  trap 'rm -f -- "$temporary"' EXIT
+  chmod 600 -- "$temporary" || return 1
+  [ ! -e "$findings.pending" ] && [ ! -L "$findings.pending" ] || pending=true
+  awk -F '\t' -v pending="$pending" -v check_failed="$check_failed" '
+    BEGIN {
+      if (pending == "true") print "Latest web service check did not finish. Earlier findings are not reverified; review the detailed log."
+      else if (check_failed == "true") print "Latest web service check failed. Saved findings need verification; review the detailed log."
+    }
+    NF != 5 { bad=1; next }
+    $1 == "check" { checks++; next }
+    $1 !~ /^(error|warning|unknown)$/ || $4 !~ /^(current|unverified)$/ { bad=1; next }
+    $1 != "check" {
+      if (!found++) print "Review required from the last saved web service check:"
+      printf "- [%s; %s; %s] %s\n", $1, $3, (pending == "true" || $4 == "unverified" ? "not reverified" : (check_failed == "true" ? "needs verification" : "current")), $5
+    }
+    END { if (checks != 1 || bad) exit 1 }
+  ' "$findings" > "$temporary" || return 1
+  if [ -s "$temporary" ]; then mv -f -- "$temporary" "$target" || return 1
+  else rm -f -- "$target" || return 1; fi
+)
+}
+
+# Follow default configuration includes, bounded to 200 files and depth 16.
+# Findings describe faults; return nonzero only when collection fails.
+function upgrade_php_runtime_collect_socket_findings() {
+(
+  local kind=$1 main=$2 prefix=${2%/*} file depth records directive value pool match index=0 failure=false found=false sockets='' pool_records='' endpoints=0
+  local origin identity
   local path_pattern='^/[A-Za-z0-9_./:@+-]+$' include_pattern='^[A-Za-z0-9_./*?-]+$'
   local -a files=("$main")
   local -a depths=(0)
   local seen=$'\n' pattern
   while [ "$index" -lt "${#files[@]}" ]; do
-    file=${files[index]}; depth=${depths[index]}; index=$((index+1))
+    file=${files[index]}
+    case "$file" in *$'\t'*|*$'\n'*|*$'\r'*) echo 'dss:error: Unsupported control separator in configuration path.' >&2; return 1;; esac
+    depth=${depths[index]}; index=$((index+1))
     case "$seen" in *$'\n'"$file"$'\n'*) continue;; esac
     seen="$seen$file"$'\n'
     if [ "$index" -gt 200 ] || [ "$depth" -gt 16 ]; then
-      echo "dss:warn: $kind socket verification reached its include limit." >&2; unknown=true; break
+      upgrade_php_runtime_finding unknown "$kind:include-limit" "$kind socket verification reached its include limit." || return 1; break
     fi
     if ! records=$(upgrade_php_runtime_output_directives "$kind" "$file"); then
-      echo "dss:warn: Cannot inspect bounded $kind configuration $file; socket verification incomplete." >&2
-      unknown=true; continue
+      upgrade_php_runtime_finding unknown "$kind:read:$file" "Cannot inspect bounded $kind configuration $file; socket verification incomplete." || return 1
+      continue
     fi
     while IFS=$'\t' read -r directive value pool; do
       [ -n "$directive" ] || continue
@@ -2224,7 +2297,7 @@ function upgrade_php_runtime_check_sockets() {
       case "$directive" in
         include)
           if [[ ! "$value" =~ $include_pattern ]]; then
-            echo "dss:warn: Unsupported/dynamic $kind include in $file; socket verification incomplete." >&2; unknown=true; continue
+            upgrade_php_runtime_finding unknown "$kind:include:$file:$value" "Unsupported/dynamic $kind include in $file; socket verification incomplete." || return 1; continue
           fi
           pattern=$value
           case "$pattern" in /*) :;; *) pattern="$prefix/$pattern";; esac
@@ -2233,60 +2306,69 @@ function upgrade_php_runtime_check_sockets() {
           for match in $pattern; do
             [ -e "$match" ] || continue
             found=true; files+=("$match"); depths+=("$((depth+1))")
-            if [ "${#files[@]}" -gt 200 ]; then unknown=true; break; fi
+            if [ "${#files[@]}" -gt 200 ]; then break; fi
           done
           if ! $found; then
             case "$pattern" in *'*'*|*'?'*) :;; *)
-              echo "dss:warn: Included $kind configuration $pattern is missing; verification incomplete." >&2; unknown=true;; esac
+              upgrade_php_runtime_finding unknown "$kind:missing-include:$pattern" "Included $kind configuration $pattern is missing; verification incomplete." || return 1;; esac
           fi;;
         socket)
           if [[ ! "$value" =~ $path_pattern ]]; then
-            echo "dss:warn: Dynamic/unsupported $kind socket in $file; verification incomplete." >&2; unknown=true
+            upgrade_php_runtime_finding unknown "$kind:dynamic-socket:$file:$value" "Dynamic/unsupported $kind socket in $file; verification incomplete." || return 1
           else sockets="$sockets$value"$'\t'"$file"$'\t'"${pool:--}"$'\n'; endpoints=$((endpoints+1)); fi;;
         tcp) endpoints=$((endpoints+1)); echo "dss:trace: $kind uses a TCP FastCGI endpoint; network reachability is not probed." >&2;;
-        unknown) echo "dss:warn: $kind configuration $file needs manual verification ($value)." >&2; unknown=true;;
+        unknown) upgrade_php_runtime_finding unknown "$kind:syntax:$file:$value" "$kind configuration $file needs manual verification ($value)." || return 1;;
       esac
     done <<< "$records"
   done
   records=$(printf '%s' "$sockets" | awk -F '\t' -v kind="$kind" -v records="$pool_records" '
     BEGIN { count=split(records, names, "\n"); for (i=1; i<=count; i++) pools[names[i]]++ }
     { print $1 "\t" $2 "\t" (kind == "fpm" && pools[$3] > 1 ? "duplicate" : "literal") }
-  ') || { echo "dss:warn: Cannot classify $kind Unix socket records; verification incomplete." >&2; return 2; }
+  ') || { echo "dss:warn: Cannot classify $kind Unix socket records; verification incomplete." >&2; return 1; }
   while IFS=$'\t' read -r value file pool; do
     [ -n "$value" ] || continue
     if [ "$pool" = duplicate ]; then
-      echo "dss:warn: FPM pool is defined in multiple included files; socket verification incomplete." >&2; unknown=true
+      upgrade_php_runtime_finding unknown "fpm:duplicate:$file:$value" "FPM pool is defined in multiple included files; socket verification incomplete." || return 1
     elif [ ! -S "$value" ]; then
-      echo "dss:error: $kind configuration $file references missing Unix socket $value; review the PHP-FPM/upstream configuration." >&2; failure=true
+      if [ "$kind" = nginx ]; then
+        if origin=$(upgrade_php_runtime_output_config_origin "$file"); then
+          case "$origin" in
+            unowned|modified)
+              identity=$(readlink -f -- "$file") || return 1
+              upgrade_php_runtime_finding warning "nginx:socket:${#identity}:$identity:$value" "Local configuration review: $file ($origin) references missing Unix socket $value; repair the application configuration after the distro upgrade." || return 1
+              continue;;
+          esac
+        else echo "dss:warn: Cannot verify package ownership/defaults for $file; retaining the runtime failure." >&2; fi
+      fi
+      identity=$(readlink -f -- "$file") || return 1
+      upgrade_php_runtime_finding error "$kind:socket:${#identity}:$identity:$value" "$kind configuration $file references missing Unix socket $value; review the PHP-FPM/upstream configuration." || return 1; failure=true
     else echo "dss:trace: $kind Unix socket exists: $value (listener/reachability not probed)." >&2; fi
   done <<< "$records"
-  if [ "$kind" = fpm ] && [ "$endpoints" -eq 0 ]; then echo 'dss:warn: No literal PHP-FPM listener established; verification incomplete.' >&2; unknown=true; fi
+  if [ "$kind" = fpm ] && [ "$endpoints" -eq 0 ]; then upgrade_php_runtime_finding unknown fpm:no-listener 'No literal PHP-FPM listener established; verification incomplete.' || return 1; fi
   if $failure && [ "$kind" = nginx ]; then
     echo 'dss:warn: Compare NGINX fastcgi_pass with the installed PHP-FPM listen setting. Review old/new pool users, groups and socket permissions before restarting services.' >&2
   fi
-  $failure && return 1
-  $unknown && return 2
   return 0
 )
 }
 
-# Check after the final package pass. Status 1 blocks success; status 2 is an explicit warning.
-function upgrade_php_runtime_check() {
-  local directory=$1 roles kind service state status=0 result current expected_fpm=false nginx=false dependencies selected count=0 main
-  [ -f "$directory/services.before" ] && [ -r "$directory/services.before" ] || return 2
-  roles=$(upgrade_php_runtime_output_roles) || return 2
+# Collect current observations without encoding finding types in return values.
+function upgrade_php_runtime_collect_findings() {
+  local directory=$1 roles kind service state result current expected_fpm=false nginx=false dependencies selected count=0 main
+  [ -f "$directory/services.before" ] && [ -r "$directory/services.before" ] || return 1
+  roles=$(upgrade_php_runtime_output_roles) || return 1
   while IFS=$'\t' read -r kind service state; do
-    case "$kind:$state" in fpm:active) expected_fpm=true; continue;; nginx:active) nginx=true;; apache:active) :;; *:inactive) continue;; *:unknown) [ "$status" -eq 1 ] || status=2; continue;; *) return 2;; esac
+    case "$kind:$state" in fpm:active) expected_fpm=true; continue;; nginx:active) nginx=true;; apache:active) :;; *:inactive) continue;; *:unknown) upgrade_php_runtime_finding unknown "baseline:$kind:$service" "Original $service activity was not established; verification incomplete." || return 1; continue;; *) return 1;; esac
     if ! printf '%s\n' "$roles" | grep -qxF "$kind"$'\t'"$service"; then
-      echo "dss:error: Previously active $service no longer has a configured/installed web-server role." >&2
-      status=1; continue
+      upgrade_php_runtime_finding error "service:$service" "Previously active $service no longer has a configured/installed web-server role." || return 1
+      continue
     fi
     if upgrade_php_runtime_service_is_active "$service"; then :
     else
       result=$?
       if [ "$result" -eq 1 ]; then
-        echo "dss:error: $service was active before the upgrade and is now stopped/failed." >&2; status=1
-      else echo "dss:warn: Cannot verify expected active $service after package changes." >&2; [ "$status" -eq 1 ] || status=2; fi
+        upgrade_php_runtime_finding error "service:$service" "$service was active before the upgrade and is now stopped/failed." || return 1
+      else upgrade_php_runtime_finding unknown "service:$service" "Cannot verify expected active $service after package changes." || return 1; fi
     fi
   done < "$directory/services.before"
   if $expected_fpm; then
@@ -2299,19 +2381,18 @@ function upgrade_php_runtime_check() {
       [ "$count" -eq 1 ] || selected=''
     fi
     if [ -z "$selected" ] && [ "$count" -eq 0 ]; then
-      echo 'dss:error: Previously active PHP-FPM has no configured/installed replacement runtime.' >&2; status=1
+      upgrade_php_runtime_finding error fpm:replacement 'Previously active PHP-FPM has no configured/installed replacement runtime.' || return 1
     elif [ -z "$selected" ]; then
-      echo 'dss:warn: Cannot identify one installed/default replacement PHP-FPM runtime.' >&2; [ "$status" -eq 1 ] || status=2
+      upgrade_php_runtime_finding unknown fpm:replacement 'Cannot identify one installed/default replacement PHP-FPM runtime.' || return 1
     elif ! printf '%s\n' "$roles" | grep -qxF $'fpm\t'"$selected"; then
-      echo "dss:error: Expected replacement PHP-FPM package $selected is not configured/installed." >&2; status=1
+      upgrade_php_runtime_finding error fpm:replacement "Expected replacement PHP-FPM package $selected is not configured/installed." || return 1
     elif upgrade_php_runtime_service_is_active "$selected"; then
       case "$selected" in php5-fpm) main=/etc/php5/fpm/php-fpm.conf;; *) current=${selected#php}; current=${current%-fpm}; main="/etc/php/$current/fpm/php-fpm.conf";; esac
-      upgrade_php_runtime_check_sockets fpm "$main"; result=$?
-      case "$result" in 0) :;; 1) status=1;; *) [ "$status" -eq 1 ] || status=2;; esac
+      upgrade_php_runtime_collect_socket_findings fpm "$main" || return 1
     else
       result=$?
-      if [ "$result" -eq 1 ]; then echo "dss:error: Expected replacement $selected is stopped/failed." >&2; status=1
-      else echo "dss:warn: Cannot verify expected replacement $selected activity." >&2; [ "$status" -eq 1 ] || status=2; fi
+      if [ "$result" -eq 1 ]; then upgrade_php_runtime_finding error "service:$selected" "Expected replacement $selected is stopped/failed." || return 1
+      else upgrade_php_runtime_finding unknown "service:$selected" "Cannot verify expected replacement $selected activity." || return 1; fi
     fi
   fi
   # Also inspect an already-active NGINX even when it was originally inactive.
@@ -2319,10 +2400,58 @@ function upgrade_php_runtime_check() {
   if $nginx; then
     # shortcut: inspect Debian/Ubuntu default main config; custom -c/-p invocation needs a separate audit.
     echo 'dss:trace: Checking on-disk /etc/nginx/nginx.conf; custom invocation paths/loaded configuration are not established.' >&2
-    upgrade_php_runtime_check_sockets nginx /etc/nginx/nginx.conf; result=$?
-    case "$result" in 0) :;; 1) status=1;; *) [ "$status" -eq 1 ] || status=2;; esac
+    upgrade_php_runtime_collect_socket_findings nginx /etc/nginx/nginx.conf || return 1
   fi
-  return "$status"
+  return 0
+}
+
+# One latest snapshot per run. A complete later check clears earlier findings, including across releases.
+function upgrade_php_runtime_check() {
+(
+  set -o pipefail
+  local directory=${DISTROREJUVE_RUN_DIRECTORY:-$1} snapshot temporary findings_file findings_release family=debian status=0
+  snapshot="$directory/php-runtime.findings.tsv"
+  [ -d "$directory" ] && [ ! -L "$directory" ] && [ "$(stat -c '%u:%a' -- "$directory")" = 0:700 ] || return 1
+  [ ! -L "$snapshot" ] && { [ ! -e "$snapshot" ] || { [ -f "$snapshot" ] && [ "$(stat -c '%u:%h' -- "$snapshot")" = 0:1 ]; }; } || return 1
+  [ ! -L "$snapshot.pending" ] && { [ ! -e "$snapshot.pending" ] || { [ -f "$snapshot.pending" ] && [ "$(stat -c '%u:%h' -- "$snapshot.pending")" = 0:1 ]; }; } || return 1
+  (umask 077; : > "$snapshot.pending" && chmod 600 -- "$snapshot.pending") || return 1
+  findings_release=$(distro_output_codename) || findings_release=unknown
+  case " $ALL_UBUNTU " in *" $findings_release "*) family=ubuntu;; esac
+  [ "$findings_release" != unknown ] || family=unknown
+  findings_release="$family/$findings_release"
+  temporary=$(umask 077; mktemp "$directory/.php-findings.XXXXXX") || return 1
+  trap 'rm -f -- "$temporary" "$temporary.next"' EXIT
+  findings_file=$temporary
+  chmod 600 -- "$temporary" || return 1
+  if [ "$findings_release" = unknown/unknown ]; then
+    upgrade_php_runtime_finding unknown release 'Cannot identify the installed release for this check.' || return 1
+  fi
+  if ! upgrade_php_runtime_collect_findings "$1"; then
+    upgrade_php_runtime_finding unknown collector 'Web service findings could not be fully collected; earlier findings remain unverified.' || return 1
+    status=1
+  fi
+  # shortcut: an incomplete web check retains all earlier findings; narrow this if per-file coverage is needed.
+  (umask 077; set -C; : > "$temporary.next") && chmod 600 -- "$temporary.next" || return 1
+  # The absent previous snapshot is an empty input, not a successful earlier check.
+  if [ -f "$snapshot" ]; then set -- "$temporary" "$snapshot"; else set -- "$temporary"; fi
+  awk -F '\t' -v OFS='\t' -v release="$findings_release" '
+    FILENAME == ARGV[1] {
+      if (NF != 5 || $1 !~ /^(error|warning|unknown)$/ || $4 != "current") { bad=1; next }
+      priority=($1 == "error" ? 3 : ($1 == "unknown" ? 2 : 1))
+      if (!($2 in rows) || priority > priorities[$2]) { rows[$2]=$0; priorities[$2]=priority }
+      if ($1 == "unknown") incomplete=1; next
+    }
+    $1 != "check" && !($2 in rows) { $4="unverified"; previous[$2]=$0 }
+    END {
+      if (bad) exit 1
+      print "check", "php-runtime", release, (incomplete ? "incomplete" : "complete"), "Web services and PHP-FPM listeners"
+      for (key in rows) print rows[key]
+      if (incomplete) for (key in previous) print previous[key]
+    }
+  ' "$@" | LC_ALL=C sort > "$temporary.next" || return 1
+  mv -f -- "$temporary.next" "$snapshot" && rm -f -- "$snapshot.pending" || return 1
+  [ "$status" -eq 0 ] && awk -F '\t' '$1 == "error" && $4 == "current" { failed=1 } END { exit failed }' "$snapshot"
+)
 }
 
 # Reuse the original comparison baseline, including across release hops and retries.
@@ -2338,17 +2467,12 @@ function upgrade_php_runtime_prepare() {
 }
 
 function upgrade_php_runtime_verify() {
-  local baseline status
+  local baseline
   echo 'dss:stage: Checking web services and PHP-FPM listeners after package changes' >&2
-  if baseline=$(config_state_output_baseline); then
-    upgrade_php_runtime_check "$baseline.php-runtime"
-    status=$?
-  else status=2; fi
-  case "$status" in
-    0) return 0;;
-    1) echo 'dss:error: Web runtime verification failed after package changes; see the detailed run log and repair the reported service/upstream before continuing.' >&2; return 1;;
-    *) echo 'dss:warn: Web runtime verification is incomplete; review the detailed run log and verify custom service/configuration paths manually.' >&2; return 0;;
-  esac
+  if ! baseline=$(config_state_output_baseline) || ! upgrade_php_runtime_check "$baseline.php-runtime"; then
+    echo 'dss:error: Web runtime verification failed or could not be collected; see the detailed run log.' >&2
+    return 1
+  fi
 }
 
 # shellcheck shell=bash
@@ -2576,7 +2700,8 @@ function upgrade_outcome_output_php_removals() {
 # Called inside the logging action child, including from its EXIT trap.
 # Original action failures take precedence; unknown service status remains a visible warning.
 function upgrade_finish_run() {
-  local action_status=$1 logfile=$2 baseline='' services=2 web=2 status category state detail reason audit='' plan=''
+  local action_status=$1 logfile=$2 baseline='' services=2 web_failed=false status category state detail reason audit='' plan=''
+  local findings='' web_complete=false
   local release='not verified' packages='not verified' cleanup='' php_removals='' service_summary='unknown' package_verified=false
   local directory=${DISTROREJUVE_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0 autoremove_skipped=''
   local none=false obsolete_none=false cleanup_done=false missing_provenance=false cleanup_failed=false cleanup_deferred=false
@@ -2611,18 +2736,25 @@ function upgrade_finish_run() {
   fi
   if baseline=$(config_state_output_baseline); then
     upgrade_services_check "$baseline.services" "$baseline"; services=$?
-    upgrade_php_runtime_check "$baseline.php-runtime"; web=$?
+    if ! upgrade_php_runtime_check "$baseline.php-runtime"; then web_failed=true; fi
+    findings="${directory:-$baseline.php-runtime}/php-runtime.findings.tsv"
+    if upgrade_php_runtime_findings_complete "$findings"; then web_complete=true; fi
   fi
-  if [ "$services" -eq 1 ] || [ "$web" -eq 1 ]; then
+  if [ "$services" -eq 1 ] || $web_failed; then
     service_summary=failed; [ "$status" -ne 0 ] || status=1
-  elif [ "$services" -eq 0 ] && [ "$web" -eq 0 ]; then service_summary=verified; fi
-  if [ "$services" -eq 2 ] || [ "$web" -eq 2 ]; then
+  elif [ "$services" -eq 0 ] && $web_complete; then service_summary=verified; fi
+  if [ "$services" -eq 2 ] || ! $web_complete; then
     echo 'dss:warn: Service health is incomplete; unknown checks are not a successful verification.' >&2
     if [ -n "$directory" ]; then
       if [ -L "$directory/outcome.incomplete" ] || ! (umask 077; : > "$directory/outcome.incomplete" && chmod 600 -- "$directory/outcome.incomplete"); then
         echo 'dss:error: Cannot record incomplete service verification.' >&2
         [ "$status" -ne 0 ] || status=1
       fi
+    fi
+  elif [ -n "$directory" ]; then
+    if [ -L "$directory/outcome.incomplete" ] || ! rm -f -- "$directory/outcome.incomplete"; then
+      echo 'dss:error: Cannot clear the previous incomplete verification marker.' >&2
+      [ "$status" -ne 0 ] || status=1
     fi
   fi
   if [ -n "$directory" ] && [ -f "$directory/cleanup.outcomes" ]; then
@@ -2656,6 +2788,15 @@ function upgrade_finish_run() {
     else cleanup="$cleanup${cleanup:+; }cleanup deferred (see detailed log)"; fi
   fi
   printf 'dss:stage: Outcome: release %s; packages %s; services %s.\n' "$release" "$packages" "$service_summary" >&2
+  if [ -n "$findings" ] && [ -n "$directory" ]; then
+    if ! upgrade_php_runtime_write_review "$findings" "$directory" "$web_failed"; then
+      echo 'dss:error: Cannot save the current configuration review report; see the findings above.' >&2
+      [ "$status" -ne 0 ] || status=1
+    elif [ -s "$directory/configuration-review.txt" ]; then
+      awk '{ print "dss:warn: " $0 }' "$directory/configuration-review.txt" >&2 || { [ "$status" -ne 0 ] || status=1; }
+      printf 'dss:warn: Review required: %s/configuration-review.txt\n' "$directory" >&2
+    fi
+  fi
   if [ -n "$baseline" ]; then
     if php_removals=$(upgrade_outcome_output_php_removals "$baseline"); then
       [ -z "$php_removals" ] || printf 'dss:warn: PHP extensions removed without target replacements: %s. Review application requirements.\n' "${php_removals//$'\n'/, }" >&2
@@ -3474,7 +3615,7 @@ function usrmerge_is_complete() {
 }
 
 # Exactly one configured package owner, no owner (1), or ambiguous/query failure (2).
-function usrmerge_output_file_owner() {
+function packages_output_file_owner() {
   local path=$1 owners owner status
   if owners=$(LC_ALL=C dpkg-query -S "$path" 2>/dev/null); then :
   else status=$?; [ "$status" -eq 1 ] && return 1; return 2; fi
@@ -3510,8 +3651,8 @@ function usrmerge_output_collisions() {
       if [ ! -f "$source" ] || [ -L "$source" ] || [ ! -f "$target" ] || [ -L "$target" ]; then
         printf 'manual\t%s\t%s\tunsupported file types\n' "$source" "$target"; continue
       fi
-      left=$(usrmerge_output_file_owner "$source"); left_status=$?
-      right=$(usrmerge_output_file_owner "$target"); right_status=$?
+      left=$(packages_output_file_owner "$source"); left_status=$?
+      right=$(packages_output_file_owner "$target"); right_status=$?
       if [ "$left_status:$right_status" = 1:0 ]; then printf 'archive\t%s\t%s\t%s\n' "$source" "$target" "$right"
       elif [ "$left_status:$right_status" = 0:1 ]; then printf 'archive\t%s\t%s\t%s\n' "$target" "$source" "$left"
       else printf 'manual\t%s\t%s\townership ambiguous or neither/existing package-owned copies\n' "$source" "$target"; fi
@@ -3574,9 +3715,9 @@ function usrmerge_archive_collisions() {
   tar --acls --xattrs -C / -cpf "$directory/files.tar" --null -T "$directory/archive-paths" || return 1
   while IFS=$'\t' read -r action source target owner; do
     [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$target" ] && [ ! -L "$target" ] || return 1
-    current=$(usrmerge_output_file_owner "$source"); status=$?
+    current=$(packages_output_file_owner "$source"); status=$?
     [ "$status" -eq 1 ] || return 1
-    current=$(usrmerge_output_file_owner "$target") && [ "$current" = "$owner" ] || return 1
+    current=$(packages_output_file_owner "$target") && [ "$current" = "$owner" ] || return 1
     relative=${source#/}
     mkdir -p -- "$directory/originals/${relative%/*}" || return 1
     mv --no-clobber -- "$source" "$directory/originals/$relative" || return 1
@@ -8171,7 +8312,7 @@ function support_print_report() {
   set -o pipefail
   local directory=${1:-} status=0 release family=unknown architecture kernel digest run_digest=unknown
   local exit_status=unknown action=unknown crossgrade=unknown target=unknown verification=not_recorded counts available mount
-  local tool version probe_status plan
+  local tool version probe_status plan local_review=legacy
   if [ -n "$directory" ]; then
     if [ ! -d "$directory" ] || [ -L "$directory" ] || [ -L "$directory/support.context" ] || [ -L "$directory/output.log" ]; then
       printf '%s\n' 'dss:error: Choose an existing run directory without linked report files.' >&2; return 1
@@ -8249,8 +8390,18 @@ function support_print_report() {
     printf 'free_mib%s: %s\n' "$mount" "$available"
   done
   if [ -n "$directory" ] && [ -f "$directory/output.log" ]; then
+    if [ -e "$directory/php-runtime.findings.tsv.pending" ] || [ -L "$directory/php-runtime.findings.tsv.pending" ]; then local_review=incomplete
+    elif [ -f "$directory/php-runtime.findings.tsv" ] && [ ! -L "$directory/php-runtime.findings.tsv" ]; then
+      local_review=$(awk -F '\t' '
+        $1 == "check" && $2 == "php-runtime" { check++; if (NF != 5 || $4 != "complete") incomplete=1; next }
+        NF != 5 || $1 !~ /^(error|warning|unknown)$/ { incomplete=1 }
+        $1 == "unknown" || $4 == "unverified" { incomplete=1 }
+        $1 == "warning" || $1 == "error" { review=1 }
+        END { print (check != 1 || incomplete ? "incomplete" : (review ? "required" : "none")) }
+      ' "$directory/php-runtime.findings.tsv") || { local_review=incomplete; status=1; }
+    fi
     # Match known messages to fixed labels; only known distribution codenames may be copied.
-    LC_ALL=C awk -v verification="$verification" -v run_status="$exit_status" -v known_releases="$ALL_DEBIAN $ALL_UBUNTU" '
+    LC_ALL=C awk -v verification="$verification" -v run_status="$exit_status" -v known_releases="$ALL_DEBIAN $ALL_UBUNTU" -v current_review="$local_review" '
       function codename(text) {
         if (match(text, /[(][a-z]+[)]$/)) {
           text=substr(text, RSTART+1, RLENGTH-2)
@@ -8269,6 +8420,7 @@ function support_print_report() {
         if (/; services verified[.]$/) services="verified"
         else if (/; services failed[.]$/) services="failed"
       }
+      /^dss:warn: Local configuration needs review[:;]/ { if (current_review == "legacy") local_review=1 }
       /^dss:stage[: ]/ {
         if (/Checking complete requested upgrade path|Rechecking .* before this release transition/) stage="preflight"
         else if (/Refreshing APT package indexes/) stage="apt_update"
@@ -8323,11 +8475,13 @@ function support_print_report() {
         if (line ~ /dpkg: error|dpkg returned an error/) errors["dpkg"]=1
       }
       END {
+        if (current_review != "legacy") local_review=(current_review != "none")
         if (outcome && verification != "incomplete")
-          verification=(run_status == "0" && release == "verified" && packages == "verified" && services == "verified" ? "verified" : "incomplete")
+          verification=(run_status == "0" && release == "verified" && packages == "verified" && services == "verified" && !local_review ? "verified" : "incomplete")
         printf "recorded_completion_verification: %s\n", verification
         printf "recorded_release_check: %s\nrecorded_package_check: %s\nrecorded_service_check: %s\n", (outcome ? release : "not_recorded"), (outcome ? packages : "not_recorded"), (outcome ? services : "not_recorded")
         printf "recorded_release_codename: %s\nrecorded_package_release_codename: %s\n", (outcome ? release_name : "not_recorded"), (outcome ? package_release_name : "not_recorded")
+        printf "recorded_local_configuration_review: %s\n", (current_review != "legacy" ? current_review : (local_review ? "required" : "not_recorded"))
         printf "last_recorded_apt_update_failure_phase: %s\nlast_recorded_apt_update_exit_status: %s\n", (update_phase == "" ? "not_recorded" : update_phase), (update_status == "" ? "not_recorded" : update_status)
         printf "last_recognised_stage: %s\n", (stage == "" ? "unknown" : stage)
         printf "observed_error_categories:"
@@ -8340,6 +8494,7 @@ function support_print_report() {
     printf 'recorded_completion_verification: %s\n' "$verification"
     printf '%s\n' 'recorded_release_check: not_recorded' 'recorded_package_check: not_recorded' 'recorded_service_check: not_recorded' \
       'recorded_release_codename: not_recorded' 'recorded_package_release_codename: not_recorded' \
+      'recorded_local_configuration_review: not_recorded' \
       'last_recorded_apt_update_failure_phase: not_recorded' 'last_recorded_apt_update_exit_status: not_recorded' \
       'last_recognised_stage: unknown' 'observed_error_categories: unknown'
     [ -z "$directory" ] || status=1
@@ -8486,6 +8641,8 @@ function logging_run() (
 		printf 'dss:error Action failed (status %s); details: %s\n' "$logging_status" "$logging_log" >&2
 	elif [ -f "$logging_dir/outcome.incomplete" ]; then
 		printf 'dss:warn Action finished with incomplete service verification; details: %s\n' "$logging_log" >&2
+	elif [ -f "$logging_dir/configuration-review.txt" ]; then
+		printf 'dss:warn Action complete; configuration review required: %s/configuration-review.txt; details: %s\n' "$logging_dir" "$logging_log" >&2
 	else
 		printf 'dss:stage Action complete; details: %s\n' "$logging_log" >&2
 	fi

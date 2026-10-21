@@ -6,6 +6,21 @@ Expected preflight refusals keep their diagnostic and log path without suggestin
 When a supported option addresses a blocker, the console suggests a retry command for review.
 Runs with incomplete service verification also produce this report.
 
+Missing upstream sockets in locally managed NGINX configuration are reported for operator review.
+These findings do not stop package upgrades when the required services pass their checks.
+The final console summary points to a private `configuration-review.txt` in the run directory.
+It lists current web service failures, local configuration review items and checks that could not be completed.
+Each item includes the installed distribution and release where it was observed, such as `debian/bookworm`.
+Repeated checks update the same issue instead of adding duplicate items.
+A later complete check removes issues that are no longer present, even after another release transition.
+If the later check is incomplete, earlier items stay in the report as **not reverified**, with their original release.
+The detailed log keeps earlier observations; resolved findings do not remain on the final checklist.
+One private `php-runtime.findings.tsv` holds the latest check state for the run; files are not split by release.
+An interrupted check cannot make an older snapshot appear current.
+Symlink targets are checked for package ownership; modified package conffiles count as local settings.
+Unchanged package configuration failures, unknown ownership and required service failures still stop the upgrade.
+Local configuration review alone does not suggest opening an issue.
+
 Review the file before posting it at [distrorejuve issues](https://github.com/pbkwee/distrorejuve/issues/new).
 Describe what you expected, what happened and any manual recovery steps.
 Paste the report inside a code block. Remove anything you do not want to publish.
@@ -30,6 +45,7 @@ The report contains script checksums, the upgrade action and exit status when re
 the crossgrade/target choice, recorded release/package/service checks and the release codenames those checks covered.
 A verified intermediate release does not mean that the final requested release was reached.
 Available APT update failure phase/status and missing web-socket failures are included as fixed labels.
+The support report records whether the latest web checks require review or remain incomplete, without copying paths or file contents.
 It also contains current distribution/release, architecture, kernel series, Bash/APT/dpkg versions,
 package-state counts, free space and exit statuses from read-only APT policy and upgrade simulations.
 The plan counts installation (including upgrades), removal, purge and configuration operations.

@@ -84,7 +84,7 @@ After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /
 | `--to-64bit` | Attempt an experimental crossgrade from 32-bit to 64-bit. |
 | `--support-report [RUN_DIRECTORY]` | Print a minimal report for a public bug report. Review it before posting. |
 | `--upgrade-report` | Collect a read-only developer handover with package, repository, configuration and application facts. Add `--no-dns` to skip DNS checks. |
-| `--manifest` / `--manifest-json` | Report applications, service state, websites and mail storage as text or JSON. Add `--no-dns` to skip DNS checks. |
+| `--manifest` / `--manifest-json` | Report applications, service state, websites, mail storage and migration hints as text or JSON (dpkg or RPM). Add `--no-dns` to skip DNS checks. |
 | `--show-changes` | Report differences from the pre-upgrade configuration and system state. |
 | `--show-cruft` | List packages left over from older releases or architectures. |
 | `--remove-cruft` | Remove those leftover packages. |
@@ -94,6 +94,44 @@ After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /
 Run `bash distrorejuve.sh --usage` for all options, including older release shortcuts.
 Upgrade commands keep private detailed logs in `/root/distrorejuveinfo/runs` and show concise progress.
 Add `--verbose` to display command output, or `--trace` to retain a separate Bash trace.
+
+## Migration inventory
+
+Capture the manifest before planning an upgrade or reinstall:
+
+```sh
+sudo bash distrorejuve.sh --manifest --no-dns
+sudo bash distrorejuve.sh --manifest-json --no-dns > manifest.json
+```
+
+The manifest supports Debian/Ubuntu package databases and RPM-based systems such as
+CentOS, RHEL, Rocky and AlmaLinux. It preserves distribution package versions,
+including RPM epochs/releases and architecture. PHP CLI, FPM, Apache module and
+extension packages are listed separately. Common RPM Apache, Remi and SCL PHP
+configuration paths are included. Runtime associations are inferred from package
+ownership and configuration; they do not establish which code a live process has loaded.
+
+Migration hints include local program and service paths, cron files and custom timer
+paths, selected local user IDs/groups/homes/shells, and configured mount targets and
+filesystem types. Cron and timer files whose contents match their installed package
+are omitted; customer edits, unowned files and unknown ownership remain visible.
+Nonexecutable periodic cron jobs also remain visible because removing execute
+permission can disable a package job. Other permission/owner changes are not checked.
+Unverifiable files, including symlinks and files over 1 MiB, remain for manual review.
+
+Collection reads conventional paths to depth 2, examines at most 200 file paths per
+directory and limits each filesystem scan to five seconds. File metadata is capped
+at 1 MiB; user and mount records are capped at 200 each. Warnings describe failures
+and limits. Command bodies, environment contents, password fields, mount devices
+and mount options are omitted. Literal proxy destinations contain only the authority;
+credentials, paths, query strings and fragments are discarded. Named or dynamic
+upstreams may still require manual resolution.
+
+Keep the output private. It is a planning inventory: websites, database contents,
+mail accounts/aliases, backups, certificate validity, remote mounts and application
+compatibility still need separate checks. Custom includes, containers and uncommon
+layouts can be missed. RPM support here applies to `--manifest` and `--manifest-json`;
+`--upgrade-report` and Debian-specific upgrade/crossgrade checks retain their APT/dpkg scope.
 
 ## Environment variables
 

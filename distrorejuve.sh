@@ -78,7 +78,7 @@ Run with --support-report [RUN_DIRECTORY] to print a minimal report for a public
 Review it before posting. It omits raw logs, configuration and host identifiers; no upload occurs.
 
 Run with --manifest or --manifest-json to collect a read-only application/service inventory.
-Add --no-dns to skip bounded DNS lookups. MANIFEST_MAIL_METRICS=false skips mail size/count probes.
+Add --no-dns to skip bounded DNS lookups. MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
 Website records include the primary configured URL and local certificate-file presence.
 Missing names, indirect configuration and automatically managed certificates may remain unknown.
 
@@ -7582,10 +7582,19 @@ function manifest_listeners() {
     return
   fi
   # ss: LISTEN 0 128 127.0.0.1:25 *:* users:(("master",pid=12,fd=3))
+  # Older ss -lntp omits State: header "Recv-Q Send-Q ...", then "0 128 127.0.0.1:25 *:* ...".
   # netstat: tcp 0 0 0.0.0.0:80 0.0.0.0:* LISTEN 12/apache2
   if ! parsed=$(printf '%s\n' "$raw" | awk -v source="$source" '
-    source == "ss" && $1 == "LISTEN" {
-      endpoint=$4; program="unknown"
+    source == "ss" && $1 == "Recv-Q" && $2 == "Send-Q" { implicit_listen=1; next }
+    source == "ss" && $1 == "State" { implicit_listen=0; next }
+    source == "ss" {
+      if ($1 == "LISTEN") endpoint=$4
+      else if (implicit_listen && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) {
+        # A wildcard peer distinguishes these listener rows from current connections.
+        if ($4 !~ /^(\*|0[.]0[.]0[.]0|::|\[::\]):\*$/) next
+        endpoint=$3
+      } else next
+      program="unknown"
       if (match($0, /users:\(\("[^"]+/)) {
         program=substr($0, RSTART+9, RLENGTH-9)
       }
@@ -7631,8 +7640,73 @@ function manifest_listeners() {
   done <<< "$parsed"
 }
 
+# Perl's alarm survives exec; use the already-installed interpreter when old coreutils lacks timeout.
+function manifest_run_bounded() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV or exit 127' "$seconds" "$@"
+  else return 127; fi
+}
+
+function manifest_service() {
+  local name=$1 package=$2 version=$3 selector=$1 running=unknown enabled=unknown state result link processes
+  local systemd=false
+  local enabled_source=unknown running_source=unknown clusters row cluster_version cluster port cluster_state
+  if [ -d "$manifest_root/run/systemd/system" ]; then
+    case "$(readlink "$manifest_root/proc/1/exe" 2>/dev/null)" in */systemd|*/'systemd (deleted)') systemd=true;; esac
+  fi
+  case "$name" in
+    mariadb) if [ -x "$manifest_root/etc/init.d/mysql" ] && [ ! -x "$manifest_root/etc/init.d/mariadb" ]; then selector=mysql; fi;;
+    postgresql-*) [ -e "$manifest_root/etc/init.d/$name" ] || selector=postgresql;;
+  esac
+  if [[ "$name" == postgresql-* ]] && command -v pg_lsclusters >/dev/null 2>&1; then
+    if clusters=$(manifest_run_bounded 2 pg_lsclusters 2>/dev/null); then
+      while read -r cluster_version cluster port cluster_state row; do
+        [ "$cluster_version" = "${name#postgresql-}" ] || continue
+        case "$cluster_state" in online|online,*) running=yes; break;; down|down,*) running=no;; esac
+      done <<< "$clusters"
+      running_source=pg_lsclusters
+    fi
+  elif command -v upgrade_services_is_active >/dev/null 2>&1; then
+    if upgrade_services_is_active "$name" "$selector"; then running=yes; running_source=service_status
+    else
+      result=$?
+      # Old init scripts can return 1 for an unsupported status action; do not call that stopped.
+      if [ "$result" -eq 1 ] && { $systemd || [ "$name" = postfix ]; }; then running=no; running_source=service_status; fi
+    fi
+  fi
+  # Exact command names are positive evidence only; no TCP listener does not mean a service is stopped.
+  if [ "$running" = unknown ]; then
+    processes=$manifest_processes
+    case "$name" in
+      apache2) state='apache2|httpd';; nginx) state=nginx;; caddy) state=caddy;; dovecot) state=dovecot;;
+      mysql|mariadb) state='mysqld|mariadbd';; exim4) state='exim|exim4';; courier) state='couriertcpd|courierimaplogin|imapd|pop3d';;
+      sendmail) state=sendmail;; mailman) state='mailman|mailmanctl';; *) state=$selector;;
+    esac
+    if printf '%s\n' "$processes" | grep -qxE "$state"; then running=yes; running_source=process_name; fi
+  fi
+  if $systemd && command -v systemctl >/dev/null 2>&1; then
+    if state=$(manifest_run_bounded 2 systemctl show -p UnitFileState "$selector.service" 2>/dev/null); then
+      case "$state" in UnitFileState=enabled|UnitFileState=enabled-runtime) enabled=yes;; UnitFileState=disabled|UnitFileState=masked|UnitFileState=masked-runtime) enabled=no;; esac
+      enabled_source=systemd
+    fi
+  elif [ -f "$manifest_root/etc/init/$selector.conf" ]; then
+    enabled_source=upstart_job_not_checked
+  elif [ -e "$manifest_root/etc/init.d/$selector" ]; then
+    enabled=no; enabled_source=sysv_start_links
+    for link in "$manifest_root"/etc/rc[2345].d/S[0-9][0-9]"$selector"; do
+      [ -e "$link" ] || continue
+      enabled=yes; break
+    done
+  fi
+  case "$name" in postgresql-*) enabled=unknown; enabled_source=cluster_start_policy_not_checked;; esac
+  manifest_emit service name "$name" package "$package" version "$version" running "$running" enabled "$enabled" status_source "$running_source" enabled_source "$enabled_source"
+}
+
 function manifest_packages() {
-  local package version status records
+  local postgres_pattern='^postgresql-[0-9]+([.][0-9]+)*$'
+  local package version status records name seen_services='|' seen_php='|' pattern='^php([0-9]+([.][0-9]+)?)(-(cli|cgi|fpm))?$'
   if ! command -v dpkg-query >/dev/null 2>&1; then
     manifest_emit warning area packages reason 'dpkg-query unavailable'
     manifest_collection_failed=true
@@ -7643,13 +7717,54 @@ function manifest_packages() {
     manifest_collection_failed=true
     return
   fi
+  # Prefer the daemon owner over plugins and transitional package names.
+  records=$(set -o pipefail; printf '%s\n' "$records" | awk -F '\t' '
+    $3 ~ / installed$/ {
+      name=$1; sub(/:.*/, "", name); rows[$1]=$0; names[$1]=name; score=0
+      if (name == "dovecot-core") score=5
+      else if (name == "dovecot-common") score=4
+      else if (name == "dovecot") score=3
+      else if (name == "dovecot-imapd") score=2
+      else if (name == "dovecot-pop3d") score=1
+      if (score > best) { best=score; dovecot=name }
+      if (name ~ /^mariadb-server($|-[0-9])/) maria=1
+    }
+    END {
+      for (package in rows) {
+        name=names[package]
+        if (name ~ /^dovecot(-core|-common|-imapd|-pop3d)?$/ && name != dovecot) continue
+        if (maria && name ~ /^mysql-server($|-[0-9])/) continue
+        print rows[package]
+      }
+    }
+  ' | LC_ALL=C sort) || { manifest_collection_failed=true; return; }
   while IFS=$'\t' read -r package version status; do
     case "$status" in *' installed') :;; *) continue;; esac
-    case "$package" in libapache2-mod-php*) manifest_php_packages+=("$package"); manifest_php_versions+=("$version");; esac
+    package=${package%%:*}
+    case "$package" in libapache2-mod-php*) manifest_php_packages+=("$package"); manifest_php_versions+=("$version"); continue;; esac
+    name=''
     case "$package" in
-      apache2|apache2-bin|libapache2-mod-php*|nginx|nginx-core|nginx-full|nginx-light|caddy|postfix|exim4*|sendmail*|dovecot*|courier*|php[0-9]*|php-fpm|ruby|ruby[0-9]*|python[23]*|nodejs|mysql-server*|mariadb-server*|postgresql-[0-9]*|redis-server|mailman*|fail2ban)
-        manifest_emit package name "$package" version "$version" ;;
+      apache2|apache2-bin|apache2.2-common) name=apache2;; nginx|nginx-core|nginx-full|nginx-light|nginx-extras) name=nginx;;
+      caddy|postfix|redis-server|fail2ban) name=$package;; exim4*daemon*|exim4) name=exim4;;
+      sendmail|sendmail-bin) name=sendmail;; dovecot|dovecot-core|dovecot-common|dovecot-imapd|dovecot-pop3d) name=dovecot;; courier*) name=courier;; mailman*) name=mailman;;
+      mysql-server|mysql-server-[0-9]*) name=mysql;; mariadb-server|mariadb-server-[0-9]*) name=mariadb;; postgresql-[0-9]*)
+        if [[ "$package" =~ $postgres_pattern ]]; then name=$package; fi;;
     esac
+    if [ -n "$name" ]; then
+      case "$seen_services" in *"|$name|"*) continue;; esac
+      seen_services="$seen_services$name|"
+      manifest_service "$name" "$package" "$version"
+    elif [[ "$package" =~ $pattern ]]; then
+      name=${BASH_REMATCH[1]}
+      case "$seen_php" in *"|$name|"*) continue;; esac
+      seen_php="$seen_php$name|"
+      manifest_emit package name "$package" version "$version"
+    else
+      case "$package" in
+        php|php-cli|php-fpm|perl|perl-base|ruby|ruby[0-9].[0-9]|ruby[0-9].[0-9].[0-9]|python2|python2.[0-9]|python3|python3.[0-9]|python3.[0-9][0-9]|nodejs)
+          manifest_emit package name "$package" version "$version";;
+      esac
+    fi
   done <<< "$records"
 }
 
@@ -7680,8 +7795,21 @@ function manifest_config_files() {
 # Match active LoadModule paths to installed package ownership; never load the module.
 function manifest_apache_php() {
   local version_pattern='^([0-9]+[.][0-9]+([.][0-9]+)?)'
+  local files records metadata
   local file module conditional owners owner package version source owner_count i seen='' ambiguous=false count=0
+  files=$(manifest_config_files apache-modules) || { manifest_collection_failed=true; return; }
   while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    metadata=$(manifest_read_metadata "$file") || { manifest_collection_failed=true; continue; }
+    records=$(awk '
+      FNR > 20000 { exit }
+      /^[ \t]*#/ { next }
+      tolower($1) ~ /^<if/ { conditional++ }
+      tolower($1) ~ /^<\/if/ && conditional > 0 { conditional-- }
+      tolower($1) == "loadmodule" && tolower($2) ~ /^php[0-9.]*_module$/ {
+        path=$3; gsub(/[\042\047]/,"",path)
+        print path "\t" (conditional ? "true" : "false")
+      }' <<< "$metadata") || { manifest_collection_failed=true; continue; }
     while IFS=$'\t' read -r module conditional; do
       [ -n "$module" ] || continue
       case "|$seen|" in *"|$module|"*) continue;; esac
@@ -7715,16 +7843,8 @@ function manifest_apache_php() {
       manifest_apache_php_version=$version
       manifest_apache_php_package=$package
       manifest_emit runtime kind apache-mod-php version "$version" package "$package" module "$module" config "${file#"$manifest_root"}" conditional "$conditional" version_source "$source"
-    done < <(awk '
-      FNR > 20000 { exit }
-      /^[ \t]*#/ { next }
-      tolower($1) ~ /^<if/ { conditional++ }
-      tolower($1) ~ /^<\/if/ && conditional > 0 { conditional-- }
-      tolower($1) == "loadmodule" && tolower($2) ~ /^php[0-9.]*_module$/ {
-        path=$3; gsub(/[\042\047]/,"",path)
-        print path "\t" (conditional ? "true" : "false")
-      }' < <(manifest_read_metadata "$file"))
-  done < <(manifest_config_files apache-modules)
+    done <<< "$records"
+  done <<< "$files"
   if [ "$count" -gt 1 ] || $ambiguous; then
     manifest_apache_php_version=unknown
     manifest_apache_php_package=unknown
@@ -7739,9 +7859,9 @@ function manifest_has_php_document_root() {
   done
   case "$root" in /*) :;; *) return 1;; esac
   case "$root" in /|*'$'*|*'%'*|*'{'*|*'}'*) return 1;; esac
-  command -v timeout >/dev/null 2>&1 || return 1
+  command -v timeout >/dev/null 2>&1 || command -v perl >/dev/null 2>&1 || return 1
   # Inspect immediate app children only; backup trees do not establish a site's PHP runtime.
-  found=$(timeout 2 find -H "$manifest_root$root" -mindepth 1 -maxdepth 2 \
+  found=$(manifest_run_bounded 2 find -H "$manifest_root$root" -mindepth 1 -maxdepth 2 \
     \( -type d \( -name '.*' -o -name '*.bak' -o -name '*.backup' -o -name '*.old' -o -name '*~' -o -name backup -o -name backups \) -prune \) -o \
     \( -xtype f -name '*.php' -print -quit \) 2>/dev/null) || return 1
   [ -n "$found" ]
@@ -7749,15 +7869,14 @@ function manifest_has_php_document_root() {
 
 function manifest_fpm_pools() {
   local file pool socket user version
+  local files records metadata
+  files=$(manifest_config_files fpm) || { manifest_collection_failed=true; return; }
   while IFS= read -r file; do
+    [ -n "$file" ] || continue
     version=${file#"$manifest_root"/etc/php/}; version=${version%%/*}
     case "$file" in */etc/php5/*) version=5 ;; */etc/php-fpm.d/*) version=unknown ;; esac
-    while IFS=$'\t' read -r pool socket user; do
-      manifest_fpm_sockets+=("$socket")
-      manifest_fpm_users+=("$user")
-      manifest_fpm_versions+=("$version")
-      manifest_emit runtime kind php-fpm pool "$pool" listen "$socket" user "$user" version "$version" config "${file#"$manifest_root"}"
-    done < <(awk '
+    metadata=$(manifest_read_metadata "$file") || { manifest_collection_failed=true; continue; }
+    records=$(awk '
       function output() { if (pool != "") print pool "\t" socket "\t" user }
       BEGIN { socket="unknown"; user="unknown" }
       FNR > 20000 { exit }
@@ -7768,11 +7887,19 @@ function manifest_fpm_pools() {
         value=$0; sub(/^[^=]*=[ \t]*/,"",value); sub(/[ \t]*;.*/,"",value)
         if (key == "listen") socket=value; else user=value
       }
-      END { output() }' < <(manifest_read_metadata "$file"))
-  done < <(manifest_config_files fpm)
+      END { output() }' <<< "$metadata") || { manifest_collection_failed=true; continue; }
+    while IFS=$'\t' read -r pool socket user; do
+      [ -n "$pool" ] || continue
+      manifest_fpm_sockets+=("$socket")
+      manifest_fpm_users+=("$user")
+      manifest_fpm_versions+=("$version")
+      manifest_emit runtime kind php-fpm pool "$pool" listen "$socket" user "$user" version "$version" config "${file#"$manifest_root"}"
+    done <<< "$records"
+  done <<< "$files"
 }
 
 function manifest_dns() {
+  local lookup lookup_status diagnostic
   local domain="$1" address addresses='' match=false result reason i
   manifest_dns_addresses=unknown
   manifest_dns_result=unknown
@@ -7789,10 +7916,11 @@ function manifest_dns() {
     fi
   done
   if [ "${#manifest_dns_names[@]}" -ge "$manifest_dns_limit" ]; then manifest_dns_reason=domain_limit; return; fi
-  if ! command -v timeout >/dev/null 2>&1 || ! command -v getent >/dev/null 2>&1; then
+  if { ! command -v timeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; } ||
+      { ! command -v getent >/dev/null 2>&1 && ! command -v host >/dev/null 2>&1; }; then
     manifest_dns_reason=resolver_or_timeout_unavailable; return
   fi
-  if addresses=$(timeout 2 getent ahosts "$domain" 2>/dev/null); then
+  if command -v getent >/dev/null 2>&1 && addresses=$(manifest_run_bounded 2 getent ahosts "$domain" 2>/dev/null); then
     addresses=$(printf '%s\n' "$addresses" | awk '!seen[$1]++ { if (value != "") value=value ","; value=value $1 } END { print value }')
     if [ -n "$addresses" ]; then
       for address in ${addresses//,/ }; do
@@ -7802,7 +7930,44 @@ function manifest_dns() {
       elif $match; then result=this_host; reason=resolved
       else result=other_address; reason=resolved; fi
     else addresses=unknown; result=unknown; reason=no_addresses; fi
-  else addresses=unknown; result=unknown; reason=resolution_failed_or_timed_out; fi
+  else
+    lookup_status=$?; addresses=unknown; result=unknown; reason=resolution_failed_or_timed_out
+    case "$lookup_status" in 124|142) reason=timed_out;; esac
+  fi
+  if [ "$addresses" = unknown ] && command -v host >/dev/null 2>&1; then
+    # getent hides DNS error codes. Ask once for this absolute name, without importing resolver output.
+    lookup=$(LC_ALL=C manifest_run_bounded 2 host -W 1 -R 1 -t A "$domain." 2>&1)
+    lookup_status=$?
+    case "$lookup_status" in
+      0) :;;
+      124|142) reason=timed_out;;
+      *)
+        diagnostic=$(awk -v requested="$domain" '
+          BEGIN { requested=tolower(requested) }
+          $2 == "is" && $3 == "an" && $4 == "alias" && $5 == "for" {
+            name=tolower($1); sub(/[.]$/, "", name)
+            if (name == requested || name == target) { alias=1; target=tolower($6); sub(/[.]$/, "", target) }
+          }
+          $1 == "Host" && $3 == "not" && $4 == "found:" {
+            name=tolower($2); sub(/[.]$/, "", name)
+            if (name != requested && name != target) next
+            if ($5 == "3(NXDOMAIN)") reason="nxdomain"
+            else if ($5 == "2(SERVFAIL)") reason="servfail"
+            else if ($5 == "5(REFUSED)") reason="refused"
+          }
+          /connection timed out/ { if (reason == "") reason="timed_out" }
+          END {
+            # A CNAME can exist while its target does not; keep that distinction.
+            if (reason == "nxdomain" && alias) reason="cname_target_not_found"
+            print reason
+          }
+        ' <<< "$lookup") || diagnostic=''
+        case "$diagnostic" in
+          nxdomain) result=not_found; reason=nxdomain;;
+          servfail|refused|timed_out|cname_target_not_found) reason=$diagnostic;;
+        esac;;
+    esac
+  fi
   manifest_dns_names+=("$domain"); manifest_dns_values+=("$addresses")
   manifest_dns_results+=("$result"); manifest_dns_reasons+=("$reason")
   manifest_dns_addresses="$addresses"; manifest_dns_result="$result"; manifest_dns_reason="$reason"
@@ -7815,22 +7980,22 @@ function manifest_application() {
   case "$document_root" in *'$'*|*'%'*|*'{'*|*'}'*) return ;; esac
   if [ -f "$manifest_root$document_root/wp-includes/version.php" ]; then
     file="$manifest_root$document_root/wp-includes/version.php"; application=WordPress; language=PHP
-    version=$(awk '/^[ \t]*\$wp_version[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
+    version=$(awk '/^[ \t]*\$wp_version[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/administrator/manifests/files/joomla.xml" ]; then
     file="$manifest_root$document_root/administrator/manifests/files/joomla.xml"; application=Joomla; language=PHP
-    version=$(awk 'match($0,/<version>[^<]+/) { print substr($0,RSTART+9,RLENGTH-9); exit }' < <(manifest_read_metadata "$file"))
+    version=$(awk 'match($0,/<version>[^<]+/) { print substr($0,RSTART+9,RLENGTH-9); exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/core/lib/Drupal.php" ]; then
     file="$manifest_root$document_root/core/lib/Drupal.php"; application=Drupal; language=PHP
-    version=$(awk '/const VERSION[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
-  elif [ -f "$manifest_root$document_root/includes/constants.php" ] && grep -q 'PHPBB_VERSION' < <(manifest_read_metadata "$manifest_root$document_root/includes/constants.php"); then
+    version=$(awk '/const VERSION[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
+  elif [ -f "$manifest_root$document_root/includes/constants.php" ] && grep -q 'PHPBB_VERSION' <<< "$(manifest_read_metadata "$manifest_root$document_root/includes/constants.php")"; then
     file="$manifest_root$document_root/includes/constants.php"; application=phpBB; language=PHP
-    version=$(awk '/define[ \t]*\([ \t]*[\047\042]PHPBB_VERSION[\047\042]/ { line=$0; sub(/^.*PHPBB_VERSION[\047\042][ \t]*,[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
-  elif [ -f "$manifest_root$document_root/includes/DefaultSettings.php" ] && grep -q "\\\$wgVersion" < <(manifest_read_metadata "$manifest_root$document_root/includes/DefaultSettings.php"); then
+    version=$(awk '/define[ \t]*\([ \t]*[\047\042]PHPBB_VERSION[\047\042]/ { line=$0; sub(/^.*PHPBB_VERSION[\047\042][ \t]*,[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
+  elif [ -f "$manifest_root$document_root/includes/DefaultSettings.php" ] && grep -q "\\\$wgVersion" <<< "$(manifest_read_metadata "$manifest_root$document_root/includes/DefaultSettings.php")"; then
     file="$manifest_root$document_root/includes/DefaultSettings.php"; application=MediaWiki; language=PHP
-    version=$(awk '/^[ \t]*\$wgVersion[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
+    version=$(awk '/^[ \t]*\$wgVersion[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/version.php" ] && [ -f "$manifest_root$document_root/lib/moodlelib.php" ]; then
     file="$manifest_root$document_root/version.php"; application=Moodle; language=PHP
-    version=$(awk '/^[ \t]*\$release[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' < <(manifest_read_metadata "$file"))
+    version=$(awk '/^[ \t]*\$release[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/artisan" ]; then application=Laravel; language=PHP
   elif [ -f "$manifest_root$document_root/config.ru" ] || [ -f "$manifest_root$document_root/Gemfile" ]; then language=Ruby
   elif [ -f "$manifest_root$document_root/package.json" ]; then language=JavaScript
@@ -7838,7 +8003,7 @@ function manifest_application() {
   elif [ -f "$manifest_root$document_root/index.php" ]; then language=PHP
   elif [ -f "$manifest_root$document_root/index.pl" ]; then language=Perl
   elif [ -f "$manifest_root$document_root/index.cgi" ]; then
-    language=$(awk 'NR == 1 { if ($0 ~ /^#!.*perl/) print "Perl"; else if ($0 ~ /^#!.*python/) print "Python"; else print "unknown"; exit }' < <(manifest_read_metadata "$manifest_root$document_root/index.cgi"))
+    language=$(awk 'NR == 1 { if ($0 ~ /^#!.*perl/) print "Perl"; else if ($0 ~ /^#!.*python/) print "Python"; else print "unknown"; exit }' <<< "$(manifest_read_metadata "$manifest_root$document_root/index.cgi")")
   fi
   # A version is metadata, never an arbitrary expression or configuration value.
   if [[ ! "$version" =~ $version_pattern ]]; then version=unknown; fi
@@ -7849,7 +8014,7 @@ function manifest_application() {
     *) file= ;;
   esac
   if [ -n "$file" ] && [ -r "$file" ]; then
-    language_version=$(awk 'NR == 1 { print; exit }' < <(manifest_read_metadata "$file"))
+    language_version=$(awk 'NR == 1 { print; exit }' <<< "$(manifest_read_metadata "$file")")
     if [[ "$language_version" =~ ^[0-9][0-9A-Za-z.+_-]{0,60}$ ]]; then version_source=project_declared_not_verified_runtime
     else language_version=unknown; fi
   fi
@@ -7916,25 +8081,26 @@ function manifest_website() {
 
 function manifest_websites() {
   local server file names port tls document_root user runtime certificate default_user
+  local files records metadata
   for server in apache nginx caddy; do
     default_user=unknown
     case "$server" in
       apache)
         if [ -r "$manifest_root/etc/apache2/envvars" ]; then
-          default_user=$(awk '/^[ \t]*(export[ \t]+)?APACHE_RUN_USER=[A-Za-z_][A-Za-z0-9_-]*[ \t]*$/ { sub(/^.*=/, ""); gsub(/[ \t]/, ""); print; exit }' < <(manifest_read_metadata "$manifest_root/etc/apache2/envvars"))
+          default_user=$(awk '/^[ \t]*(export[ \t]+)?APACHE_RUN_USER=[A-Za-z_][A-Za-z0-9_-]*[ \t]*$/ { sub(/^.*=/, ""); gsub(/[ \t]/, ""); print; exit }' <<< "$(manifest_read_metadata "$manifest_root/etc/apache2/envvars")")
           [ -n "$default_user" ] || default_user=unknown
         fi ;;
       nginx)
         if [ -r "$manifest_root/etc/nginx/nginx.conf" ]; then
-          default_user=$(awk '/^[ \t]*user[ \t]+[A-Za-z_][A-Za-z0-9_-]*[; \t]/ { value=$2; gsub(/;/,"",value); print value; exit }' < <(manifest_read_metadata "$manifest_root/etc/nginx/nginx.conf"))
+          default_user=$(awk '/^[ \t]*user[ \t]+[A-Za-z_][A-Za-z0-9_-]*[; \t]/ { value=$2; gsub(/;/,"",value); print value; exit }' <<< "$(manifest_read_metadata "$manifest_root/etc/nginx/nginx.conf")")
           [ -n "$default_user" ] || default_user=unknown
         fi ;;
     esac
+    files=$(manifest_config_files "$server") || { manifest_collection_failed=true; return; }
     while IFS= read -r file; do
-      while IFS=$'\t' read -r names port tls document_root user runtime certificate; do
-        [ -n "$names" ] || continue
-        manifest_website "$server" "$names" "$port" "$tls" "$document_root" "$user" "$runtime" "${file#"$manifest_root"}" "$certificate"
-      done < <(awk -v server="$server" -v default_user="$default_user" '
+      [ -n "$file" ] || continue
+      metadata=$(manifest_read_metadata "$file") || { manifest_collection_failed=true; continue; }
+      records=$(awk -v server="$server" -v default_user="$default_user" '
         function reset( i) { names="unknown"; port="unknown"; tls="unknown"; root="unknown"; user=default_user; runtime="unknown"; certificate="unknown"; listeners=0; for (i in ports) delete ports[i]; for (i in secure) delete secure[i] }
         function emit( i) {
           if (!active) return
@@ -8017,89 +8183,119 @@ function manifest_websites() {
             }
           }
         }
-        END { emit() }' < <(manifest_read_metadata "$file"))
-    done < <(manifest_config_files "$server")
+        END { emit() }' <<< "$metadata") || { manifest_collection_failed=true; continue; }
+      while IFS=$'\t' read -r names port tls document_root user runtime certificate; do
+        [ -n "$names" ] || continue
+        manifest_website "$server" "$names" "$port" "$tls" "$document_root" "$user" "$runtime" "${file#"$manifest_root"}" "$certificate"
+      done <<< "$records"
+    done <<< "$files"
   done
 }
 
+# Limit both configured paths and resolved aliases before probing mail data.
+function manifest_mail_path_is_narrow() {
+  case "$1" in
+    "$manifest_root"/var/mail|"$manifest_root"/var/spool/mail|"$manifest_root"/var/vmail|"$manifest_root"/var/mail/*|"$manifest_root"/var/spool/mail/*|"$manifest_root"/var/vmail/*|"$manifest_root"/home/*/Maildir|"$manifest_root"/root/Maildir|"$manifest_root"/var/qmail/mailnames|"$manifest_root"/home/*/mail) return 0;;
+    *) return 1;;
+  esac
+}
+
 function manifest_mail_root() {
-  local path="$1" source="$2" size=unknown count=unknown reason=not_scanned count_reason=ambiguous_layout actual output inode
+  local path="$1" source="$2" size=unknown count=unknown reason=not_scanned count_reason=ambiguous_layout actual output inode resolved
   case "$path" in /*) ;; *) return ;; esac
   case "$path" in *'$'*|*'%'*|*'~'*|*'{'*|*'}'*)
-    manifest_emit mail_storage path "$path" source "$source" size_mib unknown mailbox_count unknown reason dynamic_path
-    return ;;
+    # Measure an existing literal parent, not an unresolved per-user template or a broad home tree.
+    path=${path%%\%*}; path=${path%%\$*}; path=${path%%\~*}; path=${path%%\{*}; path=${path%/*}
+    case "$path" in ''|/|/home|/var|/srv) return;; esac
+    source="$source:template_root";;
   esac
   case "|$manifest_mail_seen|" in *"|$path|"*) return ;; esac
   manifest_mail_seen="$manifest_mail_seen|$path"
   actual="$manifest_root$path"
   [ -d "$actual" ] || return
+  resolved=$(readlink -f -- "$actual" 2>/dev/null) || resolved=
+  if [ "$source" = conventional ] && manifest_mail_path_is_narrow "$resolved" &&
+      output=$(manifest_run_bounded 2 find "$resolved" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) && [ -z "$output" ]; then return; fi
   inode=$(stat -L -c '%d:%i' -- "$actual" 2>/dev/null) || inode=
   if [ -n "$inode" ]; then
     case "|$manifest_mail_inodes|" in *"|$inode|"*) return ;; esac
     manifest_mail_inodes="$manifest_mail_inodes|$inode"
   fi
   manifest_mail_count=$((manifest_mail_count+1))
+  if [ -d "$actual/cur" ] && [ -d "$actual/new" ] && [ -d "$actual/tmp" ]; then count=1; count_reason=maildir; fi
   # Only conventional narrow mail roots are scanned; a configured / or /home is never traversed.
-  case "$path" in /var/mail|/var/spool/mail|/var/vmail|/var/mail/*|/var/spool/mail/*|/var/vmail/*|/home/*/Maildir|/root/Maildir)
-    if $manifest_mail_metrics && [ "$manifest_mail_count" -le 8 ] && command -v timeout >/dev/null 2>&1; then
+  if manifest_mail_path_is_narrow "$actual"; then
+    if ! $manifest_mail_metrics; then reason=disabled
+    elif [ "$manifest_mail_count" -gt 8 ]; then reason=directory_limit
+    elif ! command -v timeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; then reason=bounded_probe_unavailable
+    else
       # Follow only the root alias; its resolved target must still be a narrow mail root.
-      actual=$(readlink -f -- "$actual" 2>/dev/null) || actual=
-      case "$actual" in
-        "$manifest_root"/var/mail|"$manifest_root"/var/spool/mail|"$manifest_root"/var/vmail|"$manifest_root"/var/mail/*|"$manifest_root"/var/spool/mail/*|"$manifest_root"/var/vmail/*|"$manifest_root"/home/*/Maildir|"$manifest_root"/root/Maildir) :;;
-        *) actual=; reason=resolved_path_not_scanned;;
-      esac
+      actual=$resolved
+      if ! manifest_mail_path_is_narrow "$actual"; then actual=; reason=resolved_path_not_scanned; fi
       if [ -n "$actual" ]; then
-        if output=$(timeout 3 du -smx -- "$actual" 2>/dev/null); then size=${output%%[[:space:]]*}; reason=measured; else reason=limit_or_permissions; fi
+        if output=$(manifest_run_bounded 3 du -skx -- "$actual" 2>/dev/null); then
+          if size=$(awk '$1 ~ /^[0-9]+$/ { printf "%.3f", $1/1024; found=1 } END { exit !found }' <<< "$output"); then reason=measured
+          else size=unknown; reason=invalid_du_output; fi
+        else reason=limit_or_permissions; fi
         if [ -d "$actual/cur" ] && [ -d "$actual/new" ] && [ -d "$actual/tmp" ]; then count=1; count_reason=maildir
         elif [ "$path" = /var/mail ] || [ "$path" = /var/spool/mail ]; then
-          if output=$(timeout 2 find "$actual" -mindepth 1 -maxdepth 1 -type f -printf '.\n' 2>/dev/null); then
+          if output=$(manifest_run_bounded 2 find "$actual" -mindepth 1 -maxdepth 1 -type f -printf '.\n' 2>/dev/null); then
             if [ -n "$output" ]; then count=$(printf '%s\n' "$output" | wc -l); count_reason=top_level_mbox_files; else count=unknown; fi
           fi
         fi
       fi
-    else reason=disabled_or_limit; fi ;;
-    *) reason=nonstandard_path_not_scanned ;;
-  esac
+    fi
+  else reason=nonstandard_path_not_scanned; fi
   manifest_emit mail_storage path "$path" source "$source" size_mib "$size" mailbox_count "$count" size_basis allocated_disk_mib count_reason "$count_reason" reason "$reason"
 }
 
 function manifest_mail() {
   local file path key value home count=0 file_count=0
-  for file in "$manifest_root"/etc/postfix/main.cf "$manifest_root"/etc/dovecot/dovecot.conf "$manifest_root"/etc/dovecot/conf.d/*.conf "$manifest_root"/etc/exim4/exim4.conf.template "$manifest_root"/etc/exim4/conf.d/main/* "$manifest_root"/etc/courier/imapd "$manifest_root"/etc/courier/pop3d; do
+  local records metadata
+  for file in "$manifest_root"/etc/postfix/main.cf "$manifest_root"/etc/dovecot/dovecot.conf "$manifest_root"/etc/dovecot/conf.d/*.conf "$manifest_root"/etc/exim4/exim4.conf.template "$manifest_root"/etc/exim4/conf.d/main/* "$manifest_root"/etc/courier/imapd "$manifest_root"/etc/courier/pop3d "$manifest_root"/etc/psa/psa.conf; do
     if [ ! -f "$file" ] || [ ! -r "$file" ]; then continue; fi
     file_count=$((file_count+1)); [ "$file_count" -le 200 ] || break
-    while IFS=$'\t' read -r key value; do
-      case "$key" in
-        mail_spool_directory|virtual_mailbox_base|mail_path) manifest_mail_root "$value" "${file#"$manifest_root"}:$key" ;;
-        mail_location)
-          path=${value#*:}; path=${path%%:*}
-          manifest_mail_root "$path" "${file#"$manifest_root"}:$key" ;;
-      esac
-    done < <(awk '
+    metadata=$(manifest_read_metadata "$file") || { manifest_collection_failed=true; continue; }
+    records=$(awk '
       FNR > 20000 { exit }
       /^[ \t]*[#;]/ { next }
-      /^[ \t]*(mail_spool_directory|virtual_mailbox_base|mail_location|mail_path)[ \t]*=/ {
+      $1 == "PLESK_MAILNAMES_D" { print $1 "\t" $2; next }
+      /^[ \t]*(mail_spool_directory|virtual_mailbox_base|mail_location|default_mail_env|mail_path)[ \t]*=/ {
         key=$0; sub(/[ \t]*=.*/,"",key); gsub(/^[ \t]+/,"",key)
         value=$0; sub(/^[^=]*=[ \t]*/,"",value); sub(/[ \t]+#.*/,"",value); gsub(/^[\042\047]|[\042\047][ \t]*$/,"",value)
         print key "\t" value
-      }' < <(manifest_read_metadata "$file"))
+      }' <<< "$metadata") || { manifest_collection_failed=true; continue; }
+    while IFS=$'\t' read -r key value; do
+      case "$key" in
+        mail_spool_directory|virtual_mailbox_base|mail_path|PLESK_MAILNAMES_D) manifest_mail_root "$value" "${file#"$manifest_root"}:$key" ;;
+        mail_location|default_mail_env)
+          path=${value#*:}; path=${path%%:*}
+          manifest_mail_root "$path" "${file#"$manifest_root"}:$key" ;;
+      esac
+    done <<< "$records"
   done
   manifest_mail_root /var/mail conventional
   manifest_mail_root /var/spool/mail conventional
   manifest_mail_root /var/vmail conventional
+  manifest_mail_root /var/qmail/mailnames conventional
+  if [ -d "$manifest_root/usr/local/cpanel" ] || [ -d "$manifest_root/var/cpanel" ]; then
+    for home in "$manifest_root"/home/*/mail; do
+      [ -d "$home" ] || continue
+      count=$((count+1)); [ "$count" -le 20 ] || break
+      manifest_mail_root "${home#"$manifest_root"}" cpanel
+    done
+  fi
   for home in "$manifest_root"/home/*/Maildir "$manifest_root"/root/Maildir; do
     [ -d "$home" ] || continue
     count=$((count+1)); [ "$count" -le 20 ] || break
     manifest_mail_root "${home#"$manifest_root"}" conventional
   done
-  if [ "$manifest_mail_count" -eq 0 ]; then
-    manifest_emit mail_storage path unknown source unknown size_mib unknown mailbox_count unknown reason no_conventional_mail_store_identified
-  fi
 }
 
 # FORMAT is text or json; ROOT is used only by isolated fixtures, never a chroot or executable source.
 function manifest_output() (
   local manifest_format="${1:-text}" manifest_dns_enabled="${2:-true}" manifest_root="${3:-/}"
+  local manifest_processes=''
   local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
   local manifest_review_file=${4:-} manifest_collection_failed=false
   local manifest_dns_limit=20 manifest_mail_metrics="${MANIFEST_MAIL_METRICS:-true}"
@@ -8120,17 +8316,19 @@ function manifest_output() (
   esac
   [ "$manifest_root" = / ] && manifest_root=
   if command -v ip >/dev/null 2>&1; then
-    manifest_local_addresses=$(ip -o address show 2>/dev/null | awk '{split($4,a,"/"); printf "%s ",a[1]}')
+    manifest_local_addresses=$(ip -o address show 2>/dev/null | awk '{ for (i=1;i<NF;i++) if ($i == "inet" || $i == "inet6") { split($(i+1),a,"/"); if (!seen[a[1]]++) printf "%s ",a[1] } }')
   fi
   [ "$manifest_format" != json ] || printf '{"schema_version":1,"records":['
   manifest_emit system hostname "$(hostname 2>/dev/null || printf unknown)" generated_utc "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" local_addresses "${manifest_local_addresses:-unknown}"
   manifest_listeners
+  manifest_processes=$(ps -eo comm= 2>/dev/null) || manifest_processes=
   manifest_packages
   manifest_apache_php
   manifest_fpm_pools
   manifest_mail
   manifest_websites
-  manifest_emit warning area interpretation reason 'Static inventory: conventional config files only (200 files per server, 1 MiB/20000 lines per file); includes, variables and dynamic application settings may be unresolved. Bindings do not prove Internet reachability; DNS may point at a proxy. Application dates are filesystem metadata. Certificate files are checked for presence only; expiry, trust and active TLS are not verified. No application code was executed.'
+  if $manifest_collection_failed; then manifest_emit warning area collection reason 'One or more collectors failed; missing inventory sections are unknown.'; fi
+  manifest_emit warning area interpretation reason 'Reads common configuration files; custom settings may be missed. Websites and applications are not tested. Certificate files are listed, but HTTPS and certificate validity are not checked.'
   [ "$manifest_format" != json ] || printf ']}\n' || return 1
   # Ordinary inventories retain partial findings; comparisons require their core collectors to succeed.
   [ -z "$manifest_review_file" ] || ! $manifest_collection_failed

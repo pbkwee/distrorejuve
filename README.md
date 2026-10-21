@@ -84,7 +84,7 @@ After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /
 | `--to-64bit` | Attempt an experimental crossgrade from 32-bit to 64-bit. |
 | `--support-report [RUN_DIRECTORY]` | Print a minimal report for a public bug report. Review it before posting. |
 | `--upgrade-report` | Collect a read-only developer handover with package, repository, configuration and application facts. Add `--no-dns` to skip DNS checks. |
-| `--manifest` / `--manifest-json` | Report applications and services as text or JSON. Add `--no-dns` to skip DNS checks. |
+| `--manifest` / `--manifest-json` | Report applications, service state, websites and mail storage as text or JSON. Add `--no-dns` to skip DNS checks. |
 | `--show-changes` | Report differences from the pre-upgrade configuration and system state. |
 | `--show-cruft` | List packages left over from older releases or architectures. |
 | `--remove-cruft` | Remove those leftover packages. |
@@ -106,7 +106,7 @@ sudo env MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --dist-upgrade
 | Variable | Default and effect |
 | --- | --- |
 | `DISTROREJUVE_LOG_DIR` | `/root/distrorejuveinfo/runs`; parent directory for private run logs. |
-| `MANIFEST_MAIL_METRICS` | `true`; set to `false` to skip bounded mail size/count probes. |
+| `MANIFEST_MAIL_METRICS` | `true`; set to `false` to skip mail size scans and spool counts. |
 | `MIN_FREE_DISK_MIB` | `5120`; minimum available MiB on each checked filesystem. Use a positive integer. |
 | `SKIP_DISK_SPACE_CHECK` | `false`; set to `true` to bypass disk-space checks after review. |
 | `ALLOW_CROSSGRADE_BLOCKERS` | `false`; permit starting despite predicted package blockers during a crossgrade. Final native 64-bit verification remains required. |

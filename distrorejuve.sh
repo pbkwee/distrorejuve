@@ -203,10 +203,10 @@ function replace() {
    local dash=$3
    local file=$4
    if [ "$dash" != "--" ]; then
-     echo "expecting '--'" >&2
+     echo "dss:error: expecting '--'" >&2
      return 1
    fi
-   [ ! -f "$file" ] && echo "No such file as $file" >&2 && return 1
+   [ ! -f "$file" ] && echo "dss:error: No such file as $file" >&2 && return 1
    sed -i "s@$from@$to@" "$file"
 }
 
@@ -3020,21 +3020,35 @@ function crossgrade_output_foreign_packages() {
   ' || return 2
 }
 
-function crossgrade_bookworm_check_native() {
-  local native bits packages
-  native=$(dpkg --print-architecture) || return 2
-  bits=$(getconf LONG_BIT) || return 2
-  [ "$native:$bits" = amd64:64 ] || return 1
-  packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n') || return 2
+# Rows: issue (architecture/configuration), package:architecture, dpkg status.
+# Keep architecture planning separate from the stricter crossgrade completion check.
+# dpkg-query example: install ok unpacked<TAB>openssh-server<TAB>amd64<TAB>no.
+function crossgrade_output_core_package_issues() {
+  local packages
+  packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n') || {
+    echo 'dss:error: Cannot inspect core package architectures and configuration states.' >&2; return 1;
+  }
   printf '%s\n' "$packages" | awk -F '\t' '
+    NF && NF != 4 { bad=1; next }
     $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ {
       sub(/:.*/, "", $2)
       if ($4 == "yes" || $2 ~ /^(dpkg|apt|apt-utils|bash|coreutils|tar|perl-base|systemd|systemd-sysv|udev|openssh-server|ifupdown)$/) {
-        if ($1 !~ / installed$/ || ($3 != "amd64" && $3 != "all")) mixed=1
+        if ($2 == "" || $3 == "") { bad=1; next }
+        if ($3 != "amd64" && $3 != "all") print "architecture\t" $2 ":" $3 "\t" $1
+        else if ($1 !~ / installed$/) print "configuration\t" $2 ":" $3 "\t" $1
       }
     }
-    END { exit mixed }
-  '
+    END { exit bad }
+  ' || { echo 'dss:error: Invalid core package inventory; architecture verification is incomplete.' >&2; return 1; }
+}
+
+function crossgrade_bookworm_check_native() {
+  local native bits issues
+  native=$(dpkg --print-architecture) || return 2
+  bits=$(getconf LONG_BIT) || return 2
+  [ "$native:$bits" = amd64:64 ] || return 1
+  issues=$(crossgrade_output_core_package_issues) || return 2
+  [ -z "$issues" ]
 }
 
 # shellcheck shell=bash
@@ -3062,7 +3076,7 @@ function crossgrade_check_source_architectures() {
 # Permission alone does not request conversion while the chosen release supports i386.
 function upgrade_output_crossgrade_release() {
   local family=$1 current=$2 target=$3 enabled=${UPGRADE_CROSSGRADE-false}
-  local native bits kernel boundary releases state foreign_packages pending=false
+  local native bits kernel boundary releases state foreign_packages core_issues pending_directory pending=false
   case "$enabled" in true|false) :;; *) echo 'dss:error: Internal crossgrade permission must be true or false.' >&2; return 1;; esac
   case "$family" in
     debian) releases=$ALL_DEBIAN; boundary=bookworm;;
@@ -3076,14 +3090,28 @@ function upgrade_output_crossgrade_release() {
   [ -n "$native" ] || { echo 'dss:error: Cannot establish native package architecture.' >&2; return 1; }
   case "$bits" in 32|64) :;; *) echo "dss:error: Cannot establish userspace bit width: $bits" >&2; return 1;; esac
   if [ "$family" = debian ] && [ "$current" = bookworm ]; then
-    crossgrade_bookworm_is_pending
-    state=$?
-    case "$state" in 0) pending=true;; 1) :;; *) return 1;; esac
+    if pending_directory=$(crossgrade_bookworm_output_pending_directory); then pending=true
+    else state=$?; [ "$state" -eq 1 ] || return 1; fi
   fi
   case "$native:$bits" in
     amd64:64)
       if $pending; then state=1
-      else crossgrade_bookworm_check_native; state=$?; fi
+      else
+        core_issues=$(crossgrade_output_core_package_issues) || return 1
+        state=0
+        case "$core_issues" in architecture$'\t'*|*$'\n'architecture$'\t'*) state=1;; esac
+        if [ -n "$core_issues" ]; then
+          if [ "$state" -eq 0 ]; then
+            echo 'dss:warn: Native architecture is amd64 with 64-bit userspace. Core package configuration is unfinished; this does not require an architecture crossgrade.' >&2
+          else
+            echo 'dss:warn: Native architecture is amd64 with 64-bit userspace, but some core packages use another architecture.' >&2
+          fi
+          printf '%s\n' "$core_issues" | awk -F '\t' '
+            NR <= 8 { printf "dss:warn: Core package %s: %s (%s).\n", $2, ($1 == "architecture" ? "expected amd64/all" : "needs configuration"), $3 }
+            END { if (NR > 8) printf "dss:warn: %d additional core package issues; inspect dpkg --audit and package architectures.\n", NR-8 }
+          ' >&2 || return 1
+        fi
+      fi
       # Ordinary amd64 upgrades may keep multiarch libraries; requested conversions may not.
       if [ "$state" -eq 0 ] && $enabled; then
         foreign_packages=$(crossgrade_output_foreign_packages) || return 1
@@ -3102,7 +3130,18 @@ function upgrade_output_crossgrade_release() {
     return 0
   fi
   if ! $enabled; then
-    echo "dss:error: $family $target requires conversion before leaving $boundary. Add --crossgrade to permit i386 to amd64 conversion." >&2
+    if $pending; then
+      echo "dss:error: Unfinished architecture crossgrade recorded at $pending_directory. Native package architecture: $native; userspace: $bits-bit. Add --crossgrade to resume it on $boundary before upgrading to $target." >&2
+    else
+      echo "dss:error: $family $target requires architecture conversion before leaving $boundary. Native package architecture: $native; userspace: $bits-bit. Add --crossgrade to permit i386 to amd64 conversion." >&2
+      foreign_packages=$(crossgrade_output_foreign_packages) || return 1
+      if [ -n "$foreign_packages" ]; then
+        printf '%s\n' "$foreign_packages" | awk '
+          NR <= 8 { print "dss:error: Active non-amd64 package: " $0 }
+          END { if (NR > 8) printf "dss:error: %d additional active non-amd64 packages.\n", NR-8 }
+        ' >&2 || return 1
+      fi
+    fi
     return 1
   fi
   if [ "$family" = ubuntu ] && [ -z "${ENABLE_UBUNTU_CROSSGRADE:-}" ]; then
@@ -3283,7 +3322,10 @@ function upgrade_check_path() {
     esac
   done <<< "$issues"
   if $blocked; then
-    echo "dss:error: Requested upgrade path $current -> $target blocked before changes. PURGE_INCOMPATIBLE_PACKAGES=true backs up and purges config-only blockers; manual migrations cannot be bypassed with it." >&2
+    echo "dss:error: Requested upgrade path $current -> $target blocked before changes. Resolve the specific checks above." >&2
+    if $retry_purge; then
+      echo 'dss:error: PURGE_INCOMPATIBLE_PACKAGES=true backs up and purges the configuration-incompatible packages listed above; it does not bypass manual migration or architecture checks.' >&2
+    fi
     if [ "${4:-requested}" = requested ]; then
       upgrade_preflight_blocked=true
       if [ "${#upgrade_retry_command[@]}" -gt 0 ] && { $retry_purge || $usrmerge_preference_needed || $retry_crossgrade; }; then
@@ -3687,7 +3729,8 @@ function usrmerge_check_upgrade_path() {
   is_distro_name_older "$current" "$target" || return 0
   is_distro_name_older "$target" "$boundary" && return 0
   if { [ -e "/etc/unsupported-skip-usrmerge-conversion" ] || [ -L "/etc/unsupported-skip-usrmerge-conversion" ]; } && ! usrmerge_is_complete; then
-    echo 'dss:error: Requested path requires usrmerge, but /etc/unsupported-skip-usrmerge-conversion disables it; review that marker manually before upgrading.' >&2
+    echo 'dss:error: Requested path requires usrmerge (merged /usr directories), but /etc/unsupported-skip-usrmerge-conversion disables it; review that marker manually before upgrading.' >&2
+    echo 'dss:error: usrmerge moves system files from /bin, /sbin and /lib into /usr and replaces those directories with symbolic links. Review why conversion was disabled before removing the marker.' >&2
     return 1
   fi
   usrmerge_check_collisions
@@ -3782,7 +3825,7 @@ function retain_etc_networking_naming_re_enX0() {
   [ -e /etc/systemd/network/99-default.link ] && return 0
   ! ifconfig eth0 2>/dev/null && return 0
 
-  ln -sf /dev/null /etc/systemd/network/99-default.link && echo "Disabling /etc/systemd/network/99-default.link re enX0"
+  ln -sf /dev/null /etc/systemd/network/99-default.link && echo "dss:info: Disabling /etc/systemd/network/99-default.link re enX0"
   # dev null approach described:
   #   https://www.linuxfromscratch.org/lfs/view/9.1-systemd/chapter07/network.html
   #   https://bbs.archlinux.org/viewtopic.php?id=259086&p=2 the dev null symlink approach
@@ -4076,9 +4119,9 @@ function apt_get_f_install() {
   local essentialissuepackages="$(grep --after-context 50 'WARNING: The following essential packages will be removed.' "$tmplog" | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
   [ ! -z "$essentialissuepackages" ] && echo "dss:warn: apt_get_f_install $@ essential package issues for: $essentialissuepackages"
   if [ ! -z "$essentialissuepackages" ] && echo "$essentialissuepackages" | grep -qai 'perl-base:amd64'; then
-    echo "dss:trying to dpkg -i perl-base:i386"
+    echo "dss:trace: Checking perl-base:i386 for dependency recovery."
     if dpkg -l | grep perl-base | grep i386 | grep -qai ii; then
-      echo "dss: perl-base:i386 already installed"
+      echo "dss:trace: perl-base:i386 is already installed."
     else
       apt-get download perl-base:i386
       dpkg -i perl-base*i386*deb
@@ -5281,7 +5324,7 @@ function crossgrade_debian() {
 
   # doesn't seem to achieve much...  should result in apt-get install blah installing the amd64 (vs. i386) version
   dpkg --get-selections | grep :i386 | sed -e s/:i386/:amd64/ | dpkg --set-selections
-  lsb_release -a 2>/dev/null | grep -qai Ubuntu && echo "dss:fiddle to try and have Ubuntu use amd64 packages by default." &&
+  lsb_release -a 2>/dev/null | grep -qai Ubuntu && echo "dss:trace: Trying Ubuntu amd64 package selection defaults." &&
   echo "dss:info: cross grading.  force installing of amd64 packages after dpkg --set-selections."
   apt_get_f_install
   if [  $? -ne 0 ]; then
@@ -7023,6 +7066,7 @@ function apt_get_upgrade() {
   apt_state_dist_upgraded=
   echo "dss:trace:apt_get_upgrade"
   record_config_state
+  echo "dss:trace: Configuring pending packages before the package upgrade (dpkg --configure -a)." >&2
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
   fi
@@ -7126,9 +7170,10 @@ function apt_get_dist_upgrade() {
     rm -f -- "$retry_log"
   fi
   [ -e /var/log/syslog ] && [ -e /etc/my/my.cnf ] && if grep "unknown variable 'lc-messages-dir" /var/log/syslog; then
-    echo "dss: info: commenting out the my.cnf lc-messages-dir directive in case it is causing problems"
+    echo "dss:info: Commenting out the my.cnf lc-messages-dir directive in case it is causing problems."
     sed -i "s@^lc-messages-dir\(.*\)@#lc-messages-dir\1@" /etc/my/my.cnf
   fi
+  echo "dss:trace: Rechecking package configuration after the full upgrade (dpkg --configure -a)." >&2
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
   fi
@@ -9030,17 +9075,17 @@ elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
   fi
   if [  64 -eq $(getconf LONG_BIT) ]; then
     if has_cruft_packages 32bit; then
-      echo "This distro is 64 bit already.  But some 32 bit packages are installed.  Re-running crossgrade."
+      echo "dss:stage: System is already 64-bit; continuing conversion of remaining 32-bit packages."
     else
-      echo "Distro is already 64 bit.  Cannot locate any 32 bit packages.  All good."
+      echo "dss:stage: System is already 64-bit; no 32-bit packages remain."
       exit 0
     fi
   fi
-  has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && show_cruft_packages && echo "There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && exit 1
+  has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && show_cruft_packages && echo "dss:error: Old packages must be removed before crossgrading. Run bash $0 --remove-cruft, or set IGNORECRUFT=Y to override this check." >&2 && exit 1
   crossgrade_debian
   ret=$?
   [ $ret -ne 0 ] && echo "dss:error: crossgrade failed, see above for any details"
-  [ $ret -eq 0 ] && echo "dss:info to show config changes, run: bash $0 --show-changes"
+  [ $ret -eq 0 ] && echo "dss:info: To show configuration changes, run: bash $0 --show-changes"
   # [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
   exit $ret
 elif [ "--show-changes" = "${ACTION:-$1}" ] ; then

@@ -4,7 +4,7 @@
 function environment_validate_settings() {
   local name value
   for name in DR_ALLOW_BACKPORTS DR_ALLOW_CROSSGRADE_BLOCKERS DR_ALLOW_UNAUTHENTICATED_ARCHIVES \
-      DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_MAIL_METRICS DR_PREFER_PACKAGED_USRMERGE_FILES \
+      DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_MAIL_METRICS DR_PREFER_PACKAGED_USRMERGE_FILES \
       DR_PURGE_INCOMPATIBLE_PACKAGES DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES DR_REMOVE_X11_PACKAGES \
       DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK DR_SKIP_DISK_SPACE_CHECK DR_SKIP_DOVECOT_MIGRATION_CHECK \
       DR_SKIP_KERNEL_CHECK DR_SKIP_OLD_PACKAGE_CHECK DR_SKIP_X11_CHECK; do
@@ -108,13 +108,14 @@ CentOS Vault restores frozen historical packages only; it does not restore secur
 Run with --dist-update to update packages on the current distro version (no distro version change).
 
 Run with --upgrade-report to collect a read-only handover for developer/application upgrade review.
-Add --no-dns to skip its bounded DNS checks. It does not test application compatibility.
+It does not test application compatibility.
 
 Run with --support-report [RUN_DIRECTORY] to print a minimal report for a public bug report.
 Review it before posting. It omits raw logs, configuration and host identifiers; no upload occurs.
 
 Run with --manifest or --manifest-json to collect a read-only application/service/migration inventory (dpkg or RPM).
-Add --no-dns to skip bounded DNS lookups. DR_MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
+DNS checks are enabled by default; DR_MANIFEST_DNS=false skips them.
+DR_MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
 Website records include the primary configured URL and local certificate-file presence.
 Missing names, indirect configuration and automatically managed certificates may remain unknown.
 
@@ -8905,7 +8906,7 @@ function manifest_migration() {
 
 # FORMAT is text or json; ROOT is used only by isolated fixtures, never a chroot or executable source.
 function manifest_output() (
-  local manifest_format="${1:-text}" manifest_dns_enabled="${2:-true}" manifest_root="${3:-/}"
+  local manifest_format="${1:-text}" manifest_dns_enabled="${2:-${DR_MANIFEST_DNS:-true}}" manifest_root="${3:-/}"
   local manifest_processes='' manifest_package_backend=unknown
   local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
   local manifest_review_file=${4:-} manifest_collection_failed=false
@@ -9049,7 +9050,7 @@ function manifest_compare_baseline() {
 
 # Read-only handover facts for a developer or AI; existing APT indexes may be stale.
 function upgrade_print_report() {
-  local dns=${1:-true} current=unknown family=unknown target=unknown native=unknown status=0 records audit file release crossgrade_release=''
+  local dns=${1:-${DR_MANIFEST_DNS:-true}} current=unknown family=unknown target=unknown native=unknown status=0 records audit file release crossgrade_release=''
   case "$dns" in true|false) :;; *) return 1;; esac
   printf '%s\n' 'distrorejuve upgrade review' "Captured UTC: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   current=$(distro_output_codename) || { current=unknown; status=1; }
@@ -9483,12 +9484,11 @@ if [ "${DR_ACTION:-$1}" = --support-report ]; then
 fi
 [ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json ] || [ "${DR_ACTION:-$1}" = --upgrade-report ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
 if [ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json ] || [ "${DR_ACTION:-$1}" = --upgrade-report ]; then
-  manifest_dns_enabled=true
-  case "${2:-}" in --no-dns) manifest_dns_enabled=false;; '') :;; *) print_usage; exit 1;; esac
-  [ -z "${3:-}" ] || { print_usage; exit 1; }
-  if [ "${DR_ACTION:-$1}" = --upgrade-report ]; then upgrade_print_report "$manifest_dns_enabled"
-  elif [ "${DR_ACTION:-$1}" = --manifest-json ]; then manifest_output json "$manifest_dns_enabled"
-  else manifest_output text "$manifest_dns_enabled"; fi
+  local dns=${DR_MANIFEST_DNS:-true}
+  [ "$#" -le 1 ] || { print_usage; exit 1; }
+  if [ "${DR_ACTION:-$1}" = --upgrade-report ]; then upgrade_print_report "$dns"
+  elif [ "${DR_ACTION:-$1}" = --manifest-json ]; then manifest_output json "$dns"
+  else manifest_output text "$dns"; fi
   exit $?
 elif [ "--help" = "${DR_ACTION:-$1}" ]; then
   print_usage

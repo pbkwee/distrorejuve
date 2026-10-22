@@ -29,46 +29,8 @@ To upgrade to the latest Debian stable release or Ubuntu LTS:
 sudo bash distrorejuve.sh --to-latest
 ```
 
-### Download failures on very old systems
-
-Old `wget`/OpenSSL versions, such as those on Ubuntu 6.06, can fail with
-`SSL23_GET_SERVER_HELLO:unknown protocol` or `Unable to establish SSL connection`.
-These clients cannot negotiate modern TLS. `--no-check-certificate` does not fix
-that protocol failure, and GitHub redirects plain HTTP downloads to HTTPS.
-
-Download on a newer computer, then copy the file to the old server over SSH.
-Replace `OLD_SERVER` with the server's address. Run these commands on the newer computer:
-
-```sh
-curl --fail --location --output distrorejuve.sh \
-  https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh &&
-scp -O distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
-```
-
-`-O` selects the legacy SCP transfer protocol for old SSH servers. If an older SCP
-client does not recognize `-O`, omit it. If SSH also reports a negotiation failure,
-add the required option to this SCP command:
-
-- If the host-key error offers `ssh-rsa`, add `-oHostKeyAlgorithms=+ssh-rsa`.
-- If the key-exchange error offers `diffie-hellman-group14-sha1`, add `-oKexAlgorithms=+diffie-hellman-group14-sha1`.
-  Use `-oKexAlgorithms=+diffie-hellman-group1-sha1` only if that is the available method.
-- If an existing RSA login key needs SHA-1 signatures, add `-oPubkeyAcceptedAlgorithms=+ssh-rsa`.
-
-To try the legacy RSA methods and both SHA-1 key exchanges in one command:
-
-```sh
-scp -O \
-  -oHostKeyAlgorithms=+ssh-rsa \
-  -oPubkeyAcceptedAlgorithms=+ssh-rsa \
-  -oKexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1 \
-  distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
-```
-
-The `+` adds these methods after the modern defaults. Host-key verification still applies.
-
-Keep these legacy settings on the individual command. See the
-[OpenSSH legacy connection guide](https://www.openssh.org/legacy.html).
-After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /root/distrorejuve.sh --check`.
+If downloading fails with `unknown protocol` or `Unable to establish SSL connection`,
+see [download and SSH tips](docs/reporting-problems.md#download-errors-on-old-servers).
 
 ## Main options
 
@@ -83,8 +45,8 @@ After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /
 | `--crossgrade` | Add to a release upgrade to permit i386 → amd64 conversion at the last native i386 release, then continue. Requires a running x86_64 kernel. |
 | `--to-64bit` | Attempt an experimental crossgrade from 32-bit to 64-bit. |
 | `--support-report [RUN_DIRECTORY]` | Print a minimal report for a public bug report. Review it before posting. |
-| `--upgrade-report` | Collect a read-only developer handover with package, repository, configuration and application facts. Add `--no-dns` to skip DNS checks. |
-| `--manifest` / `--manifest-json` | Report applications, service state, websites, mail storage and migration hints as text or JSON (dpkg or RPM). Add `--no-dns` to skip DNS checks. |
+| `--upgrade-report` | Collect a read-only developer handover with package, repository, configuration and application facts. |
+| `--manifest` / `--manifest-json` | Report applications, service state, websites, mail storage and migration hints as text or JSON (dpkg or RPM). |
 | `--show-changes` | Report differences from the pre-upgrade configuration and system state. |
 | `--show-cruft` | List packages left over from older releases or architectures. |
 | `--remove-cruft` | Remove those leftover packages. |
@@ -169,9 +131,11 @@ separately where required. [CentOS Vault](https://vault.centos.org/) is a frozen
 Capture the manifest before planning an upgrade or reinstall:
 
 ```sh
-sudo bash distrorejuve.sh --manifest --no-dns
-sudo bash distrorejuve.sh --manifest-json --no-dns > manifest.json
+sudo bash distrorejuve.sh --manifest
+sudo bash distrorejuve.sh --manifest-json > manifest.json
 ```
+
+DNS checks report whether website domains resolve to this server.
 
 The manifest supports Debian/Ubuntu package databases and RPM-based systems such as
 CentOS, RHEL, Rocky and AlmaLinux. It preserves distribution package versions,
@@ -213,6 +177,7 @@ sudo env DR_MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --to-latest
 | Variable | Default and effect |
 | --- | --- |
 | `DR_LOG_DIRECTORY` | `/root/distrorejuveinfo/runs`; parent directory for private run logs. |
+| `DR_MANIFEST_DNS` | `true`; set to `false` to skip DNS lookups in manifests and upgrade reports. |
 | `DR_MANIFEST_MAIL_METRICS` | `true`; set to `false` to skip mail size scans and spool counts. |
 | `DR_MIN_FREE_DISK_MIB` | `5120`; minimum available MiB on each checked filesystem. Use a positive integer. |
 | `DR_SKIP_DISK_SPACE_CHECK` | `false`; set to `true` to bypass disk-space checks after review. |
@@ -244,6 +209,11 @@ Standard tool settings such as `UCF_FORCE_CONFFOLD`, `APT_CONFIG` and `NO_COLOR`
 
 Failed upgrades save a minimal support report beside the private detailed log. Review that report before
 [opening an issue](https://github.com/pbkwee/distrorejuve/issues/new). Do not post private logs or configuration.
-See [reporting problems](docs/reporting-problems.md) for the command and included fields.
+See [reporting problems](docs/reporting-problems.md#reporting-upgrade-problems) for the command and included fields.
 
-Written by Peter Bryant at http://launchtimevps.com.
+Developed by the team at [RimuHosting](https://rimuhosting.com/). We've hosted Linux virtual machines
+since 2003 and use this script internally to upgrade older servers.
+
+We can also help you upgrade an old server and migrate it to our modern hardware and VM hosting
+platform. [Contact us](https://rimuhosting.com/contact.jsp) to discuss your server, or read about our
+[distro upgrade service](https://blog.rimuhosting.com/2021/07/12/distro-upgrade-as-a-service/).

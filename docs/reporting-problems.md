@@ -1,4 +1,53 @@
-# Reporting an upgrade problem
+# Troubleshooting
+
+- [Download errors on old servers](#download-errors-on-old-servers)
+- [SSH connection errors](#ssh-connection-errors)
+- [Reporting upgrade problems](#reporting-upgrade-problems)
+
+## Download errors on old servers
+
+Old `wget`/OpenSSL versions, such as those on Ubuntu 6.06, can fail with
+`SSL23_GET_SERVER_HELLO:unknown protocol` or `Unable to establish SSL connection`.
+These clients cannot negotiate modern TLS. `--no-check-certificate` does not fix
+that protocol failure, and GitHub redirects plain HTTP downloads to HTTPS.
+
+Download on a newer computer, then copy the file to the old server over SSH.
+Replace `OLD_SERVER` with the server's address. Run these commands on the newer computer:
+
+```sh
+curl --fail --location --output distrorejuve.sh \
+  https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh &&
+scp -O distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
+```
+
+## SSH connection errors
+
+`scp -O` selects the legacy SCP transfer protocol for old SSH servers. If an older SCP
+client does not recognize `-O`, omit it. If SSH also reports a negotiation failure,
+add the required option to this SCP command:
+
+- If the host-key error offers `ssh-rsa`, add `-oHostKeyAlgorithms=+ssh-rsa`.
+- If the key-exchange error offers `diffie-hellman-group14-sha1`, add `-oKexAlgorithms=+diffie-hellman-group14-sha1`.
+  Use `-oKexAlgorithms=+diffie-hellman-group1-sha1` only if that is the available method.
+- If an existing RSA login key needs SHA-1 signatures, add `-oPubkeyAcceptedAlgorithms=+ssh-rsa`.
+
+To try the legacy RSA methods and both SHA-1 key exchanges in one command:
+
+```sh
+scp -O \
+  -oHostKeyAlgorithms=+ssh-rsa \
+  -oPubkeyAcceptedAlgorithms=+ssh-rsa \
+  -oKexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1 \
+  distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
+```
+
+The `+` adds these methods after the modern defaults. Host-key verification still applies.
+
+Keep these legacy settings on the individual command. See the
+[OpenSSH legacy connection guide](https://www.openssh.org/legacy.html).
+After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /root/distrorejuve.sh --check`.
+
+## Reporting upgrade problems
 
 Unexpected upgrade failures save a small `support-report.txt` beside the private detailed log.
 The console prints the report path and the project's issue link.

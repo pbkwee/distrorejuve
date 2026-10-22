@@ -1,5 +1,39 @@
 #!/bin/bash
 
+# Validate operator settings before logging or system work.
+function environment_validate_settings() {
+  local name value
+  for name in DR_ALLOW_BACKPORTS DR_ALLOW_CROSSGRADE_BLOCKERS DR_ALLOW_UNAUTHENTICATED_ARCHIVES \
+      DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_MAIL_METRICS DR_PREFER_PACKAGED_USRMERGE_FILES \
+      DR_PURGE_INCOMPATIBLE_PACKAGES DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES DR_REMOVE_X11_PACKAGES \
+      DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK DR_SKIP_DISK_SPACE_CHECK DR_SKIP_DOVECOT_MIGRATION_CHECK \
+      DR_SKIP_KERNEL_CHECK DR_SKIP_OLD_PACKAGE_CHECK DR_SKIP_X11_CHECK; do
+    value=${!name}
+    case "$value" in
+      ''|true|false) :;;
+      *) printf 'dss:error: %s must be true or false.\n' "$name" >&2; return 1;;
+    esac
+  done
+  for name in DR_MIN_FREE_DISK_MIB DR_CONFIGURATION_HISTORY_DAYS; do
+    value=${!name}
+    [ -n "$value" ] || continue
+    case "$value" in
+      *[!0-9]*) :;;
+      *) [ "$value" -gt 0 ] 2>/dev/null && continue;;
+    esac
+    printf 'dss:error: %s must be a positive integer.\n' "$name" >&2
+    return 1
+  done
+  case "${DR_RPM_MIGRATION_TARGET:-}" in
+    ''|alma|rocky|centos-vault) :;;
+    *) echo 'dss:error: DR_RPM_MIGRATION_TARGET must be alma, rocky or centos-vault.' >&2; return 1;;
+  esac
+  case "${DR_RPM_MIGRATION_SCRIPT:-}" in
+    ''|/*) :;;
+    *) echo 'dss:error: DR_RPM_MIGRATION_SCRIPT must be an absolute path.' >&2; return 1;;
+  esac
+}
+
 # https://superuser.com/questions/1456989/how-to-configure-apt-in-debian-buster-after-release buster InRelease' changed its 'Version' value from '' to '10.0'  Run 'apt list --upgradable' to see them. apt-get update --allow-releaseinfo-change
 # https://www.debian.org/releases/bookworm/amd64/release-notes/ch-upgrading.html
 
@@ -32,8 +66,8 @@ if [ -z "${UCF_FORCE_CONFFOLD:-}" ]; then
   export UCF_FORCE_CONFFMISS="${UCF_FORCE_CONFFMISS:-1}"
 fi
 APT_GET_INSTALL_OPTIONS=' -y -o DPkg::Lock::Timeout=-1 -o APT::Get::AllowUnauthenticated=false -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confmiss '
-# export this variable, e.g. to DAYS_UPGRADE_ONGOING=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
-DAYS_UPGRADE_ONGOING="${DAYS_UPGRADE_ONGOING:-7}"
+# export this variable, e.g. to DR_CONFIGURATION_HISTORY_DAYS=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
+DR_CONFIGURATION_HISTORY_DAYS="${DR_CONFIGURATION_HISTORY_DAYS:-7}"
 function print_usage() {
   echo "
 # distrorejuve
@@ -48,7 +82,7 @@ Example usage to download the latest version of the script, then dist upgrade to
 
 wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
 
-sudo bash distrorejuve.sh --dist-upgrade
+sudo bash distrorejuve.sh --to-latest
 
 Uses:
 - Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
@@ -61,13 +95,15 @@ Uses:
 
 Arguments:
 
-Run with --usage to get this message
+Run with --help to get this message
 
-Run with --check (or no argument) to report disk space, kernel, distro version and configuration changes. Leave REMOVEX11 unset for a read-only check.
+Run with --check (or no argument) to report disk space, kernel, distro version and configuration changes. Leave DR_REMOVE_X11_PACKAGES unset for a read-only check.
 
-Run with --dist-upgrade run an upgrade, followed by dist-upgrading ubuntu distros to the latest lts or debian distros to latest debian.
+Run with --to-latest to upgrade through releases to Debian stable or the latest Ubuntu LTS.
 
-Run with --upgrade to run a yum upgrade or apt-get upgrade (fixing up repos, etc where we can).  no distro version change.
+Run with --upgrade for native dnf/yum or apt package updates. End-of-life CentOS requires DR_RPM_MIGRATION_TARGET=alma|rocky|centos-vault.
+Alma/Rocky conversion also requires DR_RPM_MIGRATION_SCRIPT pointing to a reviewed, root-owned vendor script. No automatic reboot.
+CentOS Vault restores frozen historical packages only; it does not restore security support.
 
 Run with --dist-update to update packages on the current distro version (no distro version change).
 
@@ -78,13 +114,13 @@ Run with --support-report [RUN_DIRECTORY] to print a minimal report for a public
 Review it before posting. It omits raw logs, configuration and host identifiers; no upload occurs.
 
 Run with --manifest or --manifest-json to collect a read-only application/service/migration inventory (dpkg or RPM).
-Add --no-dns to skip bounded DNS lookups. MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
+Add --no-dns to skip bounded DNS lookups. DR_MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
 Website records include the primary configured URL and local certificate-file presence.
 Missing names, indirect configuration and automatically managed certificates may remain unknown.
 
 Upgrade commands automatically retain private detailed logs in /root/distrorejuveinfo/runs.
 Use --verbose to show command output too, or --trace to write a separate Bash trace.
-DISTROREJUVE_LOG_DIR changes the log parent directory. NO_COLOR disables bold terminal labels.
+DR_LOG_DIRECTORY changes the log parent directory. NO_COLOR disables bold terminal labels.
 
 Run with --show-changes to report the differences pre/post upgrading (packages installed, config files, ports, etc).
 
@@ -94,26 +130,18 @@ Run with --remove-cruft to remove old packages and 32 bit applications on 64 bit
 
 Run with --remove-deprecated-packages to remove old packages
 
-Package authentication is required by default. ALLOW_UNAUTHENTICATED_ARCHIVES=true permits
+Package authentication is required by default. DR_ALLOW_UNAUTHENTICATED_ARCHIVES=true permits
 unauthenticated installs only while every binary source is an official archived repository.
 It does not repair signing keys or change APT's handling of repository indexes.
 
 Add --crossgrade to a release-upgrade command to permit i386 to amd64 conversion at the last
 release supporting native i386 (Debian 12 or Ubuntu 18.04), then continue to the requested target.
-A running x86_64 kernel is required. Ubuntu also requires ENABLE_UBUNTU_CROSSGRADE.
-Set ALLOW_CROSSGRADE_BLOCKERS=true to attempt despite known package blockers; final native amd64 verification remains required.
+A running x86_64 kernel is required. Ubuntu also requires DR_ENABLE_UBUNTU_CROSSGRADE=true.
+Set DR_ALLOW_CROSSGRADE_BLOCKERS=true to attempt despite known package blockers; final native amd64 verification remains required.
 
 Run with --to-64bit to convert a 32 bit distro to 64 bit.  Works OK with Debian.  May work for Ubuntu < 18.04.
 
-Run with --to-wheezy to get from squeeze to wheezy
-
-Run with --to-jessie to get from an older distro to jessie
-
-Run with --to-latest-debian to get from an older debian distro to the latest stable distro
-
-Run with --to-debian-release [6-13] to get from your current version to the specified version
-
-Run with --to-latest-lts to get from an ubuntu distro to the most recent ubuntu lts version
+Run with --to-debian-release VERSION to upgrade Debian to the specified major version
 
 Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu version.  If the current ubuntu is an LTS version then this skips to the next LTS version.
 
@@ -122,17 +150,17 @@ Run with --pause to pause a distro rejuve running process (touch ~/distrorejuve.
 Run with --resume to resume a paused distro rejuve running process (rm -f ~/distrorejuve.pause)
 
 Disk space: upgrades and crossgrades require 5120 MiB free on package/cache/state filesystems.
-Set MIN_FREE_DISK_MIB to a positive integer to adjust the floor, or SKIP_DISK_SPACE_CHECK=true to bypass.
+Set DR_MIN_FREE_DISK_MIB to a positive integer to adjust the floor, or DR_SKIP_DISK_SPACE_CHECK=true to bypass.
 --check reports a failed precondition with a nonzero exit status. Help and cleanup commands do not require this floor.
-Legacy skip controls (any nonempty value enables them): IGNOREKERNEL, IGNOREX11, IGNOREBACKPORTS,
-IGNOREOTHERREPOS (current-release only), IGNORECRUFT, IGNORE_DOVECOT_ERROR (2.4 migration only).
-REMOVEX11 enables X11 removal; ENABLE_UBUNTU_CROSSGRADE permits experimental Ubuntu crossgrading.
-DAYS_UPGRADE_ONGOING sets the configuration-history lookback (default 7 days).
-PURGE_INCOMPATIBLE_PACKAGES=false blocks known config-breaking packages before release upgrades.
+Skip controls accept true/false: DR_SKIP_KERNEL_CHECK, DR_SKIP_X11_CHECK, DR_ALLOW_BACKPORTS,
+DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK (current-release only), DR_SKIP_OLD_PACKAGE_CHECK, DR_SKIP_DOVECOT_MIGRATION_CHECK (2.4 migration only).
+DR_REMOVE_X11_PACKAGES enables X11 removal; DR_ENABLE_UBUNTU_CROSSGRADE permits experimental Ubuntu crossgrading.
+DR_CONFIGURATION_HISTORY_DAYS sets the configuration-history lookback (default 7 days).
+DR_PURGE_INCOMPATIBLE_PACKAGES=false blocks known config-breaking packages before release upgrades.
 Set it to literal true to back them up and purge them; reinstall and configure them manually afterward.
-PREFER_PACKAGED_USRMERGE_FILES=false stops on known executable collisions before a required /usr merge.
+DR_PREFER_PACKAGED_USRMERGE_FILES=false stops on known executable collisions before a required /usr merge.
 Set it to literal true to privately archive only an unowned conflicting file and retain its packaged counterpart.
-REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=true removes verified obsolete crossgrade packages after backup.
+DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=true removes verified obsolete crossgrade packages after backup.
 Set it to literal false to require their manual removal before starting.
 
 Use with --source if you just wish to have the distrorejuve functions available to you for testing
@@ -518,15 +546,11 @@ function apt_config_has_standard_paths() {
 
 # Expired archive signing keys need explicit consent; never extend it to live/vendor sources.
 function apt_configure_archive_authentication() {
-  local requested=${ALLOW_UNAUTHENTICATED_ARCHIVES-false} previous=${apt_archive_authentication_enabled:-false}
+  local requested=${DR_ALLOW_UNAUTHENTICATED_ARCHIVES:-false} previous=${apt_archive_authentication_enabled:-false}
   local records config provider type uri suite base _ found=false eligible=true
   apt_archive_authentication_enabled=false
   APT_GET_INSTALL_OPTIONS=${APT_GET_INSTALL_OPTIONS// -o APT::Get::AllowUnauthenticated=true/}
-  case "$requested" in
-    false) return 0;;
-    true) :;;
-    *) echo 'dss:error: ALLOW_UNAUTHENTICATED_ARCHIVES must be true or false.' >&2; return 1;;
-  esac
+  "$requested" || return 0
   if [ -n "$APT_CONFIG$DPKG_ADMINDIR$DPKG_ROOT" ]; then
     echo 'dss:error: Archive authentication exception cannot inspect custom APT/dpkg configuration.' >&2; return 1
   fi
@@ -806,8 +830,8 @@ function apt_sources_check_releases_and_vendors() {
         echo "dss:warn: $file:$line belongs to $provider, but the installed distro is $family." >&2; ret=1
       fi
       case "$suite" in *-backports*)
-        if [ -z "$IGNOREBACKPORTS" ]; then
-          echo "dss:warn: $file:$line enables backports ($suite); disable before upgrading or export IGNOREBACKPORTS=Y." >&2; ret=1
+        if ! "${DR_ALLOW_BACKPORTS:-false}"; then
+          echo "dss:warn: $file:$line enables backports ($suite); disable before upgrading or export DR_ALLOW_BACKPORTS=true." >&2; ret=1
         fi;;
       esac
       continue
@@ -821,7 +845,7 @@ function apt_sources_check_releases_and_vendors() {
       fi
       continue
     fi
-    [ -z "$target" ] && [ -n "$IGNOREOTHERREPOS" ] && continue
+    [ -z "$target" ] && "${DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK:-false}" && continue
     support=unknown
     status=2
     case "$provider" in
@@ -903,25 +927,14 @@ function apt_sources_upgrade() {
 
 # Require free space on each package/cache/state filesystem before changing packages.
 function check_disk_space() {
-  local skip=${SKIP_DISK_SPACE_CHECK:-false} minimum=${MIN_FREE_DISK_MIB:-5120}
+  local skip=${DR_SKIP_DISK_SPACE_CHECK:-false} minimum=${DR_MIN_FREE_DISK_MIB:-5120}
   local path output available
-  case "$skip" in
-    true|false) :;;
-    *) echo "dss:error: SKIP_DISK_SPACE_CHECK must be true or false." >&2; return 1;;
-  esac
   $skip && return 0
-  case "$minimum" in
-    *[!0-9]*|'') echo "dss:error: MIN_FREE_DISK_MIB must be a positive integer (default 5120)." >&2; return 1;;
-  esac
-  if ! [ "$minimum" -gt 0 ] 2>/dev/null; then
-    echo "dss:error: MIN_FREE_DISK_MIB must be a positive integer (default 5120)." >&2
-    return 1
-  fi
   # Probe package/cache/state paths individually to catch separate mounts and symlinks.
-  for path in . / /usr /var /var/cache /var/cache/apt /var/cache/apt/archives /var/cache/yum /var/lib/apt /var/lib/apt/lists /var/lib/dpkg /var/lib/rpm /root /root/distrorejuveinfo; do
+  for path in . / /usr /var /var/cache /var/cache/apt /var/cache/apt/archives /var/cache/yum /var/cache/dnf /var/lib/dnf /usr/lib/sysimage/rpm /var/lib/apt /var/lib/apt/lists /var/lib/dpkg /var/lib/rpm /root /root/distrorejuveinfo; do
     [ -d "$path" ] || continue
     if ! output=$(LC_ALL=C df -Pm -- "$path"); then
-      echo "dss:error: Cannot check disk space for $path. Resolve df failure or export SKIP_DISK_SPACE_CHECK=true after review." >&2
+      echo "dss:error: Cannot check disk space for $path. Resolve df failure or export DR_SKIP_DISK_SPACE_CHECK=true after review." >&2
       return 1
     fi
     # df -Pm: Filesystem 1048576-blocks Used Available Capacity Mounted-on; field 4 is MiB free.
@@ -931,7 +944,7 @@ function check_disk_space() {
         $4 ~ /^-?[0-9]+$/ && $5 ~ /^[0-9]+%$/ { print $4 }
     ')
     if [ "$available" -lt "$minimum" ] 2>/dev/null; then
-      echo "dss:error: Insufficient disk space for $path: $available MiB available; require $minimum MiB. Free space or review MIN_FREE_DISK_MIB; export SKIP_DISK_SPACE_CHECK=true to bypass." >&2
+      echo "dss:error: Insufficient disk space for $path: $available MiB available; require $minimum MiB. Free space or review DR_MIN_FREE_DISK_MIB; export DR_SKIP_DISK_SPACE_CHECK=true to bypass." >&2
       return 1
     fi
     if ! [ "$available" -ge "$minimum" ] 2>/dev/null; then
@@ -947,8 +960,8 @@ function upgrade_precondition_checks() {
   local ret=0
   # e.g. 3.12.1
   if uname -r | grep -qai '^[12]'; then
-    echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp.  To skip this check run: export IGNOREKERNEL=Y"
-    [ -z "$IGNOREKERNEL" ] && ret=$(($ret+1))
+    echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp.  To skip this check run: export DR_SKIP_KERNEL_CHECK=true"
+    "${DR_SKIP_KERNEL_CHECK:-false}" || ret=$(($ret+1))
   fi
   # cat /proc/sys/kernel/osrelease => 4.14.264-rh305-20220204224046.xenU.x86_64
   # ERROR: Your kernel version indicates a revision number
@@ -958,7 +971,7 @@ function upgrade_precondition_checks() {
   [ ! -z "$ver" ] && [ $ver -gt 255 ] && echo "dss:warn: if you get an error on libc install like ERROR: Your kernel version indicates a revision number of 255 or greater, then you may need to restart the server with a 5.10 kernel, or a kernel with a version smaller than 255.  You are currently on $(uname -r)" >&2
   # ii  dmidecode                       2.9-1.2build1                           Dump Desktop Management Interface data
   local libx11=
-  command -v dpkg >/dev/null 2>&1 && if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
+  [ -f /etc/debian_version ] && command -v dpkg >/dev/null 2>&1 && if dpkg -l | grep '^ii' | awk '{print $2}' | egrep -qai 'gnome|desktop|x11-common'; then
     # ignoring some packages since they are 'fine'.  and typically some of them (eg libx11) are required by things like imagemagick and php-gd
     # install ok installed utils zip
     # install ok installed vcs cvs
@@ -967,12 +980,12 @@ function upgrade_precondition_checks() {
   fi
   if [  ! -z "$libx11" ]; then
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
-    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export IGNOREX11=Y.  To automatically remove X11 libs use export REMOVEX11=Y"
-    if [ ! -z "$REMOVEX11" ]; then
+    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export DR_SKIP_X11_CHECK=true.  To automatically remove X11 libs use export DR_REMOVE_X11_PACKAGES=true"
+    if "${DR_REMOVE_X11_PACKAGES:-false}"; then
       apt_get_apply -y remove $libx11 || ret=$(($ret+1))
       apt_get_apply -y autoremove
     else
-      [ -z "$IGNOREX11" ] && ret=$(($ret+1))
+      "${DR_SKIP_X11_CHECK:-false}" || ret=$(($ret+1))
     fi
   fi
 
@@ -998,7 +1011,7 @@ function apt_ensure_archive_keyring() {
   echo "dss:stage: Installing/configuring the distribution archive keyring: $package" >&2
   # apt_get_install reads this dynamically scoped string; do not weaken existing trust to bootstrap it.
   # shellcheck disable=SC2034
-  local ALLOW_UNAUTHENTICATED_ARCHIVES=false
+  local DR_ALLOW_UNAUTHENTICATED_ARCHIVES=false
   # shellcheck disable=SC2034
   local APT_GET_INSTALL_OPTIONS="$APT_GET_INSTALL_OPTIONS -o APT::Get::AllowUnauthenticated=false -o APT::Get::AutomaticRemove=false --no-remove"
   if apt_get_install "$package"; then :
@@ -1261,7 +1274,7 @@ function upgrade_output_compatibility_issues() {
   while IFS=$'\t' read -r wanted_family boundary action rule pattern remedy; do
     [ "$family" = "$wanted_family" ] || continue
     if ! is_distro_name_older "$current" "$boundary" || is_distro_name_older "$target" "$boundary"; then continue; fi
-    [ "$rule" = dovecot-24 ] && [ -n "$IGNORE_DOVECOT_ERROR" ] && continue
+    [ "$rule" = dovecot-24 ] && "${DR_SKIP_DOVECOT_MIGRATION_CHECK:-false}" && continue
     if [ "$pattern" = ".*" ]; then selected=system
     else selected=$(printf '%s\n' "$packages" | awk -F '\t' -v pattern="$pattern" '
       $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && $2 ~ pattern { print $2 }
@@ -1394,7 +1407,7 @@ function apt_get_apply() {
   local directory additions status package_umask attempt
   local -a pipeline_status=()
   # Recheck sources even if the caller expanded options before they changed.
-  if [ "${ALLOW_UNAUTHENTICATED_ARCHIVES-false}" != false ]; then
+  if "${DR_ALLOW_UNAUTHENTICATED_ARCHIVES:-false}"; then
     apt_configure_archive_authentication || return 1
     set -- "$@" -o APT::Get::AllowUnauthenticated="$apt_archive_authentication_enabled"
   fi
@@ -2409,7 +2422,7 @@ function upgrade_php_runtime_collect_findings() {
 function upgrade_php_runtime_check() {
 (
   set -o pipefail
-  local directory=${DISTROREJUVE_RUN_DIRECTORY:-$1} snapshot temporary findings_file findings_release family=debian status=0
+  local directory=${DR_RUN_DIRECTORY:-$1} snapshot temporary findings_file findings_release family=debian status=0
   snapshot="$directory/php-runtime.findings.tsv"
   [ -d "$directory" ] && [ ! -L "$directory" ] && [ "$(stat -c '%u:%a' -- "$directory")" = 0:700 ] || return 1
   [ ! -L "$snapshot" ] && { [ ! -e "$snapshot" ] || { [ -f "$snapshot" ] && [ "$(stat -c '%u:%h' -- "$snapshot")" = 0:1 ]; }; } || return 1
@@ -2671,7 +2684,7 @@ function upgrade_services_verify() {
 function upgrade_outcome_record() {
 (
   umask 077
-  local category=$1 state=$2 detail=${3:-} directory=${DISTROREJUVE_RUN_DIRECTORY:-}
+  local category=$1 state=$2 detail=${3:-} directory=${DR_RUN_DIRECTORY:-}
   case "$category" in release|packages|cleanup) :;; *) return 1;; esac
   case "$state" in verified|done|deferred|failed|unknown) :;; *) return 1;; esac
   [ -n "$directory" ] || return 0
@@ -2700,10 +2713,11 @@ function upgrade_outcome_output_php_removals() {
 # Called inside the logging action child, including from its EXIT trap.
 # Original action failures take precedence; unknown service status remains a visible warning.
 function upgrade_finish_run() {
+  if [ -f /etc/redhat-release ]; then rpm_packages_finish_run "$@"; return $?; fi
   local action_status=$1 logfile=$2 baseline='' services=2 web_failed=false status category state detail reason audit='' plan=''
   local findings='' web_complete=false
   local release='not verified' packages='not verified' cleanup='' php_removals='' service_summary='unknown' package_verified=false
-  local directory=${DISTROREJUVE_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0 autoremove_skipped=''
+  local directory=${DR_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0 autoremove_skipped=''
   local none=false obsolete_none=false cleanup_done=false missing_provenance=false cleanup_failed=false cleanup_deferred=false
   case "$action_status" in ''|*[!0-9]*) return 1;; esac
   [ "$action_status" -le 255 ] || return 1
@@ -3144,8 +3158,8 @@ function upgrade_output_crossgrade_release() {
     fi
     return 1
   fi
-  if [ "$family" = ubuntu ] && [ -z "${ENABLE_UBUNTU_CROSSGRADE:-}" ]; then
-    echo 'dss:error: Ubuntu crossgrading remains experimental. Set ENABLE_UBUNTU_CROSSGRADE only after reviewing that risk, as well as --crossgrade.' >&2
+  if [ "$family" = ubuntu ] && ! "${DR_ENABLE_UBUNTU_CROSSGRADE:-false}"; then
+    echo 'dss:error: Ubuntu crossgrading remains experimental. Set DR_ENABLE_UBUNTU_CROSSGRADE=true only after reviewing that risk, as well as --crossgrade.' >&2
     return 1
   fi
   kernel=$(uname -m) || return 1
@@ -3172,17 +3186,20 @@ function upgrade_check_crossgrade_checkpoint() {
   local family=$1 release=$2 current audit plan apt_sources_transition_target=''
   if [ "$family" = debian ]; then debian_check_release_completion "$release"; return $?; fi
   current=$(distro_output_codename) || return 1
-  [ "$current" = "$release" ] || return 1
+  if [ "$current" != "$release" ]; then
+    echo "dss:error: Expected $family $release after package changes; detected $current." >&2
+    return 1
+  fi
   apt_sources_check_releases_and_vendors || return 1
   audit=$(LC_ALL=C dpkg --audit) || return 1
   if [ -n "$audit" ]; then
     printf '%s\n' "$audit" >&2
-    echo 'dss:error: Incomplete package state prevents crossgrading.' >&2
+    echo "dss:error: Release verification for $family $release failed: packages still need configuration." >&2
     return 1
   fi
   plan=$(LC_ALL=C apt-get -s dist-upgrade) || return 1
   if printf '%s\n' "$plan" | grep -Eq '^(Inst|Conf|Remv|Purg) '; then
-    echo 'dss:error: Pending package changes prevent crossgrading. Finish updating this release first.' >&2
+    echo "dss:error: Release verification for $family $release failed: package changes are still pending." >&2
     return 1
   fi
   upgrade_outcome_record release verified "$release" || return 1
@@ -3226,11 +3243,7 @@ function upgrade_crossgrade_before_release() {
 # Validate the complete requested path before any package/source mutation.
 # Predict only current package-policy blockers; future archive feasibility is checked later.
 function upgrade_check_crossgrade_package_blockers() {
-  local allow=${ALLOW_CROSSGRADE_BLOCKERS-false} packages issues issue level=error
-  case "$allow" in
-    true|false) :;;
-    *) echo 'dss:error: ALLOW_CROSSGRADE_BLOCKERS must be true or false.' >&2; return 1;;
-  esac
+  local allow=${DR_ALLOW_CROSSGRADE_BLOCKERS:-false} packages issues issue level=error
   packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n') || {
     echo 'dss:error: Cannot inspect package holds and architectures before crossgrading.' >&2; return 1;
   }
@@ -3245,10 +3258,10 @@ function upgrade_check_crossgrade_package_blockers() {
   if $allow; then level=warn; fi
   while IFS= read -r issue; do printf 'dss:%s: %s\n' "$level" "$issue" >&2; done <<< "$issues"
   if $allow; then
-    echo 'dss:warn: ALLOW_CROSSGRADE_BLOCKERS=true permits this attempted conversion; final native amd64 package verification remains mandatory.' >&2
+    echo 'dss:warn: DR_ALLOW_CROSSGRADE_BLOCKERS=true permits this attempted conversion; final native amd64 package verification remains mandatory.' >&2
     return 0
   fi
-  echo 'dss:error: Resolve these package blockers before release changes, or set ALLOW_CROSSGRADE_BLOCKERS=true to attempt the crossgrade.' >&2
+  echo 'dss:error: Resolve these package blockers before release changes, or set DR_ALLOW_CROSSGRADE_BLOCKERS=true to attempt the crossgrade.' >&2
   return 1
 }
 
@@ -3264,12 +3277,10 @@ function upgrade_check_path() {
     echo "dss:stage: Checking complete requested upgrade path $2 -> $3" >&2
   fi
   local family=$1 current=$2 target=$3 issues action rule boundary packages remedy arch crossgrade_release blocked=false
-  local purge=${PURGE_INCOMPATIBLE_PACKAGES-false} retry_purge=false retry_crossgrade=false
+  local purge=${DR_PURGE_INCOMPATIBLE_PACKAGES:-false} retry_purge=false retry_crossgrade=false
   # The collision checker records whether the packaged-file preference would help.
   local usrmerge_preference_needed=false
-  local remove_obsolete=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} obsolete
-  case "$remove_obsolete" in true|false) :;; *) echo 'dss:error: REMOVE_OBSOLETE_CROSSGRADE_PACKAGES must be true or false.' >&2; return 1;; esac
-  case "$purge" in true|false) :;; *) echo 'dss:error: PURGE_INCOMPATIBLE_PACKAGES must be true or false.' >&2; return 1;; esac
+  local remove_obsolete=${DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES:-true} obsolete
   local releases
   case "$family" in debian) releases=$ALL_DEBIAN;; ubuntu) releases=$ALL_UBUNTU;; *) return 1;; esac
   case " $releases " in *" $current "*) :;; *) echo "dss:error: Unknown $family starting release: $current" >&2; return 1;; esac
@@ -3282,7 +3293,7 @@ function upgrade_check_path() {
   if [ "$family:$crossgrade_release" = debian:bookworm ]; then
     obsolete=$(upgrade_output_crossgrade_obsolete_packages) || return 1
     if [ -n "$obsolete" ] && ! $remove_obsolete; then
-      echo "dss:error: Known obsolete foreign packages will block the Bookworm crossgrade: ${obsolete//$'\n'/ }. Review removals and set REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=true to permit verified obsolete compiler/library/alias removal after backup." >&2
+      echo "dss:error: Known obsolete foreign packages will block the Bookworm crossgrade: ${obsolete//$'\n'/ }. Review removals and set DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=true to permit verified obsolete compiler/library/alias removal after backup." >&2
       blocked=true
     fi
   fi
@@ -3324,7 +3335,7 @@ function upgrade_check_path() {
   if $blocked; then
     echo "dss:error: Requested upgrade path $current -> $target blocked before changes. Resolve the specific checks above." >&2
     if $retry_purge; then
-      echo 'dss:error: PURGE_INCOMPATIBLE_PACKAGES=true backs up and purges the configuration-incompatible packages listed above; it does not bypass manual migration or architecture checks.' >&2
+      echo 'dss:error: DR_PURGE_INCOMPATIBLE_PACKAGES=true backs up and purges the configuration-incompatible packages listed above; it does not bypass manual migration or architecture checks.' >&2
     fi
     if [ "${4:-requested}" = requested ]; then
       upgrade_preflight_blocked=true
@@ -3332,9 +3343,9 @@ function upgrade_check_path() {
         printf '%s\n' 'dss:stage: Review the choices above before retrying; resolve any remaining manual checks.' >&2
         {
           printf 'dss:stage: Suggested retry: '
-          if $purge || $retry_purge; then printf 'PURGE_INCOMPATIBLE_PACKAGES=true '; fi
-          if [ "${PREFER_PACKAGED_USRMERGE_FILES-false}" = true ] || $usrmerge_preference_needed; then printf 'PREFER_PACKAGED_USRMERGE_FILES=true '; fi
-          if [ -n "${ACTION:-}" ]; then printf 'ACTION=%q ' "$ACTION"; fi
+          if $purge || $retry_purge; then printf 'DR_PURGE_INCOMPATIBLE_PACKAGES=true '; fi
+          if "${DR_PREFER_PACKAGED_USRMERGE_FILES:-false}" || $usrmerge_preference_needed; then printf 'DR_PREFER_PACKAGED_USRMERGE_FILES=true '; fi
+          if [ -n "${DR_ACTION:-}" ]; then printf 'DR_ACTION=%q ' "$DR_ACTION"; fi
           printf '%q' "${upgrade_retry_command[0]}"
           printf ' %q' "${upgrade_retry_command[@]:1}"
           if $retry_crossgrade; then printf ' %s' --crossgrade; fi
@@ -3359,23 +3370,27 @@ function upgrade_check_path() {
 
 function upgrade_preflight_action() {
   local action=$1 version=${2:-} family current target next remaining=1000
+  if [ -f /etc/redhat-release ]; then
+    echo 'dss:error: RPM major-release upgrades use a reviewed ELevate/reinstall procedure. For eligible same-major CentOS conversion, set DR_RPM_MIGRATION_TARGET and use --upgrade.' >&2
+    upgrade_preflight_blocked=true
+    return 1
+  fi
   current=$(distro_output_codename) || return 1
   case " $ALL_DEBIAN " in *" $current "*) family=debian;; *)
     case " $ALL_UBUNTU " in *" $current "*) family=ubuntu;; *) return 0;; esac;;
   esac
   case "$action:$family" in
-    --to-squeeze:ubuntu|--to-wheezy:ubuntu|--to-jessie:ubuntu|--to-debian-release:ubuntu|--to-latest-debian:ubuntu|--to-latest-lts:debian|--to-next-ubuntu:debian)
+    --to-debian-release:ubuntu|--to-next-ubuntu:debian)
       echo "dss:error: $action does not apply to $family." >&2; return 1;;
   esac
   case "$action" in
-    --to-squeeze) target=squeeze;;
-    --to-wheezy) target=wheezy;;
-    --to-jessie) target=jessie;;
     --to-debian-release)
       case "$version" in 6) target=squeeze;; 7) target=wheezy;; 8) target=jessie;; 9) target=stretch;; 10) target=buster;; 11) target=bullseye;; 12) target=bookworm;; 13) target=trixie;; *) return 1;; esac;;
-    --to-latest-debian) target=trixie;;
     --to-next-ubuntu) remaining=1;;
-    --to-latest-lts|--dist-upgrade) :;;
+    --to-latest)
+      if [ "$family" = ubuntu ]; then
+        target=$(ubuntu_output_latest_lts "$current") || { upgrade_preflight_blocked=true; return 1; }
+      fi;;
     *) return 0;;
   esac
   if [ -z "$target" ]; then
@@ -3436,13 +3451,9 @@ function upgrade_backup_incompatible_packages() {
 }
 
 function upgrade_check_incompatible_packages() {
-  local family=$1 current=$2 target=$3 purge=${PURGE_INCOMPATIBLE_PACKAGES-false}
+  local family=$1 current=$2 target=$3 purge=${DR_PURGE_INCOMPATIBLE_PACKAGES:-false}
   local listed baseline backup plan status package
   local -a packages=()
-  case "$purge" in
-    true|false) :;;
-    *) echo "dss:error: PURGE_INCOMPATIBLE_PACKAGES must be true or false." >&2; return 1;;
-  esac
   listed=$(upgrade_output_incompatible_packages "$family" "$current" "$target") || return 1
   [ -n "$listed" ] || return 0
   while IFS= read -r package; do packages+=("$package"); done <<< "$listed"
@@ -3450,12 +3461,12 @@ function upgrade_check_incompatible_packages() {
     case " $listed " in *fail2ban*) print_uninstall_fail2ban;; esac
     if printf '%s\n' "$listed" | grep -q '^dovecot'; then
       if [ "$target" = trixie ] || { [ "$family" = ubuntu ] && ! is_distro_name_older "$target" questing; }; then
-        echo "dss:error: Dovecot 2.4 requires config migration. Export IGNORE_DOVECOT_ERROR=Y only after manual migration review." >&2
+        echo "dss:error: Dovecot 2.4 requires config migration. Export DR_SKIP_DOVECOT_MIGRATION_CHECK=true only after manual migration review." >&2
       else
         print_uninstall_dovecot
       fi
     fi
-    echo "dss:error: Upgrade $current to $target blocked by: ${packages[*]}. Set PURGE_INCOMPATIBLE_PACKAGES=true to back up and purge them; services remain removed until manual reinstall." >&2
+    echo "dss:error: Upgrade $current to $target blocked by: ${packages[*]}. Set DR_PURGE_INCOMPATIBLE_PACKAGES=true to back up and purge them; services remain removed until manual reinstall." >&2
     return 1
   fi
   # Honour pause before any service removal, including whole-path preflight.
@@ -3551,6 +3562,10 @@ function print_uninstall_dovecot() {
 }
 
 function print_failed_dist_upgrade_tips() {
+  if [ -f /etc/redhat-release ]; then
+    echo 'dss:warn: Review the DNF/YUM error and RPM evidence in the detailed log. Do not mix EL major versions or bypass signing checks.' >&2
+    return 0
+  fi
   #echo "dss:warn: In the event of a dist-upgrade failure, try things like commenting out the new distro, uncomment the previous distro, try an apt-get -f install, then change the distros back."
   #echo "dss:warn: In the event of dovecot errors, apt-get remove dovecot* unless you need dovecot (e.g. you need imap/pop3)"
   #echo "dss:warn: May be worth trying: aptitude -vv full-upgrade"
@@ -3564,10 +3579,10 @@ function dist_upgrade_etch_to_lenny() {
 }
 
 function dist_upgrade_lenny_to_squeeze() {
-export old_distro=lenny
-export old_ver="inux 5"
-export new_distro=squeeze
-export new_ver="inux 6"
+local old_distro=lenny
+local old_ver="inux 5"
+local new_distro=squeeze
+local new_ver="inux 6"
 
 dist_upgrade_x_to_y
 ret=$?
@@ -3575,10 +3590,10 @@ return $ret
 }
 
 function dist_upgrade_squeeze_to_wheezy() {
-export old_distro=squeeze
-export old_ver="inux 6"
-export new_distro=wheezy
-export new_ver="inux 7"
+local old_distro=squeeze
+local old_ver="inux 6"
+local new_distro=wheezy
+local new_ver="inux 7"
 
 dist_upgrade_x_to_y
 ret=$?
@@ -3586,60 +3601,60 @@ return $ret
 }
 
 function dist_upgrade_wheezy_to_jessie() {
-export old_distro=wheezy
-export old_ver="inux 7"
-export new_distro=jessie
-export new_ver="inux 8"
+local old_distro=wheezy
+local old_ver="inux 7"
+local new_distro=jessie
+local new_ver="inux 8"
 dist_upgrade_x_to_y
 ret=$?
 return $ret
 }
 
 function dist_upgrade_jessie_to_stretch() {
-export old_distro=jessie
-export old_ver="inux 8"
-export new_distro=stretch
-export new_ver="inux 9"
+local old_distro=jessie
+local old_ver="inux 8"
+local new_distro=stretch
+local new_ver="inux 9"
 dist_upgrade_x_to_y
 ret=$?
 return $ret
 }
 
 function dist_upgrade_stretch_to_buster() {
-export old_distro=stretch
-export old_ver="inux 9"
-export new_distro=buster
-export new_ver="inux 10"
+local old_distro=stretch
+local old_ver="inux 9"
+local new_distro=buster
+local new_ver="inux 10"
 dist_upgrade_x_to_y
 ret=$?
 return $ret
 }
 
 function dist_upgrade_buster_to_bullseye() {
-export old_distro=buster
-export old_ver="inux 10"
-export new_distro=bullseye
-export new_ver="inux 11"
+local old_distro=buster
+local old_ver="inux 10"
+local new_distro=bullseye
+local new_ver="inux 11"
 dist_upgrade_x_to_y
 ret=$?
 return $ret
 }
 
 function dist_upgrade_bullseye_to_bookworm() {
-export old_distro=bullseye
-export old_ver="inux 11"
-export new_distro=bookworm
-export new_ver="inux 12"
+local old_distro=bullseye
+local old_ver="inux 11"
+local new_distro=bookworm
+local new_ver="inux 12"
 dist_upgrade_x_to_y
 ret=$?
 return $ret
 }
 
 function dist_upgrade_bookworm_to_trixie() {
-export old_distro=bookworm
-export old_ver="inux 12"
-export new_distro=trixie
-export new_ver="inux 13"
+local old_distro=bookworm
+local old_ver="inux 12"
+local new_distro=trixie
+local new_ver="inux 13"
 dist_upgrade_x_to_y
 ret=$?
 return $ret
@@ -3793,8 +3808,7 @@ function usrmerge_output_collisions() {
 }
 
 function usrmerge_check_collisions() {
-  local prefer=${PREFER_PACKAGED_USRMERGE_FILES-false} collisions action source target owner blocked=false
-  case "$prefer" in true|false) :;; *) echo 'dss:error: PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
+  local prefer=${DR_PREFER_PACKAGED_USRMERGE_FILES:-false} collisions action source target owner blocked=false
   collisions=$(usrmerge_output_collisions) || return 1
   while IFS=$'\t' read -r action source target owner; do
     [ -n "$action" ] || continue
@@ -3803,7 +3817,7 @@ function usrmerge_check_collisions() {
     else
       echo "dss:error: usrmerge collision: $source and $target ($owner)." >&2
       if [ "$action" = archive ]; then
-        echo 'dss:error: Review the unowned executable; PREFER_PACKAGED_USRMERGE_FILES=true explicitly archives it and keeps the packaged counterpart.' >&2
+        echo 'dss:error: Review the unowned executable; DR_PREFER_PACKAGED_USRMERGE_FILES=true explicitly archives it and keeps the packaged counterpart.' >&2
         usrmerge_preference_needed=true
       fi
       blocked=true
@@ -3814,7 +3828,6 @@ function usrmerge_check_collisions() {
 
 function usrmerge_check_upgrade_path() {
   local family=$1 current=$2 target=$3 boundary
-  case "${PREFER_PACKAGED_USRMERGE_FILES-false}" in true|false) :;; *) echo 'dss:error: PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
   case "$family" in debian) boundary=bookworm;; ubuntu) boundary=hirsute;; *) return 1;; esac
   is_distro_name_older "$current" "$target" || return 0
   is_distro_name_older "$target" "$boundary" && return 0
@@ -3862,7 +3875,6 @@ function usrmerge_archive_collisions() {
 
 function check_usrmerge() {
   local info status collisions files
-  case "${PREFER_PACKAGED_USRMERGE_FILES-false}" in true|false) :;; *) echo 'dss:error: PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
   if info=$(dpkg-query -W -f='${Status}' usrmerge 2>/dev/null); then :
   else status=$?; [ "$status" -eq 1 ] || return "$status"; info=; fi
   if usrmerge_is_complete; then
@@ -3898,7 +3910,6 @@ function check_usrmerge() {
 
 function usrmerge_recover_pending() {
   local info status
-  case "${PREFER_PACKAGED_USRMERGE_FILES-false}" in true|false) :;; *) echo 'dss:error: PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
   [ -f "/etc/debian_version" ] || return 0
   if info=$(dpkg-query -W -f='${Status}' usrmerge 2>/dev/null); then :
   else status=$?; [ "$status" -eq 1 ] && return 0; return "$status"; fi
@@ -4859,16 +4870,15 @@ function upgrade_output_crossgrade_obsolete_packages() {
 # Default removal still requires verified compiler roles, library/doc payloads and a backup.
 function crossgrade_bookworm_prepare_obsolete() {
   local compiler_pattern='^(gcc|cpp)-[0-9]+([.][0-9]+)?$|^libgcc-[0-9]+([.][0-9]+)?-dev$'
-  local directory=$1 blockers=$2 remove=${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true} package dependency reason packages compiler_role level=trace
+  local directory=$1 blockers=$2 remove=${DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES:-true} package dependency reason packages compiler_role level=trace
   local -a obsolete_packages=()
-  case "$remove" in true|false) :;; *) echo 'dss:error: REMOVE_OBSOLETE_CROSSGRADE_PACKAGES must be true or false.' >&2; return 1;; esac
   [ -n "$blockers" ] || return 0
   if ! $remove; then level=warn; fi
   while IFS=$'\t' read -r package dependency reason; do
     printf 'dss:%s: %s:i386 requires verified removal: %s; %s.\n' "$level" "$package" "$dependency" "$reason" >&2
   done <<< "$blockers"
   if ! $remove; then
-    echo 'dss:error: Automatic obsolete-package removal is disabled. Remove or migrate these packages manually before crossgrading, or unset REMOVE_OBSOLETE_CROSSGRADE_PACKAGES to permit verified backed-up removal.' >&2
+    echo 'dss:error: Automatic obsolete-package removal is disabled. Remove or migrate these packages manually before crossgrading, or unset DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES to permit verified backed-up removal.' >&2
     return 1
   fi
   packages=$(printf '%s\n' "$blockers" | cut -f1 | LC_ALL=C sort -u) || return 1
@@ -5093,7 +5103,7 @@ function crossgrade_debian_bookworm() {
     !($1 in seen) { print $1 "\tunavailable native package\tamd64/all completion required" }
   ' - "$directory/retained-i386") || return 1
   crossgrade_bookworm_prepare_obsolete "$directory" "$retained_blockers" || return 1
-  if [ "${REMOVE_OBSOLETE_CROSSGRADE_PACKAGES-true}" = true ] && [ -f "$directory/obsolete.approved" ]; then
+  if "${DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES:-true}" && [ -f "$directory/obsolete.approved" ]; then
     crossgrade_obsolete_approved="$directory/obsolete.approved"
   fi
   dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n' > "$directory/installed" || return 1
@@ -5222,9 +5232,9 @@ function crossgrade_debian() {
   # see https://wiki.debian.org/CrossGrading
   ! uname -a | grep -qai x86_64 && echo "dss:error: Not running a 64 bit kernel. Cannot crossgrade." 2>&1 && return 1
 
-  lsb_release -a 2>/dev/null | egrep -qai 'stretch|lenny|squeeze|wheezy|jessie' && echo "dss:error: Older (pre stretch) Debian distros have dependency issues preventing crossgrades.  $0 --dist-upgrade prior to cross grading." 2>&1 && return 1
+  lsb_release -a 2>/dev/null | egrep -qai 'stretch|lenny|squeeze|wheezy|jessie' && echo "dss:error: Older (pre stretch) Debian distros have dependency issues preventing crossgrades.  $0 --to-latest prior to cross grading." 2>&1 && return 1
 
-  [ -z "$ENABLE_UBUNTU_CROSSGRADE" ] && lsb_release -a 2>/dev/null | egrep -qai 'ubuntu' && echo "dss:error: Ubuntu cross grades have not been successful.  To ignore this warning and attempt one at your own peril: export ENABLE_UBUNTU_CROSSGRADE=Y" 2>&1 && return 1
+  ! "${DR_ENABLE_UBUNTU_CROSSGRADE:-false}" && lsb_release -a 2>/dev/null | egrep -qai 'ubuntu' && echo "dss:error: Ubuntu cross grades have not been successful.  To ignore this warning and attempt one at your own peril: export DR_ENABLE_UBUNTU_CROSSGRADE=true" 2>&1 && return 1
 
   crossgrade_check_apt_architecture_config || return 1
   upgrade_check_crossgrade_package_blockers || return 1
@@ -5277,7 +5287,7 @@ function crossgrade_debian() {
   fi
 
   [  ! -x /usr/bin/apt-show-versions ] && echo "dss:info:installing apt-show-versions" && apt_get_install apt-show-versions
-  [  -z "$IGNORECRUFT" ] && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --show-cruft followed by bash $0 --remove-cruft.  Or to ignore that, run export IGNORECRUFT=Y and re-run this command. " && return 1
+  ! "${DR_SKIP_OLD_PACKAGE_CHECK:-false}" && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --show-cruft followed by bash $0 --remove-cruft.  Or to ignore that, run export DR_SKIP_OLD_PACKAGE_CHECK=true and re-run this command. " && return 1
 
   dpkg --add-architecture amd64
   [ $? -ne 0 ] && echo "dss:error: Failed adding amd64 architecture." 2>&1 && return 1
@@ -5611,7 +5621,7 @@ function crossgrade_debian() {
   #bsd-mailx
   local loop=
   for loop in 0; do
-    local fromfile="$(find /root/distrorejuveinfo/ /root/deghostinfo/ -mtime -${DAYS_UPGRADE_ONGOING} 2>/dev/null | grep crossgrade)"
+    local fromfile="$(find /root/distrorejuveinfo/ /root/deghostinfo/ -mtime -${DR_CONFIGURATION_HISTORY_DAYS} 2>/dev/null | grep crossgrade)"
     [ ! -z "$fromfile" ] && fromfile="$(ls -1rt $fromfile | head -n 1)"
     [  -z "$fromfile" ] && break
     local uninstalled="$(print_config_state_changes "$fromfile" | grep '^dss:configdiff:statechanges:-installed:' | sed 's/.*installed://' | sed 's/:i386//' | sed 's/:amd64//' | grep -v '^ *$' | grep -v wpasupplicant | tr '\n' ' ')"
@@ -6026,7 +6036,7 @@ function upgrade_cleanup_output_safe_package() {
 
 # Append only to the current private run; no arguments validates the optional destination.
 function upgrade_cleanup_record() {
-  local directory=${DISTROREJUVE_RUN_DIRECTORY:-} file
+  local directory=${DR_RUN_DIRECTORY:-} file
   [ -n "$directory" ] || return 0
   file="$directory/cleanup.outcomes"
   [ -d "$directory" ] && [ ! -L "$directory" ] && [ ! -L "$file" ] || return 1
@@ -6616,7 +6626,7 @@ function debian_check_release_completion() {
     echo "dss:error: Requested Debian $target has not been reached; installed release is $current." >&2
     return 1
   fi
-  # This check must remain read-only: do not run upgrade_precondition_checks (REMOVEX11 can remove packages).
+  # This check must remain read-only: do not run upgrade_precondition_checks (DR_REMOVE_X11_PACKAGES can remove packages).
   if ! apt_sources_check_releases_and_vendors; then
     echo "dss:error: Debian $target completion check blocked by APT source policy; review the repository warnings above; package verification has not run." >&2
     return 1
@@ -6956,9 +6966,7 @@ function print_config_state_changes() {
 
 # Keep purge reminders attached to the same oldest recent baseline used for configuration diffs.
 function config_state_output_baseline() {
-  local file baseline='' days=${DAYS_UPGRADE_ONGOING:-7}
-  case "$days" in *[!0-9]*|'') echo "dss:error: DAYS_UPGRADE_ONGOING must be a positive integer." >&2; return 1;; esac
-  [ "$days" -gt 0 ] || return 1
+  local file baseline='' days=${DR_CONFIGURATION_HISTORY_DAYS:-7}
   for file in "/root/distrorejuveinfo/"*preupgrade* "/root/deghostinfo/"*preupgrade*; do
     [ -f "$file" ] || continue
     [ -n "$(find "$file" -maxdepth 0 -mtime "-$days" -print)" ] || continue
@@ -7327,6 +7335,18 @@ function ubuntu_output_next_release() {
   return 1
 }
 
+# Use the last configured LTS; a newer interim release cannot be downgraded to it.
+function ubuntu_output_latest_lts() {
+  local current=$1 target=''
+  for target in $LTS_UBUNTU; do :; done
+  [ -n "$target" ] || { echo 'dss:error: No Ubuntu LTS target is configured.' >&2; return 1; }
+  if [ "$current" != "$target" ] && ! is_distro_name_older "$current" "$target"; then
+    echo "dss:error: No forward upgrade path from Ubuntu $current to the latest LTS $target." >&2
+    return 1
+  fi
+  printf '%s\n' "$target"
+}
+
 # First argument limits the number of release transitions; LTS to LTS counts as one.
 function dist_upgrade_ubuntu_to_latest() {
   pause_check
@@ -7335,17 +7355,25 @@ function dist_upgrade_ubuntu_to_latest() {
   current=$(distro_output_codename) || return 1
   case " $ALL_UBUNTU " in *" $current "*) :;; *) return 0;; esac
   local planned=$current steps=$remaining
-  while [ "$steps" -gt 0 ]; do
-    next=$(ubuntu_output_next_release "$planned") || return 1
-    [ -n "$next" ] || break
-    planned=$next
-    steps=$((steps-1))
-  done
+  if [ -z "${1:-}" ]; then
+    planned=$(ubuntu_output_latest_lts "$current") || return 1
+  else
+    while [ "$steps" -gt 0 ]; do
+      next=$(ubuntu_output_next_release "$planned") || return 1
+      [ -n "$next" ] || break
+      planned=$next
+      steps=$((steps-1))
+    done
+  fi
   upgrade_check_path ubuntu "$current" "$planned" || return $?
   while [ "$remaining" -gt 0 ]; do
     current=$(distro_output_codename) || return 1
+    if [ "$current" = "$planned" ]; then upgrade_php_runtime_verify; return $?; fi
     next=$(ubuntu_output_next_release "$current") || return 1
-    if [ -z "$next" ]; then upgrade_php_runtime_verify; return $?; fi
+    if [ -z "$next" ]; then
+      echo "dss:error: Ubuntu upgrade stopped at $current before reaching $planned." >&2
+      return 1
+    fi
     check_disk_space || return 1
     upgrade_check_path ubuntu "$current" "$next" transition || return $?
     if [ "$current" = bionic ]; then
@@ -7421,67 +7449,416 @@ return $ret
 }
 
 
-function yum_upgrade() {
+# Read identity as data, never source release files or infer a derivative from ID_LIKE.
+# One tab-separated record: distribution ID, installed version, linux|stream.
+function rpm_distro_output_identity() {
+  local root=${1:-} records file LC_ALL=C
+  if [ -e "$root/etc/os-release" ]; then
+    records=$(head -c 16385 -- "$root/etc/os-release") || return 1
+    [ "${#records}" -le 16384 ] || return 1
+    awk '
+      /^[ \t]*(ID|VERSION_ID|VARIANT_ID|NAME)=/ {
+        line=$0; sub(/^[ \t]*/, "", line); key=line; sub(/=.*/, "", key)
+        value=substr(line,length(key)+2); sub(/[ \t\r]+$/, "", value)
+        if (value ~ /^".*"$/ || value ~ /^\047.*\047$/) value=substr(value,2,length(value)-2)
+        if (key in seen) bad=1; seen[key]=1; fields[key]=value
+      }
+      END {
+        id=fields["ID"]; version=fields["VERSION_ID"]
+        if (bad || id !~ /^(centos|rhel|almalinux|rocky|ol|fedora)$/ ||
+            version !~ /^[0-9]+([.][0-9]+)*$/ || length(version)>32) exit 1
+        variant="linux"
+        if (id=="centos" && (fields["VARIANT_ID"]=="stream" || fields["NAME"] ~ /^CentOS Stream([ \t]|$)/)) variant="stream"
+        printf "%s\t%s\t%s\n",id,version,variant
+      }
+    ' <<< "$records"
+    return $?
+  fi
+  for file in "$root/etc/centos-release" "$root/etc/redhat-release"; do
+    [ -e "$file" ] || continue
+    records=$(head -c 4097 -- "$file") || return 1
+    [ "${#records}" -le 4096 ] || return 1
+    awk '
+      NR==1 {
+        if ($0 ~ /^CentOS( Linux| Stream)? release /) id="centos"
+        else if ($0 ~ /^Red Hat Enterprise Linux.* release /) id="rhel"
+        else if ($0 ~ /^AlmaLinux release /) id="almalinux"
+        else if ($0 ~ /^Rocky Linux release /) id="rocky"
+        else if ($0 ~ /^Oracle Linux.* release /) id="ol"
+        else if ($0 ~ /^Fedora release /) id="fedora"
+        if (!id || !match($0,/ release [0-9]+([.][0-9]+)*([ \t(]|$)/)) exit 1
+        version=substr($0,RSTART+9,RLENGTH-9); sub(/[ \t(].*/,"",version)
+        variant=($0 ~ /^CentOS Stream / ? "stream" : "linux")
+      }
+      END { if (NR!=1 || !version) exit 1; printf "%s\t%s\t%s\n",id,version,variant }
+    ' <<< "$records"
+    return $?
+  done
+  return 1
+}
+
+# Only verified archive trees; these restore historical packages, not security support.
+function rpm_sources_output_vault_location() {
+  local version=$1 variant=$2 architecture=$3 release prefix=''
+  local version_pattern='^[0-9]+([.][0-9]+)*$'
+  [[ "$version" =~ $version_pattern ]] || return 1
+  case "$variant:${version%%.*}:$architecture" in
+    linux:4:i386|linux:4:x86_64) release=4.9;;
+    linux:5:i386|linux:5:x86_64) release=5.11;;
+    linux:6:i386|linux:6:x86_64) release=6.10;;
+    linux:7:x86_64) release=7.9.2009;;
+    linux:7:i386|linux:7:aarch64|linux:7:ppc64le) release=7.9.2009; prefix=altarch/;;
+    linux:8:x86_64|linux:8:aarch64|linux:8:ppc64le) release=8.5.2111;;
+    stream:8:x86_64|stream:8:aarch64|stream:8:ppc64le) release=8-stream;;
+    *) return 1;;
+  esac
+  printf 'https://vault.centos.org/%s%s\n' "$prefix" "$release"
+}
+
+function rpm_sources_output_vault_rewrite() {
+    local file="$1" base_url="$2" major="$3"
+    case "$major" in 4|5|6|7|8) ;; *) return 1 ;; esac
+    case "$base_url" in https://vault.centos.org/*) ;; *) return 1 ;; esac
+    awk -v base="${base_url%/}" -v major="$major" '
+        function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+        function fail() { failed=1; exit 1 }
+        function version_ok(s) {
+            return s == "$releasever" || s == "$releasever_major" ||
+                (major == 8 && (s == "$stream" || s == "8-stream")) ||
+                s == major || s ~ ("^" major "\\.[0-9]+([.][0-9]+)*$")
+        }
+        function component_name(s, value) {
+            value=tolower(s)
+            if (value == "base" || value == "os") value="os"
+            if (major == 8) {
+                if (value == "baseos") return "BaseOS"
+                if (value == "appstream") return "AppStream"
+                if (value == "powertools") return "PowerTools"
+                if (value == "extras" || value == "centosplus") return value
+            } else {
+                if (value == "os" || value == "updates" || value == "extras" ||
+                    value == "centosplus" || value == "contrib" || value == "fasttrack") return value
+                if (value == "update") return "updates"
+                if (major <= 5 && value == "addons") return value
+            }
+            return ""
+        }
+        function url_component(url, rest, count, part, i, pair, release, component) {
+            rest=url; sub(/^https?:\/\/[^/]+/, "", rest)
+            if (rest ~ /\?/) {
+                sub(/^[^?]*\?/, "", rest)
+                count=split(rest,part,"&")
+                for (i=1;i<=count;i++) {
+                    split(part[i],pair,"=")
+                    if (pair[1] == "release") { if (release != "") fail(); release=pair[2] }
+                    if (pair[1] == "repo") { if (component != "") fail(); component=pair[2] }
+                }
+                if (!version_ok(release)) fail()
+                return component_name(component)
+            }
+            count=split(rest,part,"/")
+            for (i=1;i<=count;i++) {
+                if (part[i] == "" || part[i] == "centos" || part[i] == "altarch" || part[i] == "$contentdir") continue
+                if (!version_ok(part[i])) fail()
+                return component_name(part[i+1])
+            }
+            return ""
+        }
+        function flush( i, line, active, key, value, host, component, selected, official, custom, seen, target, disabled) {
+            if (!n) return
+            for (i=1;i<=n;i++) {
+                line=tolower(trim(lines[i]))
+                if (line ~ /^enabled[ \t]*=/) {
+                    sub(/^[^=]*=[ \t]*/, "", line)
+                    sub(/[ \t]*[#;].*$/, "", line)
+                    disabled=(line == "0" || line == "false" || line == "no")
+                }
+            }
+            if (disabled) {
+                for (i=1;i<=n;i++) print lines[i]
+                delete lines; n=0
+                return
+            }
+            for (i=1;i<=n;i++) {
+                line=trim(lines[i]); active=(line !~ /^[#;]/)
+                if (!active) continue
+                if (line !~ /^(baseurl|mirrorlist|metalink)[ \t]*=/) continue
+                key=line; sub(/[ \t]*=.*/, "", key)
+                value=line; sub(/^[^=]*=[ \t]*/, "", value); value=trim(value)
+                host=value; sub(/^https?:\/\//, "", host); sub(/\/.*/, "", host)
+                if (value !~ /^https?:\/\// || host !~ /^(mirrorlist[.]centos[.]org|mirror[.]centos[.]org|vault[.]centos[.]org|mirror[.]stream[.]centos[.]org)$/) {
+                    if (active) custom++
+                    continue
+                }
+                if (value ~ /[ \t\\]/) fail()
+                component=url_component(value)
+                if (component == "") fail()
+                if (selected != "" && selected != component) fail()
+                selected=component
+                if (active) {
+                    official++
+                    if (seen[key]++) fail()
+                }
+                rewrite[i]=key
+            }
+            if (official && (custom || section == "")) fail()
+            if (official) {
+                for (i=1;i<=n;i++) {
+                    line=trim(lines[i])
+                    if (line != "" && line !~ /^[#;\[]/ && line !~ /^[A-Za-z0-9_]+[ \t]*=/) fail()
+                }
+                target=base "/" selected "/$basearch/" (major == 8 ? "os/" : "")
+                for (i=1;i<=n;i++) {
+                    if (rewrite[i] != "") {
+                        if (rewrite[i] == "baseurl" && trim(lines[i]) == "baseurl=" target) {
+                            if (!inserted++) print lines[i]
+                        } else {
+                            if (!inserted++) print "baseurl=" target
+                            print "# " lines[i]
+                        }
+                    } else print lines[i]
+                }
+            } else for (i=1;i<=n;i++) print lines[i]
+            delete lines; delete rewrite; n=0; inserted=0
+        }
+        /^[ \t]*\[/ {
+            flush()
+            section=trim($0); sub(/\].*$/, "]", section)
+            if (sections[section]++) fail()
+        }
+        { lines[++n]=$0 }
+        END { if (!failed) flush(); if (failed) exit 1 }
+    ' "$file" || {
+        printf 'Cannot safely rewrite CentOS repository file: %s\n' "$file" >&2
+        return 1
+    }
+}
+
+function rpm_sources_install_file() {
+  local source=$1 destination=$2 temporary
+  [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+  temporary=$(mktemp "$destination.distrorejuve.XXXXXXXX") || return 1
+  if cp -p -- "$source" "$temporary" && mv -f -- "$temporary" "$destination"; then return 0; fi
+  rm -f -- "$temporary"
+  return 1
+}
+
+# Validate the staged repositories before replacing any live file; keep originals for recovery.
+function rpm_sources_prepare() {
+  local manager=$1 directory=$2 base=$3 major=$4 file metadata settings name rollback_file changed=false count=0 restored=true
+  local -a repository_files=()
+  local -a changed_repository_files=()
+  for file in /etc/yum.conf /etc/dnf/dnf.conf; do
+    [ -f "$file" ] || continue
+    settings=$(awk '
+      /^[ \t]*\[/ { main=($0 ~ /^[ \t]*\[main\][ \t]*$/) }
+      main && /^[ \t]*reposdir[ \t]*=/ { value=$0; sub(/^[^=]*=[ \t]*/,"",value); sub(/[ \t]+[#;].*$/,"",value); sub(/[ \t]+$/,"",value); if (value != "/etc/yum.repos.d") print "custom" }
+      /^[ \t]*include[ \t]*=/ { print "include" }
+    ' "$file") || return 1
+    if [ -n "$settings" ]; then echo "dss:error: Custom reposdir/include in $file requires manual repository recovery; nothing was rewritten." >&2; return 1; fi
+  done
+  mkdir -m 700 -- "$directory/repository-stage" "$directory/repository-original" || return 1
+  for file in /etc/yum.repos.d/*.repo; do
+    [ -e "$file" ] || continue
+    count=$((count+1))
+    if [ "$count" -gt 200 ] || [ -L "$file" ] || [ ! -f "$file" ]; then echo 'dss:error: Unsupported repository file layout; review repository files manually.' >&2; return 1; fi
+    name=${file##*/}
+    case "$name" in *$'\n'*|*$'\r'*|*$'\t'*) return 1;; esac
+    metadata=$(stat -c %s -- "$file") || return 1
+    case "$metadata" in ''|*[!0-9]*) return 1;; esac
+    if [ "$metadata" -gt 1048576 ]; then echo "dss:error: Repository file is too large to rewrite: $file" >&2; return 1; fi
+    repository_files+=("$file")
+    cp -p -- "$file" "$directory/repository-original/$name" && cp -p -- "$file" "$directory/repository-stage/$name" || return 1
+    rpm_sources_output_vault_rewrite "$file" "$base" "$major" > "$directory/repository-stage/$name" || return 1
+    if ! cmp -s -- "$file" "$directory/repository-stage/$name"; then changed_repository_files+=("$file"); changed=true; fi
+  done
+  if [ "$count" -eq 0 ]; then echo 'dss:error: No repository files found. Restore the native CentOS repository definitions and signing keys first.' >&2; return 1; fi
+  $changed || return 0
+  echo 'dss:stage: Checking staged CentOS archive repositories before changing live files.' >&2
+  rpm_packages_run "$manager" --setopt="reposdir=$directory/repository-stage" makecache || return 1
+  # Check every original before the first replacement, so concurrent changes are not overwritten.
+  for file in "${repository_files[@]}"; do
+    if [ -L "$file" ] || ! cmp -s -- "$file" "$directory/repository-original/${file##*/}"; then echo "dss:error: Repository changed during preparation: $file" >&2; return 1; fi
+  done
+  for file in "${changed_repository_files[@]}"; do
+    if ! rpm_sources_install_file "$directory/repository-stage/${file##*/}" "$file"; then
+      for rollback_file in "${changed_repository_files[@]}"; do rpm_sources_install_file "$directory/repository-original/${rollback_file##*/}" "$rollback_file" || restored=false; done
+      echo "dss:error: Repository replacement failed; original files restored: $restored. Backups: $directory/repository-original" >&2
+      return 1
+    fi
+  done
+  printf 'dss:stage: CentOS sources now use the frozen archive; originals: %s/repository-original\n' "$directory" >&2
+}
+
+function rpm_migration_check_choice() {
+  local id=$1 version=$2 variant=$3 target=${DR_RPM_MIGRATION_TARGET:-} script=${DR_RPM_MIGRATION_SCRIPT:-} owner mode parent
+  [ "$id" = centos ] || return 0
+  case "$variant:${version%%.*}:$target" in
+    stream:9:|stream:10:) return 0;;
+    *:4:centos-vault|*:5:centos-vault|*:6:centos-vault|*:7:centos-vault|*:8:centos-vault) return 0;;
+    *:8:alma|stream:9:alma|stream:10:alma|*:8:rocky|stream:9:rocky) :;;
+    *:4:alma|*:5:alma|*:6:alma|*:7:alma|*:4:rocky|*:5:rocky|*:6:rocky|*:7:rocky)
+      echo "dss:error: There is no same-major $target equivalent for CentOS $version. Use a reviewed ELevate migration or reinstall; repositories were not changed." >&2
+      echo 'dss:stage: Migration guidance: https://wiki.almalinux.org/elevate/' >&2
+      return 1;;
+    *)
+      echo 'dss:error: Choose DR_RPM_MIGRATION_TARGET=alma or rocky for an eligible same-major conversion, or centos-vault for frozen archive packages only. No repository or package changes were made.' >&2
+      return 1;;
+  esac
+  [ -n "$script" ] || { echo 'dss:error: Set DR_RPM_MIGRATION_SCRIPT to the reviewed vendor migration script.' >&2; return 1; }
+  if [ ! -f "$script" ] || [ -L "$script" ]; then echo 'dss:error: The migration script must be a regular, non-symlink file.' >&2; return 1; fi
+  owner=$(stat -c '%u' -- "$script") && mode=$(stat -c '%a' -- "$script") || return 1
+  case "$mode" in ''|*[!0-7]*) return 1;; esac
+  if [ "$owner" != 0 ] || [ "$((8#$mode & 022))" -ne 0 ]; then
+    echo 'dss:error: The reviewed migration script must be owned by root and not writable by group/others.' >&2; return 1
+  fi
+  parent=${script%/*}
+  while :; do
+    [ -n "$parent" ] || parent=/
+    if [ -L "$parent" ] || [ ! -d "$parent" ]; then echo 'dss:error: Migration script directories must not be symlinks.' >&2; return 1; fi
+    owner=$(stat -c %u -- "$parent") && mode=$(stat -c %a -- "$parent") || return 1
+    case "$mode" in ''|*[!0-7]*) return 1;; esac
+    if [ "$owner" != 0 ] || [ "$((8#$mode & 022))" -ne 0 ]; then
+      echo 'dss:error: Store the reviewed migration script under trusted root-owned directories without group/other write access (for example /root).' >&2; return 1
+    fi
+    [ "$parent" != / ] || break
+    parent=${parent%/*}
+  done
+  bash -n "$script" || return 1
+}
+
+function rpm_migration_run() {
+  local target=$1 directory=$2 before_major=$3 before_variant=$4 expected records id version variant
+  local marker=/root/distrorejuveinfo/rpm-migration.pending
+  case "$target" in alma) expected=almalinux;; rocky) expected=rocky;; *) return 1;; esac
+  [ ! -L /root/distrorejuveinfo ] && mkdir -p -- /root/distrorejuveinfo || return 1
+  (umask 077; set -C; printf '%s\t%s\n' "$target" "$directory" > "$marker") || return 1
+  echo "dss:stage: Running the operator-selected $target conversion; no reboot will be requested by distrorejuve." >&2
+  if [ "$target" = rocky ]; then bash "$directory/vendor-migration.sh" -r || return $?
+  elif [ "$before_variant" = stream ]; then
+    echo 'dss:warn: CentOS Stream to AlmaLinux may downgrade packages to stable EL versions.' >&2
+    bash "$directory/vendor-migration.sh" --downgrade || return $?
+  else bash "$directory/vendor-migration.sh" || return $?; fi
+  records=$(rpm_distro_output_identity "") || return 1
+  IFS=$'\t' read -r id version variant <<< "$records"
+  if [ "$id" != "$expected" ] || [ "${version%%.*}" != "$before_major" ]; then
+    echo 'dss:error: Vendor tool did not establish the requested distribution and same major version. Stop and review; no automatic rollback or reboot was attempted.' >&2
+    return 1
+  fi
+  rm -- "$marker" || return 1
+}
+
+# RPM actions stay within the installed EL major; migration requires an explicit operator choice.
+function rpm_packages_output_manager() {
+  if command -v dnf >/dev/null 2>&1; then printf '%s\n' dnf
+  elif command -v yum >/dev/null 2>&1; then printf '%s\n' yum
+  else echo 'dss:error: Neither dnf nor yum is installed. Restore the native package manager from verified distribution media.' >&2; return 1; fi
+}
+
+function rpm_packages_run() {
+  local manager=$1
+  local LC_ALL=C
+  export LC_ALL
+  shift
+  case "$manager" in
+    dnf) dnf -y --refresh --best --setopt=gpgcheck=1 --setopt='*.gpgcheck=1' --setopt=sslverify=1 --setopt='*.sslverify=1' --setopt='*.skip_if_unavailable=0' "$@";;
+    yum) yum -y --setopt=gpgcheck=1 --setopt='*.gpgcheck=1' --setopt=sslverify=1 --setopt='*.sslverify=1' --setopt=metadata_expire=0 --setopt='*.metadata_expire=0' --setopt='*.skip_if_unavailable=0' "$@";;
+    *) return 1;;
+  esac
+}
+
+function rpm_packages_upgrade() {
   pause_check
-  [ ! -f /etc/redhat-release ] && return 0
+  local records id version variant manager directory base='' architecture target=${DR_RPM_MIGRATION_TARGET:-} status
+  if [ -e /root/distrorejuveinfo/rpm-migration.pending ] || [ -L /root/distrorejuveinfo/rpm-migration.pending ]; then
+    echo 'dss:error: A previous RPM migration is incomplete. Review /root/distrorejuveinfo/rpm-migration.pending and the vendor logs; finish recovery and verify the migration before removing that marker and retrying.' >&2
+    upgrade_preflight_blocked=true
+    return 1
+  fi
+  records=$(rpm_distro_output_identity "") || { echo 'dss:error: Cannot identify this RPM distribution; no packages or sources changed.' >&2; return 1; }
+  IFS=$'\t' read -r id version variant <<< "$records"
+  if ! rpm_migration_check_choice "$id" "$version" "$variant"; then upgrade_preflight_blocked=true; return 1; fi
   check_disk_space || return 1
-  yum_enable_rhel4 || return 0
-  if ! command -v yum >/dev/null 2>&1; then echo "dss:info: yum not found."; return 1; fi
-  local QOPT=" -q"
-  echo "dss:trace:yum_upgrade"
+  manager=$(rpm_packages_output_manager) || return 1
+  # Very old yum versions lack per-repository overrides needed for strict acquisition.
+  records=$(LC_ALL=C "$manager" --help) || return 1
+  if ! grep -q -- --setopt <<< "$records"; then echo 'dss:error: This package manager lacks --setopt; use reviewed manual archive recovery. Signature/TLS checks were not weakened.' >&2; return 1; fi
+  if [ "$id" = centos ]; then
+    case "$variant:${version%%.*}" in linux:*|stream:8)
+      architecture=$(rpm --eval '%{_arch}') || return 1
+      case "$architecture" in i?86) architecture=i386;; esac
+      base=$(rpm_sources_output_vault_location "$version" "$variant" "$architecture") || { echo 'dss:error: No verified CentOS archive layout for this release/architecture.' >&2; return 1; }
+      echo 'dss:warn: CentOS archive packages are frozen and do not fix vulnerabilities disclosed after end of life. Plan migration to a supported release.' >&2;;
+    esac
+  fi
+  if [ -n "${DR_RUN_DIRECTORY:-}" ]; then directory=$DR_RUN_DIRECTORY
+  else
+    directory=/root/distrorejuveinfo
+    [ ! -L "$directory" ] && (umask 077; mkdir -p -- "$directory") || return 1
+  fi
+  directory=$(umask 077; mktemp -d "$directory/rpm-upgrade.XXXXXXXX") || return 1
+  echo "dss:stage: RPM update evidence and repository backups: $directory" >&2
+  if [ "$id" = centos ] && { [ "$target" = alma ] || [ "$target" = rocky ]; }; then
+    cp -- "$DR_RPM_MIGRATION_SCRIPT" "$directory/vendor-migration.sh" && chmod 600 -- "$directory/vendor-migration.sh" || return 1
+    sha256sum -- "$directory/vendor-migration.sh" > "$directory/vendor-migration.sha256" || return 1
+  fi
+  packages_output_inventory rpm > "$directory/packages.before.tsv" || { echo 'dss:error: RPM database query failed; no automatic database rebuild was attempted.' >&2; return 1; }
+  if ! manifest_capture "$directory/before"; then echo 'dss:warn: Original manifest incomplete; package updates still require manual application checks.' >&2; fi
+  [ -z "$base" ] || rpm_sources_prepare "$manager" "$directory" "$base" "${version%%.*}" || return 1
+  rpm_packages_run "$manager" makecache || return $?
+  records=$(rpm_packages_run "$manager" -v repolist enabled) || return $?
+  if ! grep -qE '^[[:space:]]*Repo-id[[:space:]]*:' <<< "$records"; then
+    echo 'dss:error: No enabled RPM repository could be established; check repository/subscription configuration.' >&2
+    return 1
+  fi
+  echo "dss:stage: Updating packages with $manager on $id $version." >&2
+  rpm_packages_run "$manager" upgrade || return $?
+  if [ "$id" = centos ] && { [ "$target" = alma ] || [ "$target" = rocky ]; }; then
+    rpm_migration_run "$target" "$directory" "${version%%.*}" "$variant" || return $?
+    manager=$(rpm_packages_output_manager) || return 1
+    rpm_packages_run "$manager" makecache && rpm_packages_run "$manager" upgrade || return $?
+  fi
+  # check-update uses 100 for updates remaining; it must not become a successful all-current claim.
+  if rpm_packages_run "$manager" check-update; then :
+  else status=$?; echo "dss:error: Update verification failed (status $status; 100 means updates remain). Check exclusions, version locks and dependencies." >&2; return "$status"; fi
+  packages_output_inventory rpm > "$directory/packages.after.tsv" || return 1
+  if ! manifest_capture "$directory/after"; then echo 'dss:warn: Final manifest incomplete; inspect services and applications manually.' >&2; fi
+  if [ -f "$directory/before/manifest.review" ] && [ -f "$directory/after/manifest.review" ]; then
+    diff -u "$directory/before/manifest.review" "$directory/after/manifest.review" > "$directory/manifest-changes.diff"
+    status=$?; [ "$status" -le 1 ] || return "$status"
+  fi
+  echo 'dss:stage: RPM package transaction completed. Review services, PHP-FPM/Apache and application compatibility; restart affected services or arrange a reboot as needed.' >&2
+  return 0
+}
 
-  yum --version >/dev/null && ! yum -q --version 2>/dev/null >/dev/null && QOPT=
-  yum -y install yum rpm > /dev/null 2>&1
+function rpm_packages_finish_run() {
+  local status=$1 logfile=$2 directory=${DR_RUN_DIRECTORY:-}
+  if [ -n "$directory" ]; then
+    if [ -L "$directory/outcome.incomplete" ] || ! (umask 077; : > "$directory/outcome.incomplete"); then
+      echo 'dss:error: Cannot record incomplete RPM service verification.' >&2
+      [ "$status" -ne 0 ] || status=1
+    fi
+  fi
+  echo "dss:stage: RPM outcome: action status $status; service/application health not verified. Detailed run log: $logfile" >&2
+  echo 'dss:warn: A successful package transaction does not establish that PHP is patched or that processes have loaded the new libraries. No automatic reboot was performed.' >&2
+  return "$status"
+}
 
-  # handy tools to make life better
-  yum $QOPT -y install yum-utils yum-verify
-
-  echo "dss:info: running yum upgrade"
-  yum $QOPT -y upgrade
-  ret=$?
-  [ "$ret" -ne 0 ] && echo "dss:error:yum_upgrade failed." >&2
-  [ "$ret" -eq 0 ] && echo "dss:info:yum_upgrade completed."
-  return $ret
+# Historical names remain available to callers using --source.
+function yum_upgrade() {
+  [ -f /etc/redhat-release ] || return 0
+  check_disk_space || return 1
+  rpm_packages_upgrade
 }
 
 function yum_enable_rhel4() {
-[ ! -f /etc/redhat-release ] && return 0
-! grep -qai 'release.* 4' /etc/redhat-release && return 0
-if command -v yum >/dev/null 2>&1; then echo "dss:info: yum enabled on a rhel4 distro already."; return 0; fi
-echo "dss:info: yum not enabled on $(print_distro_info).  Trying to enable it."
-{
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/libxml2-2.6.16-12.6.i386.rpm
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/libxml2-python-2.6.16-12.6.i386.rpm
-
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/readline-4.3-13.i386.rpm
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/python-2.3.4-14.7.el4.i386.rpm
-
-# install all together else dependency issues
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/sqlite-3.3.6-2.i386.rpm http://vault.centos.org/4.9/os/i386/CentOS/RPMS/sqlite-devel-3.3.6-2.i386.rpm http://vault.centos.org/4.9/os/i386/CentOS/RPMS/python-sqlite-1.1.7-1.2.1.i386.rpm
-
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/python-elementtree-1.2.6-5.el4.centos.i386.rpm
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/sqlite-3.3.6-2.i386.rpm
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/python-sqlite-1.1.7-1.2.1.i386.rpm
-
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/elfutils-libelf-0.97.1-5.i386.rpm
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/elfutils-0.97.1-5.i386.rpm
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/popt-1.9.1-32_nonptl.i386.rpm
-
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/python-urlgrabber-2.9.8-2.noarch.rpm
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/yum-metadata-parser-1.0-8.el4.centos.i386.rpm
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/centos-release-4-8.i386.rpm
-rpm -Uvh http://vault.centos.org/4.9/os/i386/CentOS/RPMS/yum-2.4.3-4.el4.centos.noarch.rpm
-prepare_output_dir
-if [ ! -e /root/distrorejuveinfo/CentOS-Base.repo ]; then
-  echo "dss:info: Running cp /etc/yum.repos.d/CentOS-Base.repo /root/distrorejuveinfo/CentOS-Base.repo"
-  cp /etc/yum.repos.d/CentOS-Base.repo /root/distrorejuveinfo/CentOS-Base.repo
-fi
-
-wget -nc -O /etc/yum.repos.d/CentOS-Base.repo http://vault.centos.org/4.9/CentOS-Base.repo
+  [ -f /etc/redhat-release ] || return 0
+  rpm_packages_output_manager >/dev/null
 }
-if command -v yum >/dev/null 2>&1; then echo "dss:info: yum enabled on a rhel4 distro."; return 0
-else echo "dss:info: yum install failed on a rhel4 distro."; return 1 ; fi
-return 0
+
+function improve_yum_setup() {
+  [ -f /etc/redhat-release ] || return 0
+  echo 'dss:info: Repository preparation is handled by the guarded RPM update path.'
 }
 
 function report_unsupported() {
@@ -7496,72 +7873,23 @@ function report_unsupported() {
     return 0
   fi
 
-if [ ! -f /etc/redhat-release ]; then return 0; fi
-if grep -qai 'Shrike' /etc/redhat-release; then
-  # RH9
+  [ -f /etc/redhat-release ] || return 0
+  local identity id version variant
+  identity=$(rpm_distro_output_identity "") || { echo 'dss:warn: RPM distribution support could not be identified.' >&2; return 1; }
+  IFS=$'\t' read -r id version variant <<< "$identity"
+  case "$id:$variant:${version%%.*}" in
+    centos:linux:*|centos:stream:8)
+      echo "dss:warn: CentOS $version $variant is end of life. Archive packages do not restore security support. Select DR_RPM_MIGRATION_TARGET before running --upgrade." >&2
+      return 1;;
+    rhel:*) echo 'dss:info: RHEL update availability depends on enabled subscription/extended-support repositories.';;
+  esac
   return 0
-elif grep -qai 'release.* 7' /etc/redhat-release; then
-  # yum install
-  return 0
-elif  grep -qai 'release.* 6' /etc/redhat-release; then
-  # yum install
-  return 0
-elif  grep -qai 'release.* 5' /etc/redhat-release; then
-  # yum install
-  return 0
-elif  grep -qai 'release.* 4' /etc/redhat-release; then
-  # install prebuilt rpm
-  return 0
-elif  grep -qai 'release.* 3' /etc/redhat-release; then
-  # install prebuilt rpm
-  return 0
-elif  grep -qai 'release.* 2' /etc/redhat-release; then
-  true
-elif  grep -qai 'release.* 1' /etc/redhat-release; then
-  true
-else
-  return 0
-fi
-
-# cat /etc/redhat-release
-#Red Hat Enterprise Linux WS release 4 (Nahant)
-echo "dss:warn: There is currently no autopatch option for $(print_distro_info).  The distro is likely out of date and no longer supported."
-return 1
-}
-
-function improve_yum_setup() {
-if ! print_distro_info | egrep -i 'redhat|centos' | egrep -qai 'release.* 5|release.* 6|release.* 7' ; then return 0; fi
-if rpm -qa 2>&1 | grep -qai rpmdbnextiter ; then
-  # e.g. error: rpmdbNextIterator: skipping h#     489 Header V3 RSA/SHA256 Signature, key ID c105b9de: BAD
-  echo "dss:info: rpm database errors.  rebuilding the rpm db"
-  rpm --rebuilddb
-fi
-if [ ! -x /usr/bin/yum ] ; then
-  #rpm http://centos5.rimuhosting.com/centos /5 os updates rimuhosting addons extras centosplus
-  if [ ! -f /etc/apt/sources.list ]; then
-    echo "dss:warn: Cannot do a yum install on this host, yum not installed, no /etc/apt/sources.list either."
-    return 1
-  fi
-  if ! command -v apt-get >/dev/null 2>&1 ; then
-    echo "dss:warn: Cannot do a yum install on this host, yum not installed, no apt-get either."
-  fi
-  echo "dss:info: Trying to install yum via apt-get"
-  apt-get --force-yes -y install yum
-fi
-if [ ! -x /usr/bin/yum ] ; then
-  echo "dss:warn: Cannot do a yum install on this host, yum not installed"
-  return 1
-fi
-
-# this file was added by us, but with wrong name (ending in s).
-[ -f /etc/yum.repos.d/CentOS-Base.repos ] && [ -f /etc/yum.repos.d/CentOS-Base.repo ] && rm /etc/yum.repos.d/CentOS-Base.repos
-if print_distro_info | egrep -i 'redhat|centos' | egrep -qai 'release.* 5' && [ ! -f /etc/yum.repos.d/CentOS-Base.repo ] && [ -d /etc/yum.repos.d ] ; then
- wget -nc -O /etc/yum.repos.d/CentOS-Base.repo http://downloads.rimuhosting.com/CentOS-Base.repos.v5
-fi
-return 0
 }
 
 function packages_upgrade() {
+local backend
+backend=$(packages_output_backend) || return 1
+if [ "$backend" = rpm ]; then rpm_packages_upgrade; return $?; fi
 crossgrade_bookworm_recover_bootstrap "${UPGRADE_CROSSGRADE:-false}" packages || return $?
 usrmerge_recover_pending || return $?
 upgrade_prepare_nss_lookup
@@ -7570,11 +7898,6 @@ upgrade_precondition_checks || return $?
 apt_sources_prepare || return 1
 
 fix_missing_lsb_release || return $?
-
-
-yum_enable_rhel4 || return $?
-
-improve_yum_setup || return $?
 
 add_missing_debian_keys || return $?
 
@@ -7601,16 +7924,14 @@ fi
 echo "dss:trace:packages_upgrade:pre_apt_get_upgrade:"
 apt_get_upgrade || return $?
 
-yum_upgrade || return $?
-
 return 0
 }
 
 function dist_upgrade_to_latest() {
   pause_check
-  local debian_target='' current='' family=''
+  local debian_target='' ubuntu_target='' current='' family=''
   echo "dss:trace:dist_upgrade_to_latest"
-  upgrade_preflight_action --dist-upgrade || return $?
+  upgrade_preflight_action --to-latest || return $?
 
   if [ -f /etc/debian_version ]; then
     current=$(distro_output_codename) || return 1
@@ -7631,11 +7952,13 @@ function dist_upgrade_to_latest() {
 
   fi
   if [ "$family" = ubuntu ]; then
+    ubuntu_target=$(ubuntu_output_latest_lts "$current") || return 1
     if ! dist_upgrade_ubuntu_to_latest; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_ubuntu_to_latest:failed" && return 1; fi
   fi
   if ! packages_upgrade; then echo "dss:error:dist_upgrade_to_latest:packages_upgrade:failed" && return 1; fi
   if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   if [ -n "$debian_target" ]; then debian_check_release_completion "$debian_target" || return 1; fi
+  if [ -n "$ubuntu_target" ]; then upgrade_check_crossgrade_checkpoint ubuntu "$ubuntu_target" || return 1; fi
   if ! plesk_upgrade; then echo "dss:error:dist_upgrade_to_latest:plesk_upgrade:failed" && return 1; fi
 }
 
@@ -8586,7 +8909,7 @@ function manifest_output() (
   local manifest_processes='' manifest_package_backend=unknown
   local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
   local manifest_review_file=${4:-} manifest_collection_failed=false
-  local manifest_dns_limit=20 manifest_mail_metrics="${MANIFEST_MAIL_METRICS:-true}"
+  local manifest_dns_limit=20 manifest_mail_metrics="${DR_MANIFEST_MAIL_METRICS:-true}"
   local manifest_dns_addresses manifest_dns_result manifest_dns_reason
   local manifest_apache_php_available=false manifest_apache_php_version=unknown manifest_apache_php_package=unknown
   local -a manifest_php_packages=()
@@ -8599,8 +8922,8 @@ function manifest_output() (
   local -a manifest_dns_values=()
   local -a manifest_dns_results=()
   local -a manifest_dns_reasons=()
-  case "$manifest_format:$manifest_dns_enabled:$manifest_mail_metrics" in
-    text:true:true|text:true:false|text:false:true|text:false:false|json:true:true|json:true:false|json:false:true|json:false:false) ;;
+  case "$manifest_format:$manifest_dns_enabled" in
+    text:true|text:false|json:true|json:false) ;;
     *) printf '%s\n' 'dss:error: invalid manifest format or boolean control' >&2; return 1 ;;
   esac
   [ "$manifest_root" = / ] && manifest_root=
@@ -8635,7 +8958,7 @@ function manifest_capture() {
   for file in records.tmp manifest.json.tmp manifest.review.tmp; do
     : > "$directory/$file" && chmod 600 -- "$directory/$file" || return 1
   done
-  MANIFEST_MAIL_METRICS=false manifest_output json false "${2:-/}" "$directory/records.tmp" > "$directory/manifest.json.tmp" || return 1
+  DR_MANIFEST_MAIL_METRICS=false manifest_output json false "${2:-/}" "$directory/records.tmp" > "$directory/manifest.json.tmp" || return 1
   printf '%s\n' manifest-review-v1 > "$directory/manifest.review.tmp" || return 1
   LC_ALL=C sort "$directory/records.tmp" >> "$directory/manifest.review.tmp" || return 1
   mv -- "$directory/manifest.review.tmp" "$directory/manifest.review" &&
@@ -8748,7 +9071,7 @@ function upgrade_print_report() {
   printf '\n%s\n' 'Known configuration migration concerns (target above; not an upgrade authorization):'
   if [ "$family" = unknown ]; then
     printf '%s\n' 'Unknown distribution: release-path concerns could not be evaluated.'; status=1
-  elif records=$(IGNORE_DOVECOT_ERROR='' upgrade_output_compatibility_issues "$family" "$current" "$target"); then
+  elif records=$(DR_SKIP_DOVECOT_MIGRATION_CHECK=false upgrade_output_compatibility_issues "$family" "$current" "$target"); then
     printf '%s\n' "${records:-No matching known configuration blockers. Application compatibility is not assessed.}"
   else printf '%s\n' 'Unknown: compatibility-rule collection failed.'; status=1; fi
   printf '\n%s\n' 'Package database health:'
@@ -8814,7 +9137,7 @@ function support_print_report() {
     if [ "${#exit_status}" -gt 3 ] || [ "$exit_status" -gt 255 ]; then exit_status=unknown; fi;;
   esac
   case "$action" in
-    --upgrade|--dist-update|--dist-upgrade|--to-squeeze|--to-wheezy|--to-jessie|--to-debian-release|--to-latest-debian|--to-latest-lts|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages) :;;
+    --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages) :;;
     *) action=unknown;;
   esac
   case "$crossgrade" in true|false) :;; *) crossgrade=unknown;; esac
@@ -9000,7 +9323,7 @@ function support_print_report() {
 # Only mutating actions use this wrapper; read-only reports retain normal stdout.
 # LOG_VERBOSE and LOG_TRACE are validated booleans set by the main option parser.
 function logging_run() (
-	local logging_root="${DISTROREJUVE_LOG_DIR:-/root/distrorejuveinfo/runs}"
+	local logging_root="${DR_LOG_DIRECTORY:-/root/distrorejuveinfo/runs}"
 	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
 	local logging_dir logging_log logging_line logging_status logging_original_umask logging_digest logging_action_status=0
 	local logging_emphasis=false logging_summarize=false logging_level logging_required
@@ -9020,8 +9343,8 @@ function logging_run() (
 		return 1
 	fi
 
-	case "$1:${ACTION:-${2:-}}" in
-		distrorejuve_main:--upgrade|distrorejuve_main:--dist-update|distrorejuve_main:--dist-upgrade|distrorejuve_main:--to-*) logging_summarize=true;;
+	case "$1:${DR_ACTION:-${2:-}}" in
+		distrorejuve_main:--upgrade|distrorejuve_main:--dist-update|distrorejuve_main:--to-*) logging_summarize=true;;
 	esac
 	if $logging_summarize; then
 		# A partial copy must fail before package changes, not at completion.
@@ -9067,8 +9390,8 @@ function logging_run() (
 	(
 		trap - INT TERM HUP
 		if $logging_summarize; then
-			DISTROREJUVE_RUN_DIRECTORY=$logging_dir
-			export DISTROREJUVE_RUN_DIRECTORY
+			DR_RUN_DIRECTORY=$logging_dir
+			export DR_RUN_DIRECTORY
 			# Bash 3.1 unwinds function locals before EXIT traps; keep this child flag global.
 			upgrade_preflight_blocked=false
 			# Main dispatch can exit directly; retain its status and still report final health.
@@ -9077,11 +9400,11 @@ function logging_run() (
 				trap - EXIT
 				if $upgrade_preflight_blocked && [ "$logging_action_status" -eq 1 ]; then
 					logging_status=$logging_action_status
-					if ! (umask 077; : > "$DISTROREJUVE_RUN_DIRECTORY/preflight.blocked.tmp" && chmod 600 -- "$DISTROREJUVE_RUN_DIRECTORY/preflight.blocked.tmp" && mv -- "$DISTROREJUVE_RUN_DIRECTORY/preflight.blocked.tmp" "$DISTROREJUVE_RUN_DIRECTORY/preflight.blocked"); then
+					if ! (umask 077; : > "$DR_RUN_DIRECTORY/preflight.blocked.tmp" && chmod 600 -- "$DR_RUN_DIRECTORY/preflight.blocked.tmp" && mv -- "$DR_RUN_DIRECTORY/preflight.blocked.tmp" "$DR_RUN_DIRECTORY/preflight.blocked"); then
 						printf "dss:error Cannot record the preflight refusal.\n" >&2
 					fi
 				elif declare -F upgrade_finish_run >/dev/null; then
-					upgrade_finish_run "$logging_action_status" "$DISTROREJUVE_RUN_DIRECTORY/output.log"
+					upgrade_finish_run "$logging_action_status" "$DR_RUN_DIRECTORY/output.log"
 					logging_status=$?
 				else
 					printf "dss:error Completion reporting is unavailable: upgrade_finish_run is missing; package and service health remain unverified.\n" >&2
@@ -9135,7 +9458,7 @@ function logging_run() (
 	else
 		printf 'dss:stage Action complete; details: %s\n' "$logging_log" >&2
 	fi
-	if ! (umask 077; printf '%s\t%s\t%s\t%s\t%s\n' "$logging_status" "${ACTION:-${2:-}}" "$logging_digest" "${UPGRADE_CROSSGRADE:-false}" "${3:-unknown}" > "$logging_dir/support.context" && chmod 600 -- "$logging_dir/support.context"); then
+	if ! (umask 077; printf '%s\t%s\t%s\t%s\t%s\n' "$logging_status" "${DR_ACTION:-${2:-}}" "$logging_digest" "${UPGRADE_CROSSGRADE:-false}" "${3:-unknown}" > "$logging_dir/support.context" && chmod 600 -- "$logging_dir/support.context"); then
 		printf '%s\n' 'dss:warn Cannot record support-report context.' >&2
 	fi
 	if ! $logging_expected_stop && { [ "$logging_status" -ne 0 ] || [ -f "$logging_dir/outcome.incomplete" ]; }; then
@@ -9153,49 +9476,30 @@ function logging_run() (
 
 function distrorejuve_main() {
 ret=0
-if [ "${ACTION:-$1}" = --support-report ]; then
+if [ "${DR_ACTION:-$1}" = --support-report ]; then
   [ "$#" -le 2 ] || { printf '%s\n' 'dss:error: Use --support-report [RUN_DIRECTORY].' >&2; return 1; }
   support_print_report "${2:-}"
   return $?
 fi
-[ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ] || [ "${ACTION:-$1}" = --upgrade-report ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
-if [ "${ACTION:-$1}" = --manifest ] || [ "${ACTION:-$1}" = --manifest-json ] || [ "${ACTION:-$1}" = --upgrade-report ]; then
+[ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json ] || [ "${DR_ACTION:-$1}" = --upgrade-report ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
+if [ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json ] || [ "${DR_ACTION:-$1}" = --upgrade-report ]; then
   manifest_dns_enabled=true
   case "${2:-}" in --no-dns) manifest_dns_enabled=false;; '') :;; *) print_usage; exit 1;; esac
   [ -z "${3:-}" ] || { print_usage; exit 1; }
-  if [ "${ACTION:-$1}" = --upgrade-report ]; then upgrade_print_report "$manifest_dns_enabled"
-  elif [ "${ACTION:-$1}" = --manifest-json ]; then manifest_output json "$manifest_dns_enabled"
+  if [ "${DR_ACTION:-$1}" = --upgrade-report ]; then upgrade_print_report "$manifest_dns_enabled"
+  elif [ "${DR_ACTION:-$1}" = --manifest-json ]; then manifest_output json "$manifest_dns_enabled"
   else manifest_output text "$manifest_dns_enabled"; fi
   exit $?
-elif [ "--usage" = "${ACTION:-$1}" ] || [ "--help" = "${ACTION:-$1}" ]; then
+elif [ "--help" = "${DR_ACTION:-$1}" ]; then
   print_usage
-elif [ "--check" = "${ACTION:-$1}" ] || [ -z "${ACTION:-$1}" ] ; then
+elif [ "--check" = "${DR_ACTION:-$1}" ] || [ -z "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
   upgrade_precondition_checks
   ret=$?
   report_unsupported
   [ "$ret" -eq 0 ]
-elif [ "--to-wheezy" = "${ACTION:-$1}" ] ; then
-  [ ! -z "$2" ] && print_usage && exit 1
-  upgrade_preflight_action --to-wheezy "${2:-}" || exit $?
-  print_info
-  dist_upgrade_etch_to_lenny || exit 1
-  dist_upgrade_lenny_to_squeeze || exit 1
-  dist_upgrade_squeeze_to_wheezy || exit 1
-  debian_check_release_completion wheezy || exit 1
-  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
-elif [ "--to-jessie" = "${ACTION:-$1}" ] ; then
-  [ ! -z "$2" ] && print_usage && exit 1
-  upgrade_preflight_action --to-jessie "${2:-}" || exit $?
-  print_info
-  dist_upgrade_etch_to_lenny || exit 1
-  dist_upgrade_lenny_to_squeeze || exit 1
-  dist_upgrade_squeeze_to_wheezy || exit 1
-  dist_upgrade_wheezy_to_jessie || exit 1
-  debian_check_release_completion jessie || exit 1
-  if [ $ret -eq 0 ] ; then true ; else print_failed_dist_upgrade_tips; false; fi
-elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
+elif [ "--to-debian-release" = "${DR_ACTION:-$1}" ] ; then
   version="$2"
   [ -z "$version" ] && echo "dss:error: Need a version e.g. 11 for --to-debian-release" && exit 1
   [ ! -z "$3" ] && print_usage && exit 1
@@ -9226,33 +9530,8 @@ elif [ "--to-debian-release" = "${ACTION:-$1}" ] ; then
   debian_check_release_completion "$debian_target" || exit 1
 
   [ "$ret" -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ "$ret" -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes"
-elif [ "--to-latest-debian" = "${ACTION:-$1}" ] ; then
-  [ ! -z "$2" ] && print_usage && exit 1
-  upgrade_preflight_action --to-latest-debian "${2:-}" || exit $?
-  print_info
-  dist_upgrade_etch_to_lenny || exit 1
-  dist_upgrade_lenny_to_squeeze || exit 1
-  dist_upgrade_squeeze_to_wheezy || exit 1
-  dist_upgrade_wheezy_to_jessie || exit 1
-  dist_upgrade_jessie_to_stretch || exit 1
-  dist_upgrade_stretch_to_buster || exit 1
-  dist_upgrade_buster_to_bullseye || exit 1
-  dist_upgrade_bullseye_to_bookworm || exit 1
-  dist_upgrade_bookworm_to_trixie || exit 1
-  debian_check_release_completion trixie || exit 1
-
-  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && echo "dss:info:  --to-latest-debian completed ok.  use $0 --show-changes to see changes"
-elif [ "--to-latest-lts" = "${ACTION:-$1}" ] ; then
-  [ ! -z "$2" ] && print_usage && exit 1
-  upgrade_preflight_action --to-latest-lts "${2:-}" || exit $?
-  print_info
-  dist_upgrade_ubuntu_to_latest
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && echo "dss:info: --to-latest-lts completed ok.  use $0 --show-changes to see changes"
-elif [ "--to-next-ubuntu" = "${ACTION:-$1}" ] ; then
+  [ "$ret" -eq 0 ] && echo "dss:info: --to-debian-release $version completed. Use $0 --show-changes to see changes."
+elif [ "--to-next-ubuntu" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   upgrade_preflight_action --to-next-ubuntu "${2:-}" || exit $?
   print_info
@@ -9260,59 +9539,55 @@ elif [ "--to-next-ubuntu" = "${ACTION:-$1}" ] ; then
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-next-ubuntu completed ok.  use $0 --show-changes to see changes"
-elif [ "--to-squeeze" = "${ACTION:-$1}" ] ; then
-  [ ! -z "$2" ] && print_usage && exit 1
-  upgrade_preflight_action --to-squeeze "${2:-}" || exit $?
-  print_info
-  dist_upgrade_etch_to_lenny || exit 1
-  dist_upgrade_lenny_to_squeeze || exit 1
-  debian_check_release_completion squeeze || exit 1
-  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && echo "dss:info:  --to-squeeze completed ok.  use $0 --show-changes to see changes"
-elif [ "--source" = "${ACTION:-$1}" ] ; then
+elif [ "--source" = "${DR_ACTION:-$1}" ] ; then
   echo "dss:info:Loaded distrorejuve functions"
-elif [ "--upgrade" = "${ACTION:-$1}" ] ; then
+elif [ "--upgrade" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
-  IGNOREOTHERREPOS=Y
+  DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK=true
   packages_upgrade
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && echo "dss:info:  --upgrade completed ok.  use $0 --show-changes to see changes"
-elif [ "--dist-upgrade" = "${ACTION:-$1}" ] ; then
+  if [ "$ret" -eq 0 ]; then
+    if [ -f /etc/redhat-release ]; then echo 'dss:info: --upgrade completed; review the RPM evidence directory in the detailed run log.'
+    else echo "dss:info: --upgrade completed ok. Use $0 --show-changes to see changes."; fi
+  fi
+elif [ "--to-latest" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
-  upgrade_preflight_action --dist-upgrade "${2:-}" || exit $?
+  upgrade_preflight_action --to-latest "${2:-}" || exit $?
   print_info
   dist_upgrade_to_latest
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && echo "dss:info:  --dist-upgrade completed ok.  use $0 --show-changes to see changes"
-elif [ "--dist-update" = "${ACTION:-$1}" ] ; then
+  [ $ret -eq 0 ] && echo "dss:info:  --to-latest completed ok.  use $0 --show-changes to see changes"
+elif [ "--dist-update" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
-  yum_upgrade || exit 1
   packages_upgrade || exit 1
-  apt_get_dist_upgrade
+  if [ -f /etc/debian_version ]; then apt_get_dist_upgrade; else true; fi
   [ $? -ne 0 ] && ret=$(($ret+1))
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  [ $ret -eq 0 ] && echo "dss:info:  --dist-update completed ok.  use $0 --show-changes to see changes"
-elif [ "--show-cruft" = "${ACTION:-$1}" ] ; then
+  if [ "$ret" -eq 0 ]; then
+    if [ -f /etc/redhat-release ]; then echo 'dss:info: --dist-update completed; review the RPM evidence directory in the detailed run log.'
+    else echo "dss:info: --dist-update completed ok. Use $0 --show-changes to see changes."; fi
+  fi
+elif [ "--show-cruft" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install)." && exit 0
   show_cruft_packages
   echo "To remove those packages, re-run with bash $0 --remove-cruft"
   exit 0
-elif [ "--remove-cruft" = "${ACTION:-$1}" ] ; then
+elif [ "--remove-cruft" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install).  Nothing to do.  All good." && exit 0
   remove_cruft_packages
   exit $?
-elif [ "--remove-deprecated-packages" = "${ACTION:-$1}" ] ; then
+elif [ "--remove-deprecated-packages" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   ! has_cruft_packages oldpkg && echo "No cruft packages (all installed packages from the current distro).  Nothing to do.  All good." && exit 0
   remove_cruft_packages oldpkg
   exit $?
-elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
+elif [ "--to-64bit" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   check_disk_space || exit 1
   if [ "$(distro_output_codename)" = bookworm ]; then
@@ -9327,22 +9602,22 @@ elif [ "--to-64bit" = "${ACTION:-$1}" ] ; then
       exit 0
     fi
   fi
-  has_cruft_packages oldpkg && [  -z "$IGNORECRUFT" ] && show_cruft_packages && echo "dss:error: Old packages must be removed before crossgrading. Run bash $0 --remove-cruft, or set IGNORECRUFT=Y to override this check." >&2 && exit 1
+  has_cruft_packages oldpkg && ! "${DR_SKIP_OLD_PACKAGE_CHECK:-false}" && show_cruft_packages && echo "dss:error: Old packages must be removed before crossgrading. Run bash $0 --remove-cruft, or set DR_SKIP_OLD_PACKAGE_CHECK=true to override this check." >&2 && exit 1
   crossgrade_debian
   ret=$?
   [ $ret -ne 0 ] && echo "dss:error: crossgrade failed, see above for any details"
   [ $ret -eq 0 ] && echo "dss:info: To show configuration changes, run: bash $0 --show-changes"
   # [ $ret -eq 0 ] && print_config_state_changes && echo "dss:info: no errors."
   exit $ret
-elif [ "--show-changes" = "${ACTION:-$1}" ] ; then
+elif [ "--show-changes" = "${DR_ACTION:-$1}" ] ; then
   print_config_state_changes
   exit $?
-elif [ "--pause" = "${ACTION:-$1}" ] ; then
+elif [ "--pause" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   touch ~/distrorejuve.pause
   echo "dss:info: Touched the pause file at $(realpath ~/distrorejuve.pause)"
   exit 0
-elif [ "--resume" = "${ACTION:-$1}" ] ; then
+elif [ "--resume" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   rm -f ~/distrorejuve.pause
   echo "dss:info: Removed the pause file at $(realpath ~/distrorejuve.pause)"
@@ -9356,16 +9631,13 @@ fi
 
 function distrorejuve_run() {
   local argument action LOG_VERBOSE=false LOG_TRACE=false UPGRADE_CROSSGRADE=false
-  # An explicit public-report command must not enter an inherited upgrade ACTION.
+  # An explicit public-report command must not enter an inherited upgrade DR_ACTION.
   if [ "${1:-}" = --support-report ]; then
-    local ACTION=--support-report
+    local DR_ACTION=--support-report
     distrorejuve_main "$@"
     return $?
   fi
-  case "${ALLOW_CROSSGRADE_BLOCKERS-false}" in
-    true|false) :;;
-    *) echo 'dss:error: ALLOW_CROSSGRADE_BLOCKERS must be true or false.' >&2; return 1;;
-  esac
+  environment_validate_settings || return 1
   local -a arguments=()
   local -a upgrade_retry_command=(bash "$0" "$@")
   for argument in "$@"; do
@@ -9373,19 +9645,18 @@ function distrorejuve_run() {
       --verbose) LOG_VERBOSE=true;;
       --trace) LOG_TRACE=true;;
       --crossgrade) UPGRADE_CROSSGRADE=true;;
-      --allow-crossgrade-blockers) echo 'dss:error: Set ALLOW_CROSSGRADE_BLOCKERS=true instead of --allow-crossgrade-blockers.' >&2; return 1;;
       *) arguments+=("$argument");;
     esac
   done
-  action=${ACTION:-${arguments[0]:-}}
+  action=${DR_ACTION:-${arguments[0]:-}}
   if $UPGRADE_CROSSGRADE; then
     case "$action" in
-      --dist-upgrade|--to-debian-release|--to-latest-debian|--to-latest-lts|--to-next-ubuntu|--to-squeeze|--to-wheezy|--to-jessie) :;;
+      --to-latest|--to-debian-release|--to-next-ubuntu) :;;
       *) echo 'dss:error: --crossgrade modifies a release-upgrade command; use --to-64bit for a standalone crossgrade.' >&2; return 1;;
     esac
   fi
   case "$action" in
-    --upgrade|--dist-update|--dist-upgrade|--to-squeeze|--to-wheezy|--to-jessie|--to-debian-release|--to-latest-debian|--to-latest-lts|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages)
+    --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages)
       logging_run distrorejuve_main "${arguments[@]}";;
     *)
       if $LOG_VERBOSE || $LOG_TRACE; then

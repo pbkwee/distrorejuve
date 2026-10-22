@@ -193,6 +193,8 @@ sudo env DR_MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --to-latest
 | `DR_SKIP_DOVECOT_MIGRATION_CHECK` | `false`; override the Dovecot 2.4 configuration guard after manual review. |
 | `DR_REMOVE_X11_PACKAGES` | `false`; enable X11 package removal during preflight, including `--check`. |
 | `DR_ENABLE_UBUNTU_CROSSGRADE` | `false`; permit the experimental Ubuntu crossgrade path. |
+| `DR_PANEL_UPGRADE` | Unset; select `plesk` or `cpanel` for a supported single-release vendor OS upgrade. |
+| `DR_PLESK_UPGRADE_TOOL` | Unset; absolute path of the reviewed Plesk executable for the selected transition. |
 | `DR_RPM_MIGRATION_TARGET` | Unset; required for end-of-life CentOS: `alma`, `rocky` or `centos-vault`. |
 | `DR_RPM_MIGRATION_SCRIPT` | Absolute path to the reviewed vendor script; required for an Alma/Rocky conversion. |
 | `DR_ALLOW_UNAUTHENTICATED_ARCHIVES` | `false`; explicit official APT archive exception. Never affects RPM signature checks. |
@@ -204,6 +206,9 @@ Boolean settings accept `true` or `false`. Unset or empty settings use their doc
 Use the `DR_` names; older environment names are not supported.
 See [environment settings](docs/environment-variables.md) for validation and migration script setup.
 Standard tool settings such as `UCF_FORCE_CONFFOLD`, `APT_CONFIG` and `NO_COLOR` retain their names.
+
+Hosting-panel servers use a separate vendor upgrade procedure.
+See [Plesk, cPanel and Virtualmin upgrades](docs/hosting-panels.md) for opt-in settings and supported paths.
 
 ## Reporting problems
 

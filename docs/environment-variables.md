@@ -25,3 +25,9 @@ and reviewed. Use the script for your source distribution and major release.
 The file and its parent directories must be owned by root and must not be writable
 by group or other users. Neither the file nor its parent directories can be symbolic
 links. Store the file under `/root`; distrorejuve checks these requirements before conversion.
+
+## Hosting-panel upgrades
+
+`DR_PANEL_UPGRADE` accepts `plesk` or `cpanel`. An unset or empty value does not enable panel automation.
+`DR_PLESK_UPGRADE_TOOL` must be an absolute path to the reviewed, executable vendor tool.
+See [hosting-panel upgrades](hosting-panels.md) for supported transitions, vendor checks and automatic reboots.

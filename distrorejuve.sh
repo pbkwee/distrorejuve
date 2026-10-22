@@ -30,6 +30,14 @@ function environment_validate_settings() {
     ''|alma|rocky|centos-vault) :;;
     *) echo 'dss:error: DR_RPM_MIGRATION_TARGET must be alma, rocky or centos-vault.' >&2; return 1;;
   esac
+  case "${DR_PANEL_UPGRADE:-}" in
+    ''|plesk|cpanel) :;;
+    *) echo 'dss:error: DR_PANEL_UPGRADE must be plesk or cpanel.' >&2; return 1;;
+  esac
+  case "${DR_PLESK_UPGRADE_TOOL:-}" in
+    ''|/*) :;;
+    *) echo 'dss:error: DR_PLESK_UPGRADE_TOOL must be an absolute path.' >&2; return 1;;
+  esac
   case "${DR_RPM_MIGRATION_SCRIPT:-}" in
     ''|/*) :;;
     *) echo 'dss:error: DR_RPM_MIGRATION_SCRIPT must be an absolute path.' >&2; return 1;;
@@ -110,6 +118,11 @@ Alma/Rocky conversion also requires DR_RPM_MIGRATION_SCRIPT pointing to a review
 CentOS Vault restores frozen historical packages only; it does not restore security support.
 
 Run with --dist-update to update packages on the current distro version (no distro version change).
+
+Hosting panels: DR_PANEL_UPGRADE=plesk|cpanel selects a supported one-release vendor upgrade.
+Plesk also requires DR_PLESK_UPGRADE_TOOL pointing to the reviewed vendor executable.
+Vendor tools control configuration and automatic reboots; generic upgrades are blocked on panel hosts.
+See docs/hosting-panels.md for prerequisites, supported paths and recovery.
 
 Run with --upgrade-report to collect a read-only handover for developer/application upgrade review.
 It does not test application compatibility.
@@ -812,17 +825,209 @@ function apt_sources_check_claude() {
   return 0
 }
 
+# Read panel metadata as data; standalone Webmin is not a hosting-panel installation.
+function upgrade_panel_output_installed() {
+  local root=${1:-} panel file version candidate
+  root=${root%/}
+  for panel in plesk cpanel virtualmin; do
+    file=''
+    case "$panel" in
+      plesk)
+        if [ -e "$root/etc/psa/psa.conf" ] || [ -e "$root/usr/local/psa/version" ] ||
+            [ -e "$root/opt/psa/version" ] || { [ -z "$root" ] && command -v plesk >/dev/null 2>&1; }; then
+          for candidate in /usr/local/psa/version /opt/psa/version; do
+            [ ! -r "$root$candidate" ] || { file="$root$candidate"; break; }
+          done
+        else continue; fi;;
+      cpanel)
+        if [ -e "$root/usr/local/cpanel/cpanel" ] || [ -e "$root/var/cpanel/cpanel.config" ] || [ -e "$root/usr/local/cpanel/version" ]; then
+          file="$root/usr/local/cpanel/version"
+        else continue; fi;;
+      virtualmin)
+        if [ -e "$root/etc/webmin/virtual-server/config" ] || [ -e "$root/usr/share/webmin/virtual-server/module.info" ] ||
+            { [ -z "$root" ] && command -v virtualmin >/dev/null 2>&1; }; then
+          file="$root/usr/share/webmin/virtual-server/module.info"
+        else continue; fi;;
+    esac
+    version=unknown
+    if [ -r "$file" ]; then
+      # Plesk: 18.0.74_debian12...; cPanel: 11.134.0.17; Virtualmin: version=8.0.0.
+      candidate=$(LC_ALL=C awk 'NR > 20 { exit } { sub(/^version=/, ""); if (match($0, /^[0-9]+([.][0-9]+)+/)) { print substr($0, RSTART, RLENGTH); exit } }' "$file") || return 1
+      [ -z "$candidate" ] || version=$candidate
+    fi
+    printf '%s\t%s\n' "$panel" "$version"
+  done
+}
+
+function upgrade_panel_refuse_generic() {
+  local panels
+  panels=$(upgrade_panel_output_installed) || return 1
+  [ -n "$panels" ] || return 0
+  echo 'dss:error: Hosting panel detected; generic package/configuration changes are disabled. Use the panel upgrade procedure; see --manifest and docs/hosting-panels.md.' >&2
+  upgrade_preflight_blocked=true
+  return 1
+}
+
+function upgrade_panel_check_tool() {
+  local tool=$1 path=$1 owner mode
+  case "$tool" in /*) :;; *) echo 'dss:error: Hosting-panel tool requires an absolute path.' >&2; return 1;; esac
+  if [ ! -f "$tool" ] || [ ! -x "$tool" ] || [ -L "$tool" ]; then
+    echo "dss:error: Hosting-panel tool must be an executable, regular, non-symlink file: $tool" >&2; return 1
+  fi
+  # An untrusted parent can replace a root-owned executable after this check.
+  while :; do
+    if [ -L "$path" ]; then echo 'dss:error: Hosting-panel tool directories must not be symlinks.' >&2; return 1; fi
+    owner=$(stat -c %u -- "$path") && mode=$(stat -c %a -- "$path") || return 1
+    case "$mode" in ''|*[!0-7]*) return 1;; esac
+    if [ "$owner" != 0 ] || [ "$((8#$mode & 022))" -ne 0 ]; then
+      echo 'dss:error: Hosting-panel tool and parent directories must be root-owned and not writable by group/others.' >&2; return 1
+    fi
+    [ "$path" != / ] || break
+    path=${path%/*}; [ -n "$path" ] || path=/
+  done
+}
+
+function upgrade_panel_run_tool() (
+  # The vendor owns conffile policy, prompts and recovery; do not impose our generic defaults.
+  unset UCF_FORCE_CONFFNEW UCF_FORCE_CONFFMISS UCF_FORCE_CONFFOLD DEBIAN_FRONTEND APT_LISTCHANGES_FRONTEND
+  "$@"
+)
+
+# Vendor tools own their reboots and resume services. Never resume generic APT work after handoff.
+function upgrade_panel_dispatch() {
+  local action=${DR_ACTION:-${1:-}} requested_version=${2:-} panels panel version current family target tool identity minimum banner status marker name
+  local -a start_arguments=()
+  upgrade_panel_handled=false
+  panels=$(upgrade_panel_output_installed) || return 1
+  if [ -z "$panels" ] && [ -z "${DR_PANEL_UPGRADE:-}" ]; then return 0; fi
+  upgrade_panel_handled=true
+  upgrade_preflight_blocked=true
+  if [ -z "$panels" ] || [[ "$panels" = *$'\n'* ]]; then
+    echo 'dss:error: Hosting-panel upgrade requires exactly one detected panel; review --manifest before continuing.' >&2; return 1
+  fi
+  IFS=$'\t' read -r panel version <<< "$panels"
+  echo "dss:stage: Detected hosting panel $panel ($version)" >&2
+  if [ "$panel" = virtualmin ]; then
+    echo 'dss:error: Virtualmin OS upgrades need a reviewed panel/configuration migration. Automatic Virtualmin upgrades are not implemented; use --manifest or --upgrade-report.' >&2; return 1
+  fi
+  if [ "${DR_PANEL_UPGRADE:-}" != "$panel" ]; then
+    echo "dss:error: Hosting panel $panel requires explicit DR_PANEL_UPGRADE=$panel and its supported vendor procedure. Generic upgrades were not started." >&2; return 1
+  fi
+  case "$action" in
+    --to-debian-release) [ "$#" -le 2 ] && [ -n "$requested_version" ] || return 1;;
+    --to-latest|--to-next-ubuntu) [ "$#" -le 1 ] || return 1;;
+    *) echo 'dss:error: DR_PANEL_UPGRADE applies to release-upgrade commands only. Use the panel tools for package updates, cleanup and configuration changes.' >&2; return 1;;
+  esac
+  if ${UPGRADE_CROSSGRADE:-false}; then echo 'dss:error: Hosting-panel crossgrades are not supported; no upgrade started.' >&2; return 1; fi
+  [ "$(id -u)" = 0 ] || { echo 'dss:error: Hosting-panel upgrades require root.' >&2; return 1; }
+  case "$panel" in
+    plesk)
+      tool=${DR_PLESK_UPGRADE_TOOL:-}
+      [ -n "$tool" ] || { echo 'dss:error: Set DR_PLESK_UPGRADE_TOOL to the downloaded and reviewed Plesk tool for this exact OS transition.' >&2; return 1; };;
+    cpanel) tool=/usr/local/cpanel/scripts/elevate-cpanel;;
+  esac
+  upgrade_panel_check_tool "$tool" || return 1
+  # Inspect pending vendor state before the OS identity: a previous run may already have changed it.
+  if [ "$panel" = plesk ]; then
+    for marker in /etc/systemd/system/plesk-dist-upgrade-resume.service /etc/systemd/system/plesk-dist-upgrader.service; do
+      if [ -e "$marker" ] || [ -L "$marker" ]; then
+        echo 'dss:error: Plesk upgrade recovery is pending. Inspect the vendor log and resume procedure; a new upgrade was not started.' >&2; return 1
+      fi
+    done
+    for name in debian11to12 debian12to13 ubuntu18to20 ubuntu20to22 ubuntu22to24 ubuntu24to26 "${tool##*/}"; do
+      for marker in "/usr/local/psa/var/$name/resume.json" "/usr/local/psa/var/$name/dist-upgrade-conversion.flag" "/usr/local/psa/var/$name/$name.lock"; do
+        if [ -e "$marker" ] || [ -L "$marker" ]; then
+          echo 'dss:error: Plesk upgrade recovery is pending. Inspect the vendor log and resume procedure; a new upgrade was not started.' >&2; return 1
+        fi
+      done
+    done
+  else
+    if [ -n "${ELEVATE_BASE_URL:-}" ]; then echo 'dss:error: Clear ELEVATE_BASE_URL before the supported cPanel upgrade; vendor download endpoints must not be overridden.' >&2; return 1; fi
+    if [ -e /var/cpanel/elevate-noc-recommendations ]; then
+      echo 'dss:error: cPanel provider instructions require manual review at /var/cpanel/elevate-noc-recommendations; use the vendor procedure directly.' >&2; return 1
+    fi
+    if [ -e /var/cpanel/elevate ]; then
+      banner=$(upgrade_panel_run_tool "$tool" --status) || { echo "dss:error: Cannot read cPanel upgrade state; inspect elevate-cpanel --status before retrying." >&2; return 1; }
+      if [ "$banner" != success ]; then
+        echo 'dss:error: cPanel ELevate has unfinished or unknown state. Inspect elevate-cpanel --status and --log; no automatic --clean or --continue was attempted.' >&2; return 1
+      fi
+    fi
+  fi
+  current=$(distro_output_codename) || return 1
+  family=debian
+  case " $ALL_UBUNTU " in *" $current "*) family=ubuntu;; esac
+  case "$action:$family" in
+    --to-debian-release:debian)
+      case "$requested_version" in 12) target=bookworm;; 13) target=trixie;; *) target=unsupported;; esac;;
+    --to-next-ubuntu:ubuntu) target=$(ubuntu_output_next_release "$current") || return 1;;
+    --to-latest:debian) target=trixie;;
+    --to-latest:ubuntu) target=$(ubuntu_output_latest_lts "$current") || return 1;;
+    *) echo 'dss:error: Requested hosting-panel action does not match the installed distribution.' >&2; return 1;;
+  esac
+  case "$panel:$family:$current:$target" in
+    plesk:debian:bullseye:bookworm) identity=Debian11to12; minimum=18.0.57;;
+    plesk:debian:bookworm:trixie) identity=Debian12to13; minimum=18.0.74;;
+    plesk:ubuntu:focal:jammy) identity=Ubuntu20to22; minimum=18.0.44;;
+    plesk:ubuntu:jammy:noble) identity=Ubuntu22to24; minimum=18.0.62;;
+    plesk:ubuntu:noble:resolute) identity=Ubuntu24to26; minimum=18.0.81;;
+    cpanel:ubuntu:focal:jammy) minimum=118;;
+    cpanel:ubuntu:jammy:noble) minimum=134;;
+    *) echo "dss:error: Hosting-panel path $panel $current -> $target is not supported here. Only one approved adjacent release transition can be checked per run; no upgrade started." >&2; return 1;;
+  esac
+  if [ "$(dpkg --print-architecture)" != amd64 ] || [ "$(uname -m)" != x86_64 ]; then
+    echo 'dss:error: Hosting-panel automation currently requires native amd64 on an x86_64 kernel; no upgrade started.' >&2; return 1
+  fi
+  case "$(readlink /proc/1/exe)" in */systemd) :;; *) echo 'dss:error: Hosting-panel tools require a running systemd host with reboot support.' >&2; return 1;; esac
+  if ! command -v systemd-detect-virt >/dev/null 2>&1; then echo 'dss:error: Cannot check container virtualization before the hosting-panel upgrade.' >&2; return 1; fi
+  systemd-detect-virt --container --quiet; status=$?
+  if [ "$status" -ne 1 ]; then echo 'dss:error: Hosting-panel container environment is unsupported or could not be checked; no upgrade started.' >&2; return 1; fi
+  if [ "$panel" = plesk ]; then
+    if [ "$version" = unknown ] || ! dpkg --compare-versions "$version" ge "$minimum"; then
+      echo "dss:error: Plesk $minimum or later is required for $current -> $target. Update Plesk on the current OS first." >&2; return 1
+    fi
+    banner=$(upgrade_panel_run_tool "$tool" --version) || { echo "dss:error: Cannot read the Plesk upgrade tool version; no upgrade started." >&2; return 1; }
+    case "$banner" in *"Plesk::${identity}Upgrader "*) :;; *) echo 'dss:error: Plesk tool identity does not match the requested OS transition.' >&2; return 1;; esac
+    banner=$(upgrade_panel_run_tool "$tool" --help) || { echo "dss:error: Cannot read hosting-panel tool capabilities; obtain the current vendor tool." >&2; return 1; }
+    case "$banner" in *--precheck*) :;; *) echo 'dss:error: Plesk tool has no supported --precheck; obtain the current vendor tool.' >&2; return 1;; esac
+  else
+    case "$version" in "11.$minimum."*|"$minimum."*) :;; *) echo "dss:error: This cPanel transition requires version $minimum with current updates; update the panel on its existing OS first." >&2; return 1;; esac
+    banner=$(upgrade_panel_run_tool "$tool" --help) || { echo "dss:error: Cannot read hosting-panel tool capabilities; obtain the current vendor tool." >&2; return 1; }
+    case "$banner" in *--non-interactive*) :;; *) echo 'dss:error: cPanel ELevate lacks --non-interactive; install the current vendor tool.' >&2; return 1;; esac
+  fi
+  check_disk_space || return 1
+  echo "dss:stage: Checking $panel vendor prerequisites for $current -> $target" >&2
+  if [ "$panel" = plesk ]; then
+    upgrade_panel_run_tool "$tool" --precheck; status=$?
+  else
+    echo 'dss:stage: cPanel prerequisite checks can refresh APT indexes, clear its cache and archive completed vendor state.' >&2
+    upgrade_panel_run_tool "$tool" --check; status=$?
+    start_arguments=(--start --non-interactive)
+  fi
+  if [ "$status" -ne 0 ]; then echo "dss:error: Hosting-panel vendor checks failed (status $status). Resolve the vendor diagnostics in the detailed log; no distro upgrade started." >&2; return 1; fi
+  record_config_state || return 1
+  if [ -z "${DR_RUN_DIRECTORY:-}" ] || [ ! -d "$DR_RUN_DIRECTORY" ] || [ -L "$DR_RUN_DIRECTORY" ]; then return 1; fi
+  (umask 077; printf '%s\t%s\t%s\n' "$panel" "$current" "$target" > "$DR_RUN_DIRECTORY/panel.handoff" && chmod 600 -- "$DR_RUN_DIRECTORY/panel.handoff") || return 1
+  upgrade_preflight_blocked=false
+  echo "dss:stage: Handing $current -> $target to $panel; the vendor tool controls configuration, recovery and automatic reboots." >&2
+  if [ "$panel" = plesk ]; then
+    printf 'dss:stage: Monitor from another session: %q --monitor\n' "$tool" >&2
+  else
+    printf 'dss:stage: Monitor from another session: %q --log (or --status)\n' "$tool" >&2
+  fi
+  echo 'dss:stage: Final completion remains unverified; use --verbose to show vendor output.' >&2
+  upgrade_panel_run_tool "$tool" "${start_arguments[@]}"
+  status=$?
+  if [ "$status" -ne 0 ]; then echo "dss:error: Hosting-panel vendor procedure returned status $status; inspect its recovery instructions before retrying." >&2; fi
+  return "$status"
+}
 # A vendor repository may follow different PHP or application upgrade rules.
 # Replacing its release name blindly can mix incompatible packages or bypass a hosting panel.
 # Check official suite consistency/base sources/backports and vendor upgrade blockers.
 function apt_sources_check_releases_and_vendors() {
   local target=${1:-${apt_sources_transition_target:-}} current family records file line provider type uri suite components architectures base
   local ret=0 official=0 seen=' ' support status
+  if [ -n "$target" ]; then upgrade_panel_refuse_generic || return 1; fi
   records=$(apt_sources_list) || return 1
-  if [ -n "$target" ] && { command -v plesk >/dev/null 2>&1 || [ -e /usr/local/cpanel/cpanel ]; }; then
-    echo "dss:error: Hosting panel detected; use its documented distro upgrade procedure." >&2
-    return 1
-  fi
   current=$(distro_output_codename) || current=
   family=debian
   case " $ALL_UBUNTU " in *" $current "*) [ -n "$current" ] && family=ubuntu;; esac
@@ -969,6 +1174,7 @@ function check_disk_space() {
 }
 
 function upgrade_precondition_checks() {
+  upgrade_panel_refuse_generic || return 1
   check_disk_space || return 1
   local ret=0
   # e.g. 3.12.1
@@ -2735,6 +2941,12 @@ function upgrade_outcome_output_php_removals() {
 # Called inside the logging action child, including from its EXIT trap.
 # Original action failures take precedence; unknown service status remains a visible warning.
 function upgrade_finish_run() {
+  if [ -n "${DR_RUN_DIRECTORY:-}" ] && [ -f "$DR_RUN_DIRECTORY/panel.handoff" ]; then
+    echo 'dss:stage: Outcome: release not verified; packages not verified; services unknown.' >&2
+    echo 'dss:stage: Vendor upgrade handoff; use the panel tool to monitor completion, recovery and reboots. Generic cleanup and completion checks were not run.' >&2
+    printf 'dss:stage: Detailed run log: %s\n' "$2" >&2
+    return "$1"
+  fi
   if [ -f /etc/redhat-release ]; then rpm_packages_finish_run "$@"; return $?; fi
   local action_status=$1 logfile=$2 baseline='' services=2 web_failed=false status category state detail reason audit='' plan=''
   local findings='' web_complete=false
@@ -3296,6 +3508,7 @@ function upgrade_check_crossgrade_package_blockers() {
 function upgrade_check_path() {
   # The logging callback distinguishes an explicit refusal from an unexpected failure.
   upgrade_preflight_blocked=false
+  upgrade_panel_refuse_generic || return 1
   if [ "${4:-requested}" = transition ]; then
     echo "dss:stage: Rechecking $2 -> $3 before this release transition" >&2
   elif [ "$2" = "$3" ]; then
@@ -7257,15 +7470,6 @@ function apt_get_upgrade() {
   return "$ret"
 }
 
-function plesk_upgrade() {
-  command -v plesk >/dev/null 2>&1 || return 0
-  plesk installer --select-release-current --reinstall-patch --upgrade-installed-components
-  local ret=$?
-  [ "$ret" -ne 0 ] && echo "dss:error:plesk upgrade failed." >&2
-  [ "$ret" -eq 0 ] && echo "dss:info:plesk upgrade completed." >&2
-  return $ret
-}
-
 function apt_get_dist_upgrade() {
   pause_check
   [ ! -f /etc/debian_version ] && return 0
@@ -8012,7 +8216,6 @@ function dist_upgrade_to_latest() {
   if ! apt_get_dist_upgrade; then echo "dss:error:dist_upgrade_to_latest:apt_get_dist_upgrade:failed" && return 1; fi
   if [ -n "$debian_target" ]; then debian_check_release_completion "$debian_target" || return 1; fi
   if [ -n "$ubuntu_target" ]; then upgrade_check_crossgrade_checkpoint ubuntu "$ubuntu_target" || return 1; fi
-  if ! plesk_upgrade; then echo "dss:error:dist_upgrade_to_latest:plesk_upgrade:failed" && return 1; fi
 }
 
 # Application/service manifest: bounded read-only collection.
@@ -8967,6 +9170,15 @@ function manifest_migration() {
 }
 
 # FORMAT is text or json; ROOT is used only by isolated fixtures, never a chroot or executable source.
+function manifest_hosting_panels() {
+  local panels panel version
+  panels=$(upgrade_panel_output_installed "$manifest_root") || return 1
+  while IFS=$'\t' read -r panel version; do
+    [ -n "$panel" ] || continue
+    manifest_emit hosting_panel name "$panel" version "$version"
+  done <<< "$panels"
+}
+
 function manifest_output() (
   local manifest_format="${1:-text}" manifest_dns_enabled="${2:-${DR_MANIFEST_DNS:-true}}" manifest_root="${3:-/}"
   local manifest_processes='' manifest_package_backend=unknown
@@ -8996,6 +9208,7 @@ function manifest_output() (
   [ "$manifest_format" != json ] || printf '{"schema_version":1,"records":['
   manifest_package_backend=$(packages_output_backend "$manifest_root") || manifest_package_backend=unknown
   manifest_emit system package_backend "$manifest_package_backend" hostname "$(hostname 2>/dev/null || printf unknown)" generated_utc "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" local_addresses "${manifest_local_addresses:-unknown}"
+  manifest_hosting_panels || manifest_collection_failed=true
   manifest_listeners
   manifest_processes=$(ps -eo comm= 2>/dev/null) || manifest_processes=
   manifest_packages
@@ -9307,6 +9520,7 @@ function support_print_report() {
         else if (/Checking package changes for PHP|Preparing Apache for PHP package changes|Updating installed PHP packages/) stage="php_migration"
         else if (/Checking unused packages/) stage="autoremove"
         else if (/Checking web services and PHP-FPM listeners/) stage="service_verification"
+        else if (/Detected hosting panel|Checking (plesk|cpanel) vendor prerequisites|Handing .* to (plesk|cpanel)/) stage="hosting_panel"
       }
       { line=tolower($0)
         if (line ~ /unmet dependencies|held broken packages/) errors["dependencies"]=1
@@ -9349,6 +9563,7 @@ function support_print_report() {
         if (line ~ /^dss:error: (nginx|fpm) configuration .* references missing unix socket /) {
           errors["web_socket_missing"]=1; stage="service_verification"
         }
+        if (line ~ /^dss:error.*(hosting.panel|plesk|cpanel|virtualmin)/) errors["hosting_panel"]=1
         if (line ~ /dpkg: error|dpkg returned an error/) errors["dpkg"]=1
       }
       END {
@@ -9518,6 +9733,8 @@ function logging_run() (
 		printf 'dss:stage Upgrade not started; resolve the preflight checks above and retry. Details: %s\n' "$logging_log" >&2
 	elif [ "$logging_status" -ne 0 ]; then
 		printf 'dss:error Action failed (status %s); details: %s\n' "$logging_status" "$logging_log" >&2
+	elif [ -f "$logging_dir/panel.handoff" ]; then
+		printf 'dss:stage Vendor upgrade handoff; final completion is not verified. Details: %s\n' "$logging_log" >&2
 	elif [ -f "$logging_dir/outcome.incomplete" ]; then
 		printf 'dss:warn Action finished with incomplete service verification; details: %s\n' "$logging_log" >&2
 	elif [ -f "$logging_dir/configuration-review.txt" ]; then
@@ -9549,6 +9766,11 @@ if [ "${DR_ACTION:-$1}" = --support-report ]; then
   return $?
 fi
 [ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json ] || [ "${DR_ACTION:-$1}" = --upgrade-report ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
+case "${DR_ACTION:-${1:-}}" in
+  --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages)
+    upgrade_panel_dispatch "$@" || return $?
+    if $upgrade_panel_handled; then return 0; fi;;
+esac
 if [ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json ] || [ "${DR_ACTION:-$1}" = --upgrade-report ]; then
   local dns=${DR_MANIFEST_DNS:-true}
   [ "$#" -le 1 ] || { print_usage; exit 1; }

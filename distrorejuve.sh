@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Boolean controls are later invoked as commands; restrict their values
+# to true/false so an environment setting cannot select another executable.
 # Validate operator settings before logging or system work.
 function environment_validate_settings() {
   local name value
@@ -65,6 +67,8 @@ if [ -z "${UCF_FORCE_CONFFOLD:-}" ]; then
   export UCF_FORCE_CONFFNEW="${UCF_FORCE_CONFFNEW:-1}"
   export UCF_FORCE_CONFFMISS="${UCF_FORCE_CONFFMISS:-1}"
 fi
+# These conffile options prefer packaged configuration over local edits
+# and restore missing conffiles, including intentional deletions. Review service customizations afterwards.
 APT_GET_INSTALL_OPTIONS=' -y -o DPkg::Lock::Timeout=-1 -o APT::Get::AllowUnauthenticated=false -o Acquire::Check-Valid-Until=false -o Dpkg::Options::=--force-confnew -o Dpkg::Options::=--force-confmiss '
 # export this variable, e.g. to DR_CONFIGURATION_HISTORY_DAYS=7 if your upgrade is taking more than a day, and you want the diffs in configs/processes to report the difference between the current and much earlier state.
 DR_CONFIGURATION_HISTORY_DAYS="${DR_CONFIGURATION_HISTORY_DAYS:-7}"
@@ -320,6 +324,8 @@ function apt_sources_files() {
   done
 }
 
+# deb822 groups sources into key/value stanzas instead of one-line entries.
+# A suite selects the release; components select archive sections such as main or contrib.
 # One parser owns both inventory and edits. No Python or modern APT is required.
 # Inventory: file<TAB>line<TAB>provider<TAB>type<TAB>URI<TAB>suite<TAB>components<TAB>architectures.
 # Examples: deb [arch=amd64 signed-by=/key.gpg] https://deb.debian.org/debian bookworm main
@@ -545,6 +551,8 @@ function apt_config_has_standard_paths() {
   '
 }
 
+# Check-Valid-Until=false relaxes metadata expiry, not signature verification.
+# An expired signing key is a separate trust failure; the archive exception requires explicit consent.
 # Expired archive signing keys need explicit consent; never extend it to live/vendor sources.
 function apt_configure_archive_authentication() {
   local requested=${DR_ALLOW_UNAUTHENTICATED_ARCHIVES:-false} previous=${apt_archive_authentication_enabled:-false}
@@ -690,6 +698,8 @@ function distro_output_codename() {
   return 1
 }
 
+# An alias such as stable changes meaning when Debian publishes a release.
+# Pin the installed codename before package work so refreshing indexes cannot select a release jump.
 function apt_sources_prepare() {
   local current family alias
   [ -f /etc/debian_version ] || return 0
@@ -802,6 +812,8 @@ function apt_sources_check_claude() {
   return 0
 }
 
+# A vendor repository may follow different PHP or application upgrade rules.
+# Replacing its release name blindly can mix incompatible packages or bypass a hosting panel.
 # Check official suite consistency/base sources/backports and vendor upgrade blockers.
 function apt_sources_check_releases_and_vendors() {
   local target=${1:-${apt_sources_transition_target:-}} current family records file line provider type uri suite components architectures base
@@ -1301,6 +1313,8 @@ function upgrade_output_incompatible_packages() {
 }
 
 # shellcheck shell=bash
+# A metapackage selects other packages through dependencies. Follow those
+# dependencies to find the target default PHP branch; the currently installed php CLI can differ.
 # Follow Debian's default PHP packages; package maintscripts own Apache module changes.
 function upgrade_php_output_default_branch() {
   local package dependencies branch
@@ -1608,6 +1622,8 @@ function upgrade_php_apache_legacy_control() {
   fi
 }
 
+# mod_php executes PHP inside Apache; FPM runs PHP in separate worker processes.
+# A systemd mask blocks starts, including package-triggered starts, while the Apache handler is absent.
 # Keep Apache unable to serve PHP source between removal and activation of its handler.
 # An owned persistent mask remains on failures and across reboot for a safe retry.
 function upgrade_php_apache_control() {
@@ -1739,6 +1755,9 @@ function upgrade_php_is_obsolete_extension_meta() {
   upgrade_cleanup_payload_is_documentation "$package" "$files"
 }
 
+# PHP extensions are tied to a runtime branch; installing a newer CLI alone
+# does not replace old FPM workers, Apache modules or their extensions. Preserve the role mapping
+# across retries so an interrupted migration cannot silently choose a different target.
 function upgrade_migrate_php_packages() {
 (
   local package_umask
@@ -2152,6 +2171,8 @@ function upgrade_php_runtime_snapshot() {
 )
 }
 
+# FastCGI connects a web server to PHP-FPM over a Unix socket or TCP.
+# A version change can change the socket path, leaving an active web server unable to run PHP.
 # Parse only include/listen/FastCGI directives; never run a server/configuration interpreter.
 # NGINX: fastcgi_pass unix:/run/php/site.sock; FPM: listen = /run/php/site.sock
 # Output: include|socket|tcp|unknown TAB value. Dynamic/unsupported syntax stays unknown.
@@ -2824,6 +2845,8 @@ function upgrade_finish_run() {
   return "$status"
 }
 
+# NSS (Name Service Switch) lets libc obtain account records from files,
+# systemd and other configured sources. Package scripts also depend on these lookups.
 # Old nss-systemd can recurse through a D-Bus daemon retained across release upgrades.
 # Keep dynamic identities available through the same-namespace direct lookup path.
 function upgrade_prepare_nss_lookup() {
@@ -2881,6 +2904,9 @@ function upgrade_prepare_nss_lookup() {
   return 0
 }
 
+# A crossgrade replaces 32-bit userspace packages with 64-bit equivalents.
+# A running x86_64 kernel is required, but does not prove that the shell or package tools are 64-bit.
+# Native means the dpkg default architecture; foreign means an additional package architecture.
 # Automatic crossgrade planning.
 # A completed crossgrade permits only amd64 and architecture-independent packages.
 # Keep the original conversion inventory until every recorded target has been verified.
@@ -3662,6 +3688,8 @@ return $ret
 }
 
   
+# Both package tools may be installed, for example to inspect another distro
+# image. Tool availability alone does not identify the database that describes this server.
 # Read-only package queries. Distro/database evidence takes precedence over utility availability.
 function packages_output_backend() {
   local root=${1:-} identity=''
@@ -3715,6 +3743,8 @@ function packages_output_file_owner() {
   case "$status" in *' ok installed') printf '%s\n' "$owner";; *) return 2;; esac
 }
 
+# Package ownership does not imply unchanged content. Compare stored digests
+# before suppressing packaged schedules; retain local edits and unverifiable files for migration review.
 # Only verified unchanged package content may be omitted; owner/mode are not compared.
 function packages_output_file_origin() {
   local file=$1 backend=$2 root=${3:-} path owner status records checksum='' actual tool metadata size
@@ -3764,6 +3794,8 @@ function packages_output_file_origin() {
   else printf 'modified_package\t%s\n' "$owner"; fi
 }
 
+# usrmerge makes /bin, /sbin and /lib aliases of their /usr counterparts.
+# Distinct files at both paths become a collision; deleting either copy can lose a local executable.
 # The packaged converter handles the actual merge; check known executable collisions first.
 function usrmerge_is_complete() {
   local name directory expected
@@ -3920,6 +3952,8 @@ function usrmerge_recover_pending() {
   esac
 }
 
+# A renamed NIC can leave a static eth0 configuration disconnected after reboot.
+# Preserve naming only when both the configured static eth0 and the live interface are present.
 function retain_etc_networking_naming_re_enX0() {
   # test we're a debian/ubuntu system currently using eth0
   [ ! -f /etc/network/interfaces ] && return 0
@@ -4059,6 +4093,8 @@ function apt_state_invalidate_packages() {
   apt_state_dist_upgraded=
 }
 
+# This signature is a change-detection fingerprint, not a trust check.
+# Reuse needs unchanged sources, indexes, tools and relevant package state, not just a matching release name.
 # Local checks are cheaper than APT resolution/network work. A failed probe disables reuse.
 function apt_state_output_signature() {
 (
@@ -4684,6 +4720,8 @@ function crossgrade_bookworm_check_package_tools() {
   apt-get --version >/dev/null
 }
 
+# Replacing dpkg, libc and shells can temporarily prevent normal APT operation.
+# Save the selected archives and hashes first so recovery can replay the same transaction without resolving it again.
 # Replay only the exact authenticated archive set; simulated removals are never executed.
 function crossgrade_bookworm_apply_archives() {
   local directory=$1 phase=$2 prepare=${3:-false} cache package version arch file hashes configuration status installed targets obsolete pending attempt previous success=false
@@ -6219,6 +6257,8 @@ function upgrade_remove_retired_packages() {
 )
 }
 
+# APT autoremove follows automatic-install marks; an obsolete package instead
+# lacks a counterpart in the target release. Treat these as separate cleanup decisions to protect services and local software.
 # Ordinary autoremove needs no original archive provenance; keep protected packages as solver roots.
 function upgrade_autoremove_packages() {
 (
@@ -6682,6 +6722,8 @@ function upgrade_prepare_php_source_retry() {
   upgrade_migrate_php_packages "$target"
 }
 
+# Complete each release hop before advancing sources again. A changed release
+# label alone is insufficient: base-files can update before the remaining packages finish configuring.
 function dist_upgrade_x_to_y() {
 pause_check
 [ ! -f /etc/debian_version ] && return 0
@@ -6965,6 +7007,8 @@ function print_config_state_changes() {
   return "$availability_ret"
 }
 
+# Share the first baseline in the history window across release hops and retries.
+# Replacing the baseline at each hop would hide changes made earlier in the upgrade. This report is not a full backup.
 # Keep purge reminders attached to the same oldest recent baseline used for configuration diffs.
 function config_state_output_baseline() {
   local file baseline='' days=${DR_CONFIGURATION_HISTORY_DAYS:-7}
@@ -7691,6 +7735,8 @@ function rpm_sources_prepare() {
   printf 'dss:stage: CentOS sources now use the frozen archive; originals: %s/repository-original\n' "$directory" >&2
 }
 
+# EL means Enterprise Linux. A same-major conversion changes the distro
+# within an EL release; EL7-to-EL8 is a separate major upgrade. Swapping repository URLs is not a complete conversion.
 function rpm_migration_check_choice() {
   local id=$1 version=$2 variant=$3 target=${DR_RPM_MIGRATION_TARGET:-} script=${DR_RPM_MIGRATION_SCRIPT:-} owner mode parent
   [ "$id" = centos ] || return 0
@@ -7728,6 +7774,8 @@ function rpm_migration_check_choice() {
   bash -n "$script" || return 1
 }
 
+# A failed vendor conversion may already have changed release packages and keys.
+# Keep the pending marker until the requested identity is verified; retrying ordinary updates could mix distributions.
 function rpm_migration_run() {
   local target=$1 directory=$2 before_major=$3 before_variant=$4 expected records id version variant
   local marker=/root/distrorejuveinfo/rpm-migration.pending
@@ -7756,6 +7804,8 @@ function rpm_packages_output_manager() {
   else echo 'dss:error: Neither dnf nor yum is installed. Restore the native package manager from verified distribution media.' >&2; return 1; fi
 }
 
+# Package managers can skip an unavailable repository and still report success.
+# Require enabled repositories to respond, with TLS and package signatures checked, so a partial refresh cannot look complete.
 function rpm_packages_run() {
   local manager=$1
   local LC_ALL=C
@@ -7832,6 +7882,8 @@ function rpm_packages_upgrade() {
   return 0
 }
 
+# Replacing files on disk does not replace code already loaded by a process.
+# RPM transaction success alone cannot establish that PHP-FPM, Apache or another runtime is using the updated libraries.
 function rpm_packages_finish_run() {
   local status=$1 logfile=$2 directory=${DR_RUN_DIRECTORY:-}
   if [ -n "$directory" ]; then
@@ -8029,6 +8081,8 @@ function manifest_emit() {
   fi
 }
 
+# A listening socket proves a local bind, not public reachability. Firewalls,
+# NAT and proxies can change which service an external visitor reaches.
 function manifest_listeners() {
   local raw parsed source protocol address port program scope application
   if command -v ss >/dev/null 2>&1 && raw=$(ss -lntp 2>/dev/null); then
@@ -8230,6 +8284,8 @@ function manifest_read_metadata() {
   head -c 1048576 -- "$1" 2>/dev/null
 }
 
+# These conventional paths give migration hints, not complete server configuration.
+# Custom include trees or startup flags can select other files; missing findings do not prove a service is absent.
 function manifest_config_files() {
   local kind="$1" file count=0
   local -a files=()
@@ -8453,6 +8509,8 @@ function manifest_dns() {
   manifest_dns_addresses="$addresses"; manifest_dns_result="$result"; manifest_dns_reason="$reason"
 }
 
+# Read version declarations as text. Executing an application file to obtain
+# its version could run customer code, load secrets or change the application during inventory collection.
 function manifest_application() {
   local version_pattern='^[0-9][A-Za-z0-9.+_()\ -]{0,100}$'
   local document_root="$1" file='' application=unknown version=unknown language=unknown language_version=unknown version_source=unknown modified=unknown
@@ -8501,6 +8559,8 @@ function manifest_application() {
   manifest_emit application document_root "$document_root" application "$application" version "$version" language "$language" language_version "$language_version" language_version_source "$version_source" version_file_modified "$modified" date_basis filesystem_metadata_not_install_date
 }
 
+# Infer the website runtime from its handler, FPM pool or Apache module.
+# The shell default php binary can serve a different purpose or version. Configured URLs still need application checks.
 function manifest_website() {
   local name_port_pattern='^([^:]+|\[[^]]+\]):([0-9]+)$'
   local server="$1" names="$2" port="$3" tls="$4" document_root="$5" user="$6" runtime="$7" config="$8"
@@ -8703,6 +8763,8 @@ function manifest_mail_path_is_narrow() {
   esac
 }
 
+# Mail stores can contain millions of files. Bound scans by time and path
+# instead of recursively measuring arbitrary configured directories; unknown size does not mean an empty mailbox.
 function manifest_mail_root() {
   local path="$1" source="$2" size=unknown count=unknown reason=not_scanned count_reason=ambiguous_layout actual output inode resolved
   case "$path" in /*) ;; *) return ;; esac
@@ -9119,6 +9181,8 @@ function upgrade_print_report() {
 
 # End application/service manifest.
 
+# Build the public report from a small field allowlist. Trying to redact
+# arbitrary logs is unreliable because commands and configuration can contain credentials or customer data.
 # Public reports select fixed fields; raw logs/configuration are never copied or redacted.
 function support_print_report() {
 (
@@ -9320,6 +9384,8 @@ function support_print_report() {
 )
 }
 
+# The action, tee and console filter each have their own pipeline status.
+# Preserve action failures even when logging succeeds, and detect a broken log rather than silently losing recovery evidence.
 # Detailed logging and console progress.
 # Only mutating actions use this wrapper; read-only reports retain normal stdout.
 # LOG_VERBOSE and LOG_TRACE are validated booleans set by the main option parser.

@@ -121,6 +121,7 @@ Run with --dist-update to update packages on the current distro version (no dist
 
 Hosting panels: DR_PANEL_UPGRADE=plesk|cpanel selects a supported one-release vendor upgrade.
 Plesk also requires DR_PLESK_UPGRADE_TOOL pointing to the reviewed vendor executable.
+Download instructions: https://support.plesk.com/hc/en-us/articles/12377714344983-How-to-perform-dist-upgrade-procedure-on-Linux-server-with-Plesk
 Vendor tools control configuration and automatic reboots; generic upgrades are blocked on panel hosts.
 See docs/hosting-panels.md for prerequisites, supported paths and recovery.
 
@@ -829,7 +830,7 @@ function apt_sources_check_claude() {
 function upgrade_panel_output_installed() {
   local root=${1:-} panel file version candidate
   root=${root%/}
-  for panel in plesk cpanel virtualmin; do
+  for panel in plesk cpanel virtualmin directadmin ispconfig hestiacp vestacp cyberpanel cwp aapanel cloudpanel keyhelp interworx; do
     file=''
     case "$panel" in
       plesk)
@@ -848,6 +849,17 @@ function upgrade_panel_output_installed() {
             { [ -z "$root" ] && command -v virtualmin >/dev/null 2>&1; }; then
           file="$root/usr/share/webmin/virtual-server/module.info"
         else continue; fi;;
+      # Marker files only: panel configuration and databases can contain credentials.
+      directadmin) [ -f "$root/usr/local/directadmin/conf/directadmin.conf" ] || continue;;
+      ispconfig) [ -f "$root/usr/local/ispconfig/server/lib/config.inc.php" ] || continue;;
+      hestiacp) [ -f "$root/usr/local/hestia/conf/hestia.conf" ] || [ -f "$root/etc/hestiacp/hestia.conf" ] || continue;;
+      vestacp) [ -f "$root/usr/local/vesta/conf/vesta.conf" ] || continue;;
+      cyberpanel) [ -f "$root/usr/local/CyberCP/version.txt" ] || continue;;
+      cwp) [ -f "$root/usr/local/cwpsrv/htdocs/resources/admin/include/cron.php" ] || continue;;
+      aapanel) [ -f "$root/www/server/panel/data/default.db" ] || continue;;
+      cloudpanel) [ -f "$root/home/clp/htdocs/app/data/db.sq3" ] || continue;;
+      keyhelp) [ -f "$root/etc/keyhelp/config/config.json" ] || continue;;
+      interworx) [ -f "$root/home/interworx/iworx.ini" ] || continue;;
     esac
     version=unknown
     if [ -r "$file" ]; then
@@ -859,11 +871,35 @@ function upgrade_panel_output_installed() {
   done
 }
 
+function upgrade_panel_output_procedure_url() {
+  case "$1" in
+    plesk) printf '%s\n' 'https://support.plesk.com/hc/en-us/articles/12377714344983-How-to-perform-dist-upgrade-procedure-on-Linux-server-with-Plesk';;
+    cpanel) printf '%s\n' 'https://cpanel.github.io/elevate/getting-started/';;
+    virtualmin) printf '%s\n' 'https://www.virtualmin.com/docs/faq/#system-upgrade';;
+    directadmin) printf '%s\n' 'https://docs.directadmin.com/directadmin/backup-restore-migration/full-da-migration.html';;
+    ispconfig) printf '%s\n' 'https://www.ispconfig.org/documentation/';;
+    hestiacp) printf '%s\n' 'https://hestiacp.com/docs/server-administration/os-upgrades';;
+    vestacp) printf '%s\n' 'https://vestacp.com/docs/how-to-migrate-user-to-the-new-server';;
+    cyberpanel) printf '%s\n' 'https://cyberpanel.net/KnowledgeBase/home/3-remote-transfer/';;
+    cwp) printf '%s\n' 'https://docs.control-webpanel.com/docs/admin-guide/user-accounts/cwp-to-cwp-migration';;
+    aapanel) printf '%s\n' 'https://www.aapanel.com/docs/Function/Settings.html';;
+    cloudpanel) printf '%s\n' 'https://www.cloudpanel.io/docs/v2/guides/best-practices/migration/php-site/';;
+    keyhelp) printf '%s\n' 'https://www.keyweb.de/en/keyhelp/support/operating-system-upgrades';;
+    interworx) printf '%s\n' 'https://appendix.interworx.com/current/nodeworx/account_management/siteworx/imports/import-interworx-hosting-accounts.html';;
+    *) return 1;;
+  esac
+}
+
 function upgrade_panel_refuse_generic() {
-  local panels
+  local panels panel version url
   panels=$(upgrade_panel_output_installed) || return 1
   [ -n "$panels" ] || return 0
   echo 'dss:error: Hosting panel detected; generic package/configuration changes are disabled. Use the panel upgrade procedure; see --manifest and docs/hosting-panels.md.' >&2
+  while IFS=$'\t' read -r panel version; do
+    if url=$(upgrade_panel_output_procedure_url "$panel"); then
+      printf 'dss:info: %s upgrade or migration guidance: %s\n' "$panel" "$url" >&2
+    fi
+  done <<< "$panels"
   upgrade_preflight_blocked=true
   return 1
 }
@@ -907,9 +943,11 @@ function upgrade_panel_dispatch() {
   fi
   IFS=$'\t' read -r panel version <<< "$panels"
   echo "dss:stage: Detected hosting panel $panel ($version)" >&2
-  if [ "$panel" = virtualmin ]; then
-    echo 'dss:error: Virtualmin OS upgrades need a reviewed panel/configuration migration. Automatic Virtualmin upgrades are not implemented; use --manifest or --upgrade-report.' >&2; return 1
-  fi
+  case "$panel" in
+    plesk|cpanel) :;;
+    *) printf 'dss:error: Hosting panel %s: no automated distrorejuve upgrade is available. Follow the vendor upgrade or migration process: %s\n' "$panel" "$(upgrade_panel_output_procedure_url "$panel")" >&2
+      return 1;;
+  esac
   if [ "${DR_PANEL_UPGRADE:-}" != "$panel" ]; then
     echo "dss:error: Hosting panel $panel requires explicit DR_PANEL_UPGRADE=$panel and its supported vendor procedure. Generic upgrades were not started." >&2; return 1
   fi
@@ -923,7 +961,11 @@ function upgrade_panel_dispatch() {
   case "$panel" in
     plesk)
       tool=${DR_PLESK_UPGRADE_TOOL:-}
-      [ -n "$tool" ] || { echo 'dss:error: Set DR_PLESK_UPGRADE_TOOL to the downloaded and reviewed Plesk tool for this exact OS transition.' >&2; return 1; };;
+      [ -n "$tool" ] || {
+        echo 'dss:error: Set DR_PLESK_UPGRADE_TOOL to the downloaded and reviewed Plesk tool for this exact OS transition.' >&2
+        echo 'dss:info: Download instructions: https://support.plesk.com/hc/en-us/articles/12377714344983-How-to-perform-dist-upgrade-procedure-on-Linux-server-with-Plesk' >&2
+        return 1
+      };;
     cpanel) tool=/usr/local/cpanel/scripts/elevate-cpanel;;
   esac
   upgrade_panel_check_tool "$tool" || return 1
@@ -3957,10 +3999,10 @@ function packages_output_file_owner() {
 }
 
 # Package ownership does not imply unchanged content. Compare stored digests
-# before suppressing packaged schedules; retain local edits and unverifiable files for migration review.
+# before suppressing packaged migration paths; retain local edits and unverifiable files for review.
 # Only verified unchanged package content may be omitted; owner/mode are not compared.
 function packages_output_file_origin() {
-  local file=$1 backend=$2 root=${3:-} path owner status records checksum='' actual tool metadata size
+  local file=$1 backend=$2 root=${3:-} path owner status records checksum='' actual tool metadata size alias
   path=${file#"$root"}
   case "$path" in /*) :;; *) printf 'unknown\tunknown\n'; return 1;; esac
   case "$path" in *$'\n'*|*$'\r'*|*$'\t'*) printf 'unknown\tunknown\n'; return 1;; esac
@@ -3971,6 +4013,14 @@ function packages_output_file_origin() {
   if owner=$(packages_output_file_owner "$path" "$backend"); then :
   else
     status=$?
+    # Before Debian moved unit files to /usr, dpkg recorded /lib even on merged-/usr systems.
+    if [ "$status" -eq 1 ] && [ "$backend" = dpkg ] && [ "${path%/*}" = /usr/lib/systemd/system ]; then
+      alias="$root/lib/systemd/system/${path##*/}"
+      if [ -f "$alias" ] && [ "$(readlink -f -- "$alias" 2>/dev/null)" = "$(readlink -f -- "$file" 2>/dev/null)" ]; then
+        packages_output_file_origin "$alias" "$backend" "$root"
+        return
+      fi
+    fi
     if [ "$status" -eq 1 ]; then printf 'unowned\tunknown\n'; return 0; fi
     if [ "$backend" = rpm ]; then
       records=$(LC_ALL=C rpm -qf --queryformat '%{NAME}\n' -- "$path" 2>/dev/null)
@@ -9061,10 +9111,35 @@ function manifest_mail() {
 }
 
 # Passive migration hints: paths and fixed identity fields, never configured commands or secrets.
+function manifest_migration_systemd_target() {
+  local file=$1 target name=${1##*/}
+  target=$(readlink -- "$file" 2>/dev/null) || return 1
+  case "$target" in /*) target="$manifest_root$target";; *) target="${file%/*}/$target";; esac
+  target=$(readlink -f -- "$target" 2>/dev/null) || return 1
+  # Resolve within the inventory root; masks, broken links and custom targets remain visible.
+  case "${target%/*}" in "$manifest_root/lib/systemd/system"|"$manifest_root/usr/lib/systemd/system") ;; *) return 1;; esac
+  [ -f "$target" ] && [ ! -L "$target" ] || return 1
+  if [ "$name" != "${target##*/}" ]; then
+    # A different name is routine only when the vendor unit declares that alias.
+    (set -o pipefail; manifest_read_metadata "$target" | MANIFEST_UNIT_ALIAS="$name" awk '
+      /^[ \t]*\[/ { install=($0 ~ /^[ \t]*\[Install\][ \t]*$/) }
+      install && /^[ \t]*Alias[ \t]*=/ {
+        sub(/^[^=]*=[ \t]*/, "")
+        if (NF == 0) found=0
+        for (i=1; i<=NF; i++) if ($i == ENVIRON["MANIFEST_UNIT_ALIAS"]) found=1
+      }
+      END { exit !found }') || return 1
+  fi
+  printf '%s\n' "$target"
+}
+
 function manifest_migration_path() {
-  local kind=$1 file=$2 source=$3 records ownership=not_checked package=unknown
-  if [ "$kind" = scheduled_task ]; then
-    if records=$(packages_output_file_origin "$file" "$manifest_package_backend" "$manifest_root"); then
+  local kind=$1 file=$2 source=$3 records ownership=not_checked package=unknown checked_file=$2
+  if [ "$kind" = scheduled_task ] || [ "$kind" = custom_service ]; then
+    case "$source" in */systemd/system)
+      if [ -L "$file" ]; then checked_file=$(manifest_migration_systemd_target "$file") || checked_file=$file; fi;;
+    esac
+    if records=$(packages_output_file_origin "$checked_file" "$manifest_package_backend" "$manifest_root"); then
       IFS=$'\t' read -r ownership package <<< "$records"
       if [ "$ownership" = packaged ]; then
         # chmod -x is a common way to disable a packaged run-parts job; keep that migration hint.
@@ -9077,7 +9152,7 @@ function manifest_migration_path() {
       fi
     else
       ownership=unknown; package=unknown
-      manifest_emit warning area migration_paths path "${file#"$manifest_root"}" reason 'Package ownership could not be checked; retaining this scheduled-task path for review.'
+      manifest_emit warning area migration_paths path "${file#"$manifest_root"}" reason 'Package ownership could not be checked; retaining this path for review.'
       manifest_collection_failed=true
     fi
   fi
@@ -9166,7 +9241,7 @@ function manifest_migration() {
   manifest_migration_paths
   manifest_migration_identities
   manifest_migration_mounts
-  manifest_emit warning area migration_review reason 'Conventional paths only, depth 2 and at most 200 files per directory; scans stop after 5 seconds. Local account selection includes root and conventional application homes. LDAP/NSS users, commands, schedules, service enablement and mount availability are not evaluated. File metadata is capped at 1 MiB; paths may include package-managed files. Names containing control characters and their subdirectories are omitted. Scheduled-task files with matching package content are omitted, except nonexecutable periodic jobs. Other permission/owner changes are not checked; modified, unowned and unverified paths need review.'
+  manifest_emit warning area migration_review reason 'Conventional paths only, depth 2 and at most 200 files per directory; scans stop after 5 seconds. Local account selection includes root and conventional application homes. LDAP/NSS users, commands, schedules, service enablement and mount availability are not evaluated. File metadata is capped at 1 MiB; paths may include package-managed files. Names containing control characters and their subdirectories are omitted. Service and scheduled-task files with matching package content, including routine links to vendor units, are omitted, except nonexecutable periodic jobs. Other permission/owner changes are not checked; modified, unowned and unverified paths need review, including stopped or disabled services.'
 }
 
 # FORMAT is text or json; ROOT is used only by isolated fixtures, never a chroot or executable source.

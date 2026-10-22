@@ -146,11 +146,13 @@ ownership and configuration; they do not establish which code a live process has
 
 Migration hints include local program and service paths, cron files and custom timer
 paths, selected local user IDs/groups/homes/shells, and configured mount targets and
-filesystem types. Cron and timer files whose contents match their installed package
-are omitted; customer edits, unowned files and unknown ownership remain visible.
+filesystem types. Service, cron and timer files whose contents match their installed
+package are omitted, including routine systemd links to unchanged vendor units.
+Customer edits, unowned files and unknown ownership remain visible, including stopped
+or disabled services that may need migration.
 Nonexecutable periodic cron jobs also remain visible because removing execute
 permission can disable a package job. Other permission/owner changes are not checked.
-Unverifiable files, including symlinks and files over 1 MiB, remain for manual review.
+Unverifiable files, other symlinks and files over 1 MiB remain for manual review.
 
 Collection reads conventional paths to depth 2, examines at most 200 file paths per
 directory and limits each filesystem scan to five seconds. File metadata is capped
@@ -194,7 +196,7 @@ sudo env DR_MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --to-latest
 | `DR_REMOVE_X11_PACKAGES` | `false`; enable X11 package removal during preflight, including `--check`. |
 | `DR_ENABLE_UBUNTU_CROSSGRADE` | `false`; permit the experimental Ubuntu crossgrade path. |
 | `DR_PANEL_UPGRADE` | Unset; select `plesk` or `cpanel` for a supported single-release vendor OS upgrade. |
-| `DR_PLESK_UPGRADE_TOOL` | Unset; absolute path of the reviewed Plesk executable for the selected transition. |
+| `DR_PLESK_UPGRADE_TOOL` | Unset; absolute path of the reviewed Plesk executable for the selected transition. See [download instructions](docs/hosting-panels.md#prepare-the-vendor-tool). |
 | `DR_RPM_MIGRATION_TARGET` | Unset; required for end-of-life CentOS: `alma`, `rocky` or `centos-vault`. |
 | `DR_RPM_MIGRATION_SCRIPT` | Absolute path to the reviewed vendor script; required for an Alma/Rocky conversion. |
 | `DR_ALLOW_UNAUTHENTICATED_ARCHIVES` | `false`; explicit official APT archive exception. Never affects RPM signature checks. |
@@ -208,7 +210,8 @@ See [environment settings](docs/environment-variables.md) for validation and mig
 Standard tool settings such as `UCF_FORCE_CONFFOLD`, `APT_CONFIG` and `NO_COLOR` retain their names.
 
 Hosting-panel servers use a separate vendor upgrade procedure.
-See [Plesk, cPanel and Virtualmin upgrades](docs/hosting-panels.md) for opt-in settings and supported paths.
+See [hosting-panel upgrades](docs/hosting-panels.md) for supported Plesk/cPanel paths and
+manual upgrade or migration guidance for other detected panels.
 
 ## Reporting problems
 

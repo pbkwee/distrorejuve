@@ -29,5 +29,6 @@ links. Store the file under `/root`; distrorejuve checks these requirements befo
 ## Hosting-panel upgrades
 
 `DR_PANEL_UPGRADE` accepts `plesk` or `cpanel`. An unset or empty value does not enable panel automation.
+Other detected hosting panels stop with their vendor upgrade or migration URL; this setting does not bypass that stop.
 `DR_PLESK_UPGRADE_TOOL` must be an absolute path to the reviewed, executable vendor tool.
 See [hosting-panel upgrades](hosting-panels.md) for supported transitions, vendor checks and automatic reboots.

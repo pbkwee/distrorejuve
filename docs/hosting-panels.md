@@ -1,15 +1,48 @@
 # Hosting-panel upgrades
 
-Plesk, cPanel and Virtualmin manage hosting configuration and packages.
+Hosting panels manage configuration and packages that a generic upgrade can replace.
 Distrorejuve detects these panels before generic package, repository, cleanup or crossgrade work.
 Standalone Webmin does not select this restriction.
 Use `--manifest`, `--upgrade-report` and `--show-changes` to collect and review information.
 The manifest includes the detected panel and version. An unreadable version is reported as unknown.
 
 Set `DR_PANEL_UPGRADE=plesk` or `DR_PANEL_UPGRADE=cpanel` to select a supported vendor OS upgrade.
-The setting is not a bypass for failed checks. Automatic Virtualmin upgrades are not implemented.
+The setting is not a bypass for failed checks. Other panels stop with vendor guidance; no automated path is provided.
 Generic `--upgrade`, `--dist-update`, cleanup and crossgrade commands remain blocked on panel hosts.
 Use the panel's own tools for those package updates.
+
+## Panels that require a manual procedure
+
+These panels are detected from conventional installation files. Distrorejuve stops before
+generic package, repository, cleanup or crossgrade changes and prints the vendor URL.
+Read-only manifests and review reports remain available. No additional `DR_PANEL_UPGRADE`
+values or bypass options are provided.
+
+| Panel | Vendor OS upgrade or migration guidance |
+| --- | --- |
+| Virtualmin | [System upgrades](https://www.virtualmin.com/docs/faq/#system-upgrade) |
+| DirectAdmin | [Full server migration](https://docs.directadmin.com/directadmin/backup-restore-migration/full-da-migration.html) |
+| ISPConfig | [Documentation: distribution upgrades](https://www.ispconfig.org/documentation/) |
+| HestiaCP | [Operating system upgrades](https://hestiacp.com/docs/server-administration/os-upgrades) |
+| VestaCP | [Backup and restore to a new server](https://vestacp.com/docs/how-to-migrate-user-to-the-new-server) |
+| CyberPanel | [Remote transfer](https://cyberpanel.net/KnowledgeBase/home/3-remote-transfer/) |
+| Control Web Panel (CWP) | [CWP-to-CWP migration](https://docs.control-webpanel.com/docs/admin-guide/user-accounts/cwp-to-cwp-migration) |
+| aaPanel | [Settings: Backup Restore and Migrate](https://www.aapanel.com/docs/Function/Settings.html) |
+| CloudPanel | [Site migration: PHP example](https://www.cloudpanel.io/docs/v2/guides/best-practices/migration/php-site/) |
+| KeyHelp | [OS upgrade tutorials](https://www.keyweb.de/en/keyhelp/support/operating-system-upgrades) |
+| InterWorx | [Import hosting accounts](https://appendix.interworx.com/current/nodeworx/account_management/siteworx/imports/import-interworx-hosting-accounts.html) |
+
+A panel update and a major OS upgrade are different operations. HestiaCP and KeyHelp
+provide OS-specific procedures; ISPConfig documents particular distribution upgrades.
+The migration links describe moving to a prepared destination; they do not establish
+support for a generic in-place OS upgrade. Select guidance for the actual panel and OS versions.
+
+The additional panels are reported with version `unknown`; their executables and configuration
+are not run or sourced. Custom installation paths can be missed, and files left by an old
+installation can trigger a stop. The aaPanel marker also covers BT/BaoTa installations;
+use the actual vendor's instructions when that applies. Distrorejuve's automatic configuration
+and PHP changes require vendor review for these panels. Follow the panel's normal update
+process for routine package maintenance.
 
 ## Supported transitions
 
@@ -48,7 +81,8 @@ Plesk's documented resource requirements include 5 GB free space and 2 GB RAM.
 A passing minimum-version or disk check does not establish that every vendor prerequisite is met.
 The vendor checks do not prove application compatibility.
 
-For Plesk, download and review the executable linked in the vendor procedure for the exact transition.
+For Plesk, download and review the executable linked in [Plesk's vendor procedure](https://support.plesk.com/hc/en-us/articles/12377714344983-How-to-perform-dist-upgrade-procedure-on-Linux-server-with-Plesk)
+for the exact source and target OS versions. That page provides the download and extraction commands.
 Keep it under a root-owned directory such as `/root/panel-upgrade`.
 Set `DR_PLESK_UPGRADE_TOOL` to its absolute path.
 The executable and all parent directories must be root-owned and not writable by group or other users.

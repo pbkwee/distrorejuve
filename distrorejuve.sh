@@ -8362,6 +8362,7 @@ function manifest_listeners() {
   # ss: LISTEN 0 128 127.0.0.1:25 *:* users:(("master",pid=12,fd=3))
   # Older ss -lntp omits State: header "Recv-Q Send-Q ...", then "0 128 127.0.0.1:25 *:* ...".
   # netstat: tcp 0 0 0.0.0.0:80 0.0.0.0:* LISTEN 12/apache2
+  # These yield address=127.0.0.1, port=25, program=master (ss), or 0.0.0.0/80/apache2 (netstat).
   if ! parsed=$(printf '%s\n' "$raw" | awk -v source="$source" '
     source == "ss" && $1 == "Recv-Q" && $2 == "Send-Q" { implicit_listen=1; next }
     source == "ss" && $1 == "State" { implicit_listen=0; next }
@@ -8415,6 +8416,7 @@ function manifest_listeners() {
       *) protocol=tcp ;;
     esac
     manifest_emit listener service "$protocol" address "$address" port "$port" program "$program" application "$application" binding "$scope" reachability unknown
+    # program=.example -> dot_prefixed_listener; program=nginx -> no name-based indicator.
     case "$program" in .*)
       manifest_emit security_indicator indicator dot_prefixed_listener program "$program" address "$address" port "$port" assessment requires_review reason 'Dot-prefixed listening process name; inspect its owner and executable. A name alone does not establish compromise.';;
     esac
@@ -8423,10 +8425,11 @@ function manifest_listeners() {
 
 # Inspect arguments as data only; emit fixed indicators and numeric references, never raw commands.
 # Explicit C whitespace and escaped regex slashes also work with pre-POSIX-class AWK.
+# Detection examples are invented. USER, HIDDEN, URL, ENCODED and TOKEN are placeholders.
 function manifest_process_indicators() {
   local records indicator count pid ppid uid reason
   # ps -eww -o pid=,ppid=,uid=,vsz=,args=, for example:
-  # 101 50 1001 9000 sh -c echo 'app ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+  # 101 50 1001 9000 tee -a /etc/sudoers -> sudoers_write_command.
   # 102 50 1001 4000 [kworker/0:0] 47128 -> userspace_kernel_name, not a kernel thread.
   if ! records=$(set -o pipefail; LC_ALL=C manifest_run_bounded 5 ps -eww -o pid=,ppid=,uid=,vsz=,args= 2>/dev/null | LC_ALL=C awk '
     function record(indicator, key) {
@@ -8441,24 +8444,31 @@ function manifest_process_indicators() {
     $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || NF < 5 { bad=1; next }
     {
       args=$0; sub(/^[ \t\r\013\014]*[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+/, "", args)
+      # printf RULE >> /etc/sudoers or tee -a /etc/sudoers -> sudoers_write_command.
+      # cat /etc/sudoers > /tmp/example.txt -> no write indicator.
       if (args ~ />[ \t\r\013\014]*[\047\042]?\/etc\/sudoers([.]d\/|[ \t\r\013\014\047\042;|&]|$)/ ||
           args ~ /(^|[ \t\r\013\014\/])tee([ \t\r\013\014]+-[a-zA-Z]+)*[ \t\r\013\014]+[\047\042]?\/etc\/sudoers([.]d\/|[ \t\r\013\014\047\042;|&]|$)/) record("sudoers_write_command")
+      # printf ENCODED | base64 -d | sh -> encoded_shell_pipeline; base64 -d /tmp/example.txt alone does not match.
       if (args ~ /(^|[ \t\r\013\014\/])base64([ \t\r\013\014]|$)/ &&
           args ~ /(^|[ \t\r\013\014])(-d|--decode)([ \t\r\013\014]|$)/ &&
           args ~ /\|[ \t\r\013\014]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([ \t\r\013\014\047\042;|&]|$)/) record("encoded_shell_pipeline")
+      # 103 1 1001 9000 [kswapd0] -> userspace_kernel_name; 104 2 0 0 [kswapd0] does not match.
       if ($5 ~ /^[[]?(kworker\/|kthreaddi?(]|$)|kswapd[0-9]+(]|$)|khugepaged(]|$)|ksoftirqd\/|migration\/|rcu_(sched|gp|par_gp|tasks))/ && ($3 != 0 || $4 > 0)) record("userspace_kernel_name")
-      # stratum+tcp://pool.example.test:3333 or --algo rx/0 --url pool.example.test --user TOKEN.
+      # -o stratum+tcp://127.0.0.1:3333 or --algo rx/0 --url URL --user TOKEN -> mining_command_arguments.
       if (args ~ /stratum(\+(tcp|ssl))?:\/\// ||
           (args ~ /(^|[ \t\r\013\014])--(algo|coin)([= \t\r\013\014]|$)/ &&
            args ~ /(^|[ \t\r\013\014])(-o|--url)([= \t\r\013\014]|$)/ &&
            args ~ /(^|[ \t\r\013\014])(-u|--user)([= \t\r\013\014]|$)/)) record("mining_command_arguments")
+      # curl -fsSL URL | /bin/sh -> download_shell_pipeline; curl -o /tmp/example.txt URL does not match.
       if (args ~ /(^|[ \t\r\013\014\/\047\042])(curl|wget)([ \t\r\013\014]|$)/ &&
           args ~ /\|[ \t\r\013\014]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([ \t\r\013\014\047\042;|&]|$)/) record("download_shell_pipeline")
+      # /dev/shm/example --flag -> temporary_executable; /usr/bin/sleep 60 does not match.
       if ($5 ~ /^\/(tmp|var\/tmp|dev\/shm)\//) record("temporary_executable")
+      # perl /usr/share/webmin/miniserv.pl /etc/webmin/miniserv.conf: 20 rows with the same PPID/UID -> panel_worker_concentration.
       if (args ~ /\/webmin\/miniserv[.]pl([ \t\r\013\014]|$)/ && args ~ /\/etc\/webmin\/miniserv[.]conf([ \t\r\013\014]|$)/) record("panel_worker_concentration")
       program=$5; sub(/^.*\//, "", program)
       if (program ~ /^(sh|bash|dash|ash|ksh|zsh|python([0-9]+([.][0-9]+)*)?|perl|ruby|node)$/) {
-        # Common single-word flags such as python -u; -c/-e denotes code, not a script pathname.
+        # python3 -u /tmp/example.py -> temporary_script; python3 -c CODE has no script pathname.
         i=6
         while (i <= NF && $i ~ /^-/ && $i !~ /^--$/) {
           if ($i ~ /^-[^-]*[ce]/) break
@@ -8502,7 +8512,7 @@ function manifest_process_indicators() {
 function manifest_executable_indicators() {
   local records indicator count pid location reason incomplete=false
   [ -d "$manifest_root/proc" ] || return
-  # find prints parent<TAB>link, e.g. /proc/101<TAB>/root/tool (deleted).
+  # find prints parent<TAB>link, e.g. /proc/101<TAB>/root/example (deleted).
   # Never follow the link, read the binary or print its potentially sensitive pathname.
   if ! records=$(set -o pipefail; LC_ALL=C manifest_run_bounded 5 find "$manifest_root/proc" -mindepth 2 -maxdepth 2 -name exe -type l -printf '%h\t%l\n' 2>/dev/null | LC_ALL=C awk -F '\t' '
     function record(kind, place, key) {
@@ -8514,9 +8524,11 @@ function manifest_executable_indicators() {
       pid=$1; sub(/^.*\//, "", pid)
       if (pid !~ /^[0-9]+$/ || NF != 2 || $2 == "") next
       path=$2; deleted=sub(/ [(]deleted[)]$/, "", path)
+      # /proc/101<TAB>/tmp/example -> temporary_executable_target, even if argv says sshd.
       if (path ~ /^\/(tmp|var\/tmp|dev\/shm)\//) record("temporary_executable_target", "temporary_directory")
-      # /usr/bin/.cache/tool is unusual; /home/app/.local/bin/tool can be normal.
+      # /usr/bin/.HIDDEN/example -> hidden_system_executable; /home/USER/.local/bin/example does not match this rule.
       if (path ~ /^\/(usr\/)?(s?bin|lib|lib64)\/([^\/]+\/)*[.][^\/]+\//) record("hidden_system_executable", "hidden_system_directory")
+      # /home/USER/example (deleted) -> deleted_executable_in_writable_location; /usr/bin/sleep (deleted) does not match.
       if (deleted && path ~ /^\/(root|home[0-9]*|var\/lib|tmp|var\/tmp|dev\/shm)\//) {
         place=(path ~ /^\/var\/lib\// ? "application_state_directory" : "home_or_temporary_directory")
         record("deleted_executable_in_writable_location", place)
@@ -8561,6 +8573,7 @@ function manifest_web_indicators() {
     relative=$(readlink -f -- "$directory" 2>/dev/null) || { manifest_web_incomplete=true; continue; }
     case "$relative" in "$resolved"|"$resolved"/*) ;; *) manifest_web_incomplete=true; continue;; esac
     mode=$(stat -c %a -- "$directory" 2>/dev/null) || { manifest_web_incomplete=true; continue; }
+    # stat mode 777 or 1777 -> world_writable_web_directory; 755 does not match.
     case "$mode" in *[2367])
       manifest_web_findings=$((manifest_web_findings+1))
       manifest_emit security_indicator indicator world_writable_web_directory path "${directory#"$manifest_root"}" assessment requires_review reason 'Directory permits writes by any local user; check ownership and intended access. Permissions alone do not establish compromise.';;
@@ -8584,6 +8597,10 @@ function manifest_web_indicators() {
       records=$(LC_ALL=C awk '
         # Correlated features, not an assertion of PHP data flow: eval(base64_decode(...))
         # or request input plus command execution and file-manager/error-suppression features.
+        # <?php eval(base64_decode("ENCODED")); -> php_encoded_execution.
+        # <?php error_reporting(0); system($_POST["cmd"]); -> php_webshell_features.
+        # <?php base64_decode($data); alone lacks execution and does not match either rule.
+        # hacked by example -> possible_web_defacement in an upload/cache/plugin sample, excluding the document-root level.
         {
           text=tolower($0)
           if (text ~ /<[?](php|=)/) php=1
@@ -8613,12 +8630,14 @@ function manifest_web_indicators() {
 # Inspect job bodies as data; never emit command bodies or environment values.
 function manifest_schedule_commands() {
   local path=$1 kind=$2 content=$3 records indicator line target
-  # User: "@reboot /bin/sh /var/tmp/.cache/.s"; system: "*/10 * * * * app /bin/sh /tmp/job".
+  # User crontab: @reboot /bin/sh /tmp/example.sh -> command=/bin/sh /tmp/example.sh.
+  # System crontab: */10 * * * * root /bin/sh /tmp/example.sh -> the same command after dropping the account field.
   records=$(LC_ALL=C awk -v kind="$kind" '
     function output(indicator, target) { printf "%s\t%d\t%s\n", indicator, NR, target }
     /^[ \t\r\013\014]*#/ || /^[ \t\r\013\014]*$/ { next }
     {
       command=$0; sub(/^[ \t\r\013\014]+/, "", command)
+      # TMPDIR=/tmp -> skip; SHELL=/tmp/example.sh -> inspect /tmp/example.sh as the command.
       if (command ~ /^[A-Za-z_][A-Za-z0-9_]*[ \t\r\013\014]*=/) {
         if (command !~ /^SHELL[ \t\r\013\014]*=/) next
         sub(/^SHELL[ \t\r\013\014]*=[ \t\r\013\014]*/, "", command)
@@ -8627,26 +8646,32 @@ function manifest_schedule_commands() {
         if (kind == "system") fields++
         for (i=0; i<fields; i++) sub(/^[^ \t\r\013\014]+[ \t\r\013\014]+/, "", command)
       }
+      # sh /tmp/example.sh --flag or exec /dev/shm/example -> scheduled_temporary_execution.
+      # The first example extracts target=/tmp/example.sh; rm -f /tmp/example.sh does not match.
       if (command ~ /(^|[;|&])[ \t\r\013\014]*[\047\042]?\/(tmp|var\/tmp|dev\/shm)\// ||
           command ~ /(^|[ \t\r\013\014;|&])((\/usr)?\/bin\/)?(exec|nohup|sh|bash|dash|ash|ksh|zsh|python[0-9.]*|perl|ruby|node|source|[.])[ \t\r\013\014]+(-[a-zA-Z]+[ \t\r\013\014]+)*[\047\042]?\/(tmp|var\/tmp|dev\/shm)\//) {
         if (match(command, /\/(tmp|var\/tmp|dev\/shm)\/[^ \t\r\013\014\047\042;|&<>]+/)) target=substr(command,RSTART,RLENGTH)
         else target="unknown"
         output("scheduled_temporary_execution", target)
       }
+      # cd /tmp && python3 ./example.py -> scheduled_temporary_workdir, target=temporary_directory.
       if (command ~ /(^|[ \t\r\013\014;|&])cd[ \t\r\013\014]+[\047\042]?\/(tmp|var\/tmp|dev\/shm)(\/|[ \t\r\013\014\047\042;|&]|$)/ &&
           command ~ /[;&][ \t\r\013\014]*((python[0-9.]*|sh|bash|perl)[ \t\r\013\014]+(-[a-zA-Z]+[ \t\r\013\014]+)*)?([.]\/|[.][A-Za-z0-9_])/) output("scheduled_temporary_workdir", "temporary_directory")
-      # @reboot /var/lib/app/.cache/worker; pgrep -x worker || exec /root/.config/task/run.
-      # Only command positions qualify: rm /root/.cache/old must remain quiet.
+      # /root/.cache/example.sh or cd /home/USER/.cache && ./example -> scheduled_hidden_execution.
+      # target=hidden_directory; rm /root/.cache/example.sh does not match.
       hidden="/(root|home[0-9]*/[^/]+|var/lib/[^/]+|var/www|((usr/)?(s?bin|lib|lib64)))/([^/ \t\r\013\014]+/)*[.][^/ \t\r\013\014]+"
       if (command ~ "(^|[;|&])[ \t\r\013\014]*[\047\042]?" hidden "/" ||
           command ~ "(^|[ \t\r\013\014;|&])((/usr)?/bin/)?(exec|nohup|sh|bash|dash|ash|ksh|zsh|python[0-9.]*|perl|ruby|node|source|[.])[ \t\r\013\014]+(-[a-zA-Z]+[ \t\r\013\014]+)*[\047\042]?" hidden "/" ||
           (command ~ "(^|[ \t\r\013\014;|&])cd[ \t\r\013\014]+[\047\042]?" hidden "(/|[ \t\r\013\014\047\042;|&]|$)" &&
            command ~ /[;&][ \t\r\013\014]*((python[0-9.]*|sh|bash|perl)[ \t\r\013\014]+(-[a-zA-Z]+[ \t\r\013\014]+)*)?[.]\//)) output("scheduled_hidden_execution", "hidden_directory")
+      # wget -qO- URL | sh -> scheduled_download_shell, target=unknown; wget URL alone does not match.
       if (command ~ /(^|[ \t\r\013\014\/\047\042])(curl|wget)([ \t\r\013\014]|$)/ &&
           command ~ /\|[ \t\r\013\014]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([ \t\r\013\014\047\042;|&]|$)/) output("scheduled_download_shell", "unknown")
+      # printf ENCODED | base64 --decode | /bin/bash -> scheduled_encoded_shell, target=unknown.
       if (command ~ /(^|[ \t\r\013\014\/])base64([ \t\r\013\014]|$)/ &&
           command ~ /(^|[ \t\r\013\014])(-d|--decode)([ \t\r\013\014]|$)/ &&
           command ~ /\|[ \t\r\013\014]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([ \t\r\013\014\047\042;|&]|$)/) output("scheduled_encoded_shell", "unknown")
+      # printf RULE >> /etc/sudoers or tee -a /etc/sudoers -> scheduled_sudoers_write, target=/etc/sudoers.
       if (command ~ />[ \t\r\013\014]*[\047\042]?\/etc\/sudoers([.]d\/|[ \t\r\013\014\047\042;|&]|$)/ ||
           command ~ /(^|[ \t\r\013\014\/])tee([ \t\r\013\014]+-[a-zA-Z]+)*[ \t\r\013\014]+[\047\042]?\/etc\/sudoers([.]d\/|[ \t\r\013\014\047\042;|&]|$)/) output("scheduled_sudoers_write", "/etc/sudoers")
     }

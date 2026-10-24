@@ -196,9 +196,13 @@ Potential compromise indicators appear as `security_indicator` records in text a
 The process check flags shell redirection or `tee` targeting sudoers, Base64 decoding
 piped to a shell, kernel-thread-style names with a nonzero UID or userspace memory,
 and executable or interpreter-script paths under `/tmp`, `/var/tmp` or `/dev/shm`.
+It also flags download-tool commands piped to a shell, mining protocol URLs and
+correlated mining algorithm, pool and user options. Authorized maintenance and
+mining can match; endpoints, credentials and command bodies are omitted.
 Dot-prefixed listener names also get a review record.
 The kernel executable-link check also catches temporary binaries hidden behind altered
-process names and deleted executables in home or temporary directories. It reports
+process names, executables in hidden system binary/library directories, and deleted
+executables in home, application-state or temporary directories. It reports
 counts and sample PIDs without executable pathnames; ordinary deleted system binaries
 are omitted because package updates commonly replace them. The probe is limited to
 five seconds and 20000 links; permissions or process exits can leave gaps.
@@ -207,6 +211,9 @@ Groups of at least 20 Webmin workers sharing a parent and UID get a concurrency
 review hint. This does not establish unauthorized sessions or exploitation.
 
 Website files and scheduled jobs are checked for possible signs of compromise.
+Website sampling includes WordPress plugin directories within the shared file and
+time limits. Scheduled checks also flag execution from hidden directories under
+home, application-state and system binary/library paths, and downloads piped to a shell.
 Checks are read-only, and reports omit file contents and raw commands.
 
 Findings need review because legitimate activity can trigger them and some problems

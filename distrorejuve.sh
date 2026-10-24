@@ -8422,6 +8422,7 @@ function manifest_listeners() {
 }
 
 # Inspect arguments as data only; emit fixed indicators and numeric references, never raw commands.
+# Explicit C whitespace and escaped regex slashes also work with pre-POSIX-class AWK.
 function manifest_process_indicators() {
   local records indicator count pid ppid uid reason
   # ps -eww -o pid=,ppid=,uid=,vsz=,args=, for example:
@@ -8439,15 +8440,22 @@ function manifest_process_indicators() {
     NR > 20000 { limited=1; next }
     $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || NF < 5 { bad=1; next }
     {
-      args=$0; sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+/, "", args)
-      if (args ~ />[[:space:]]*[\047\042]?\/etc\/sudoers([.]d\/|[[:space:]\047\042;|&]|$)/ ||
-          args ~ /(^|[[:space:]/])tee([[:space:]]+-[a-zA-Z]+)*[[:space:]]+[\047\042]?\/etc\/sudoers([.]d\/|[[:space:]\047\042;|&]|$)/) record("sudoers_write_command")
-      if (args ~ /(^|[[:space:]/])base64([[:space:]]|$)/ &&
-          args ~ /(^|[[:space:]])(-d|--decode)([[:space:]]|$)/ &&
-          args ~ /\|[[:space:]]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([[:space:];|&]|$)/) record("encoded_shell_pipeline")
-      if ($5 ~ /^[[]?(kworker\/|kthreadd(]|$)|ksoftirqd\/|migration\/|rcu_(sched|gp|par_gp|tasks))/ && ($3 != 0 || $4 > 0)) record("userspace_kernel_name")
+      args=$0; sub(/^[ \t\r\013\014]*[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+/, "", args)
+      if (args ~ />[ \t\r\013\014]*[\047\042]?\/etc\/sudoers([.]d\/|[ \t\r\013\014\047\042;|&]|$)/ ||
+          args ~ /(^|[ \t\r\013\014\/])tee([ \t\r\013\014]+-[a-zA-Z]+)*[ \t\r\013\014]+[\047\042]?\/etc\/sudoers([.]d\/|[ \t\r\013\014\047\042;|&]|$)/) record("sudoers_write_command")
+      if (args ~ /(^|[ \t\r\013\014\/])base64([ \t\r\013\014]|$)/ &&
+          args ~ /(^|[ \t\r\013\014])(-d|--decode)([ \t\r\013\014]|$)/ &&
+          args ~ /\|[ \t\r\013\014]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([ \t\r\013\014\047\042;|&]|$)/) record("encoded_shell_pipeline")
+      if ($5 ~ /^[[]?(kworker\/|kthreaddi?(]|$)|kswapd[0-9]+(]|$)|khugepaged(]|$)|ksoftirqd\/|migration\/|rcu_(sched|gp|par_gp|tasks))/ && ($3 != 0 || $4 > 0)) record("userspace_kernel_name")
+      # stratum+tcp://pool.example.test:3333 or --algo rx/0 --url pool.example.test --user TOKEN.
+      if (args ~ /stratum(\+(tcp|ssl))?:\/\// ||
+          (args ~ /(^|[ \t\r\013\014])--(algo|coin)([= \t\r\013\014]|$)/ &&
+           args ~ /(^|[ \t\r\013\014])(-o|--url)([= \t\r\013\014]|$)/ &&
+           args ~ /(^|[ \t\r\013\014])(-u|--user)([= \t\r\013\014]|$)/)) record("mining_command_arguments")
+      if (args ~ /(^|[ \t\r\013\014\/\047\042])(curl|wget)([ \t\r\013\014]|$)/ &&
+          args ~ /\|[ \t\r\013\014]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([ \t\r\013\014\047\042;|&]|$)/) record("download_shell_pipeline")
       if ($5 ~ /^\/(tmp|var\/tmp|dev\/shm)\//) record("temporary_executable")
-      if (args ~ /\/webmin\/miniserv[.]pl([[:space:]]|$)/ && args ~ /\/etc\/webmin\/miniserv[.]conf([[:space:]]|$)/) record("panel_worker_concentration")
+      if (args ~ /\/webmin\/miniserv[.]pl([ \t\r\013\014]|$)/ && args ~ /\/etc\/webmin\/miniserv[.]conf([ \t\r\013\014]|$)/) record("panel_worker_concentration")
       program=$5; sub(/^.*\//, "", program)
       if (program ~ /^(sh|bash|dash|ash|ksh|zsh|python([0-9]+([.][0-9]+)*)?|perl|ruby|node)$/) {
         # Common single-word flags such as python -u; -c/-e denotes code, not a script pathname.
@@ -8479,6 +8487,8 @@ function manifest_process_indicators() {
       parse_failed) manifest_emit warning area security_processes reason 'Some process rows could not be parsed; coverage is incomplete.'; continue;;
       sudoers_write_command) reason='Command references a sudoers write; verify authorization and whether the write succeeded.';;
       encoded_shell_pipeline) reason='Command decodes Base64 and pipes to a shell; review its origin without executing the payload.';;
+      mining_command_arguments) reason='Command contains a mining protocol or correlated algorithm, pool and user options; verify whether mining is authorized.';;
+      download_shell_pipeline) reason='Command references a download tool and a shell pipeline; verify its origin and authorization.';;
       panel_worker_concentration) reason='At least 20 Webmin workers share a parent and UID; review sessions, logs and expected concurrency. High concurrency alone does not establish compromise.';;
       userspace_kernel_name) reason='Kernel-thread-style command name has a nonzero UID or userspace memory; investigate possible masquerading.';;
       temporary_executable|temporary_script) reason='Executable or interpreter script starts from a temporary directory; legitimate installers can also do this.';;
@@ -8505,7 +8515,12 @@ function manifest_executable_indicators() {
       if (pid !~ /^[0-9]+$/ || NF != 2 || $2 == "") next
       path=$2; deleted=sub(/ [(]deleted[)]$/, "", path)
       if (path ~ /^\/(tmp|var\/tmp|dev\/shm)\//) record("temporary_executable_target", "temporary_directory")
-      if (deleted && path ~ /^\/(root|home|tmp|var\/tmp|dev\/shm)\//) record("deleted_executable_in_writable_location", "home_or_temporary_directory")
+      # /usr/bin/.cache/tool is unusual; /home/app/.local/bin/tool can be normal.
+      if (path ~ /^\/(usr\/)?(s?bin|lib|lib64)\/([^\/]+\/)*[.][^\/]+\//) record("hidden_system_executable", "hidden_system_directory")
+      if (deleted && path ~ /^\/(root|home[0-9]*|var\/lib|tmp|var\/tmp|dev\/shm)\//) {
+        place=(path ~ /^\/var\/lib\// ? "application_state_directory" : "home_or_temporary_directory")
+        record("deleted_executable_in_writable_location", place)
+      }
     }
     END {
       for (key in counts) printf "%s\t%d\t%s\t%s\n", kinds[key], counts[key], pids[key], locations[key]
@@ -8516,7 +8531,8 @@ function manifest_executable_indicators() {
       '') continue;;
       limit) incomplete=true; continue;;
       temporary_executable_target) reason='Kernel executable link points into temporary storage, even if the process command name hides it.';;
-      deleted_executable_in_writable_location) reason='A running executable was unlinked from a home or temporary directory. Legitimate application updates can also do this.';;
+      hidden_system_executable) reason='Kernel executable link points into a hidden directory under a system binary or library path; check for masquerading or command wrappers.';;
+      deleted_executable_in_writable_location) reason='A running executable was unlinked from a home, application-state or temporary directory. Legitimate application updates can also do this.';;
       *) continue;;
     esac
     manifest_emit security_indicator indicator "$indicator" process_count "$count" sample_pid "$pid" location "$location" evidence proc_exe assessment requires_review reason "$reason"
@@ -8539,7 +8555,7 @@ function manifest_web_indicators() {
   case "$relative" in ''|/|/home|/root|/srv|/var|/var/www|/tmp|/var/tmp|/usr|/opt|/etc|/etc/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*) return;; esac
   manifest_web_roots=$((manifest_web_roots+1))
   if [ "$manifest_web_roots" -gt 20 ]; then manifest_web_incomplete=true; return; fi
-  for directory in "$resolved" "$resolved/tmp" "$resolved/uploads" "$resolved/images" "$resolved/cache" "$resolved/wp-content/uploads"; do
+  for directory in "$resolved" "$resolved/tmp" "$resolved/uploads" "$resolved/images" "$resolved/cache" "$resolved/wp-content/uploads" "$resolved/wp-content/plugins"; do
     if [ ! -d "$directory" ] || [ -L "$directory" ]; then continue; fi
     if [ $((SECONDS-manifest_web_started)) -ge 15 ] || [ "$manifest_web_findings" -ge 200 ]; then manifest_web_incomplete=true; return; fi
     relative=$(readlink -f -- "$directory" 2>/dev/null) || { manifest_web_incomplete=true; continue; }
@@ -8571,12 +8587,12 @@ function manifest_web_indicators() {
         {
           text=tolower($0)
           if (text ~ /<[?](php|=)/) php=1
-          if (text ~ /(^|[^a-z0-9_])(eval|assert)[[:space:]]*[(]/) { evaluate=1; if (!eval_line) eval_line=NR }
-          if (text ~ /(^|[^a-z0-9_])(base64_decode|gzinflate|gzuncompress|str_rot13)[[:space:]]*[(]/) decode=1
-          if (text ~ /(^|[^a-z0-9_])(shell_exec|exec|system|passthru|popen|proc_open)[[:space:]]*[(]/) { execute=1; if (!exec_line) exec_line=NR }
-          if (text ~ /\$_(get|post|request|cookie)[[:space:]]*\[/) request=1
-          if (text ~ /error_reporting[[:space:]]*[(][[:space:]]*0[[:space:]]*[)]/ || text ~ /move_uploaded_file[[:space:]]*[(]/ || text ~ /open_basedir/) manager=1
-          if (text ~ /hacked[[:space:]]+by[[:space:]]+[a-z0-9_]/ && !deface_line) deface_line=NR
+          if (text ~ /(^|[^a-z0-9_])(eval|assert)[ \t\r\013\014]*[(]/) { evaluate=1; if (!eval_line) eval_line=NR }
+          if (text ~ /(^|[^a-z0-9_])(base64_decode|gzinflate|gzuncompress|str_rot13)[ \t\r\013\014]*[(]/) decode=1
+          if (text ~ /(^|[^a-z0-9_])(shell_exec|exec|system|passthru|popen|proc_open)[ \t\r\013\014]*[(]/) { execute=1; if (!exec_line) exec_line=NR }
+          if (text ~ /\$_(get|post|request|cookie)[ \t\r\013\014]*\[/) request=1
+          if (text ~ /error_reporting[ \t\r\013\014]*[(][ \t\r\013\014]*0[ \t\r\013\014]*[)]/ || text ~ /move_uploaded_file[ \t\r\013\014]*[(]/ || text ~ /open_basedir/) manager=1
+          if (text ~ /hacked[ \t\r\013\014]+by[ \t\r\013\014]+[a-z0-9_]/ && !deface_line) deface_line=NR
         }
         END {
           if (php && evaluate && decode) print "php_encoded_execution\t" eval_line
@@ -8600,30 +8616,39 @@ function manifest_schedule_commands() {
   # User: "@reboot /bin/sh /var/tmp/.cache/.s"; system: "*/10 * * * * app /bin/sh /tmp/job".
   records=$(LC_ALL=C awk -v kind="$kind" '
     function output(indicator, target) { printf "%s\t%d\t%s\n", indicator, NR, target }
-    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    /^[ \t\r\013\014]*#/ || /^[ \t\r\013\014]*$/ { next }
     {
-      command=$0; sub(/^[[:space:]]+/, "", command)
-      if (command ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/) {
-        if (command !~ /^SHELL[[:space:]]*=/) next
-        sub(/^SHELL[[:space:]]*=[[:space:]]*/, "", command)
+      command=$0; sub(/^[ \t\r\013\014]+/, "", command)
+      if (command ~ /^[A-Za-z_][A-Za-z0-9_]*[ \t\r\013\014]*=/) {
+        if (command !~ /^SHELL[ \t\r\013\014]*=/) next
+        sub(/^SHELL[ \t\r\013\014]*=[ \t\r\013\014]*/, "", command)
       } else if (kind != "script") {
         fields=(kind == "anacron" ? 3 : (command ~ /^@/ ? 1 : 5))
         if (kind == "system") fields++
-        for (i=0; i<fields; i++) sub(/^[^[:space:]]+[[:space:]]+/, "", command)
+        for (i=0; i<fields; i++) sub(/^[^ \t\r\013\014]+[ \t\r\013\014]+/, "", command)
       }
-      if (command ~ /(^|[;|&])[[:space:]]*[\047\042]?\/(tmp|var\/tmp|dev\/shm)\// ||
-          command ~ /(^|[[:space:];|&])((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh|python[0-9.]*|perl|ruby|node|source|[.])[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*[\047\042]?\/(tmp|var\/tmp|dev\/shm)\//) {
-        if (match(command, /\/(tmp|var\/tmp|dev\/shm)\/[^[:space:]\047\042;|&<>]+/)) target=substr(command,RSTART,RLENGTH)
+      if (command ~ /(^|[;|&])[ \t\r\013\014]*[\047\042]?\/(tmp|var\/tmp|dev\/shm)\// ||
+          command ~ /(^|[ \t\r\013\014;|&])((\/usr)?\/bin\/)?(exec|nohup|sh|bash|dash|ash|ksh|zsh|python[0-9.]*|perl|ruby|node|source|[.])[ \t\r\013\014]+(-[a-zA-Z]+[ \t\r\013\014]+)*[\047\042]?\/(tmp|var\/tmp|dev\/shm)\//) {
+        if (match(command, /\/(tmp|var\/tmp|dev\/shm)\/[^ \t\r\013\014\047\042;|&<>]+/)) target=substr(command,RSTART,RLENGTH)
         else target="unknown"
         output("scheduled_temporary_execution", target)
       }
-      if (command ~ /(^|[[:space:];|&])cd[[:space:]]+[\047\042]?\/(tmp|var\/tmp|dev\/shm)(\/|[[:space:]\047\042;|&]|$)/ &&
-          command ~ /[;&][[:space:]]*((python[0-9.]*|sh|bash|perl)[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*)?([.]\/|[.][A-Za-z0-9_])/) output("scheduled_temporary_workdir", "temporary_directory")
-      if (command ~ /(^|[[:space:]/])base64([[:space:]]|$)/ &&
-          command ~ /(^|[[:space:]])(-d|--decode)([[:space:]]|$)/ &&
-          command ~ /\|[[:space:]]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([[:space:];|&]|$)/) output("scheduled_encoded_shell", "unknown")
-      if (command ~ />[[:space:]]*[\047\042]?\/etc\/sudoers([.]d\/|[[:space:]\047\042;|&]|$)/ ||
-          command ~ /(^|[[:space:]/])tee([[:space:]]+-[a-zA-Z]+)*[[:space:]]+[\047\042]?\/etc\/sudoers([.]d\/|[[:space:]\047\042;|&]|$)/) output("scheduled_sudoers_write", "/etc/sudoers")
+      if (command ~ /(^|[ \t\r\013\014;|&])cd[ \t\r\013\014]+[\047\042]?\/(tmp|var\/tmp|dev\/shm)(\/|[ \t\r\013\014\047\042;|&]|$)/ &&
+          command ~ /[;&][ \t\r\013\014]*((python[0-9.]*|sh|bash|perl)[ \t\r\013\014]+(-[a-zA-Z]+[ \t\r\013\014]+)*)?([.]\/|[.][A-Za-z0-9_])/) output("scheduled_temporary_workdir", "temporary_directory")
+      # @reboot /var/lib/app/.cache/worker; pgrep -x worker || exec /root/.config/task/run.
+      # Only command positions qualify: rm /root/.cache/old must remain quiet.
+      hidden="/(root|home[0-9]*/[^/]+|var/lib/[^/]+|var/www|((usr/)?(s?bin|lib|lib64)))/([^/ \t\r\013\014]+/)*[.][^/ \t\r\013\014]+"
+      if (command ~ "(^|[;|&])[ \t\r\013\014]*[\047\042]?" hidden "/" ||
+          command ~ "(^|[ \t\r\013\014;|&])((/usr)?/bin/)?(exec|nohup|sh|bash|dash|ash|ksh|zsh|python[0-9.]*|perl|ruby|node|source|[.])[ \t\r\013\014]+(-[a-zA-Z]+[ \t\r\013\014]+)*[\047\042]?" hidden "/" ||
+          (command ~ "(^|[ \t\r\013\014;|&])cd[ \t\r\013\014]+[\047\042]?" hidden "(/|[ \t\r\013\014\047\042;|&]|$)" &&
+           command ~ /[;&][ \t\r\013\014]*((python[0-9.]*|sh|bash|perl)[ \t\r\013\014]+(-[a-zA-Z]+[ \t\r\013\014]+)*)?[.]\//)) output("scheduled_hidden_execution", "hidden_directory")
+      if (command ~ /(^|[ \t\r\013\014\/\047\042])(curl|wget)([ \t\r\013\014]|$)/ &&
+          command ~ /\|[ \t\r\013\014]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([ \t\r\013\014\047\042;|&]|$)/) output("scheduled_download_shell", "unknown")
+      if (command ~ /(^|[ \t\r\013\014\/])base64([ \t\r\013\014]|$)/ &&
+          command ~ /(^|[ \t\r\013\014])(-d|--decode)([ \t\r\013\014]|$)/ &&
+          command ~ /\|[ \t\r\013\014]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([ \t\r\013\014\047\042;|&]|$)/) output("scheduled_encoded_shell", "unknown")
+      if (command ~ />[ \t\r\013\014]*[\047\042]?\/etc\/sudoers([.]d\/|[ \t\r\013\014\047\042;|&]|$)/ ||
+          command ~ /(^|[ \t\r\013\014\/])tee([ \t\r\013\014]+-[a-zA-Z]+)*[ \t\r\013\014]+[\047\042]?\/etc\/sudoers([.]d\/|[ \t\r\013\014\047\042;|&]|$)/) output("scheduled_sudoers_write", "/etc/sudoers")
     }
   ' <<< "$content") || { manifest_schedule_incomplete=true; return; }
   while IFS=$'\t' read -r indicator line target; do
@@ -9611,7 +9636,7 @@ function manifest_output() (
   manifest_web_started=$SECONDS
   manifest_websites
   if $manifest_web_incomplete; then
-    manifest_emit warning area security_websites reason 'Website security sampling is incomplete: unreadable, large or indirect files, failed probes or limits (20 roots, 200 files/findings, 256 KiB per file, 15 seconds plus the final probe). Only top-level files and common upload/cache directories to depth 3 are sampled.'
+    manifest_emit warning area security_websites reason 'Website security sampling is incomplete: unreadable, large or indirect files, failed probes or limits (20 roots, 200 files/findings, 256 KiB per file, 15 seconds plus the final probe). Only top-level files and common upload/cache and WordPress plugin directories to depth 3 are sampled.'
   fi
   manifest_migration
   if $manifest_collection_failed; then manifest_emit warning area collection reason 'One or more collectors failed; missing inventory sections are unknown.'; fi

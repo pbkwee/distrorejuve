@@ -465,6 +465,7 @@ function apt_sources_process() {
     }
     if (!values["types"] || !values["uris"] || !values["suites"]) { error("missing Types, URIs or Suites"); return }
     for (i=1;i<=count;i++) if (linekey[i] == "enabled" && tolower(values["enabled"]) != "yes") { error("Enabled must be yes or no"); return }
+    # Types: deb deb-src plus Suites: bookworm bookworm-updates -> four list rows per URI.
     nt=split(values["types"], types, /[ \t]+/); nu=split(values["uris"], uris, /[ \t]+/); ns=split(values["suites"], suites, /[ \t]+/)
     for (k=1;k<=nt;k++) if (types[k] != "deb" && types[k] != "deb-src") { error("unsupported Types"); return }
     for (i=1;i<=nu;i++) if (uris[i] !~ /^[a-zA-Z][a-zA-Z0-9+.-]*:/) { error("invalid URI"); return }
@@ -512,6 +513,7 @@ function apt_sources_process() {
         else if (option ~ /^arch\+=/) { addarch=substr(option,7); gsub(/,/," ",addarch) }
         else if (option ~ /^arch-=/) { removearch=substr(option,7); gsub(/,/," ",removearch) }
       }
+      # [arch=amd64,i386 arch+=arm64 arch-=i386] -> architectures=amd64 i386|arm64|i386.
       architectures=basearch "|" addarch "|" removearch
     }
     if (uri !~ /^[a-zA-Z][a-zA-Z0-9+.-]*:/) { error("invalid URI"); next }
@@ -547,6 +549,7 @@ function apt_sources_process() {
 }
 
 # Both caching and archive trust must inspect the paths APT actually uses.
+# apt-config dump: Dir::State "var/lib/apt"; is standard; RootDir "/tmp"; is rejected.
 function apt_config_has_standard_paths() {
   printf '%s\n' "$1" | awk -F '"' '
     BEGIN {
@@ -692,6 +695,7 @@ function apt_sources_archive() {
   done
 }
 
+# os-release: VERSION_CODENAME="bookworm" -> bookworm; debian_version: 12.9 -> bookworm.
 function distro_output_codename() {
   local name version file key value
   name=$(lsb_release -sc 2>/dev/null) && case " $ALL_DEBIAN $ALL_UBUNTU " in *" $name "*) printf '%s\n' "$name"; return 0;; esac
@@ -1205,6 +1209,7 @@ function check_disk_space() {
       return 1
     fi
     # df -Pm: Filesystem 1048576-blocks Used Available Capacity Mounted-on; field 4 is MiB free.
+    # /dev/vda1 20480 4096 16384 20% / -> available=16384 MiB.
     # Refuse shifted columns (for example a filesystem name containing whitespace).
     available=$(printf '%s\n' "$output" | awk '
       NR == 2 && NF >= 6 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ &&
@@ -1402,6 +1407,8 @@ function upgrade_compatibility_output_config_files() {
     size=$(stat -c %s -- "$file") || return 2
     [ "$size" -le 1048576 ] || return 2
     printf '%s\n' "$file"
+    # BIND include "/etc/bind/named.conf.local"; -> required|/etc/bind/named.conf.local.
+    # Dovecot !include_try conf.d/*.conf -> optional|conf.d/*.conf, resolved relative to this file.
     text=$(awk -v kind="$kind" '
       /^[ \t\r\f\013]*#/ { next }
        kind == "bind" {
@@ -1575,6 +1582,7 @@ function upgrade_php_output_default_branch() {
   local package dependencies branch
   for package in php-cli libapache2-mod-php; do
     dependencies=$(LC_ALL=C apt-cache depends "$package") || return 1
+    # Depends: php8.4-cli or Depends: libapache2-mod-php8.4 -> branch=8.4.
     branch=$(printf '%s\n' "$dependencies" | awk '
       $1 == "Depends:" && $2 ~ /^(php[0-9]+\.[0-9]+-cli|libapache2-mod-php[0-9]+\.[0-9]+)$/ {
         sub(/^libapache2-mod-php|^php/, "", $2); sub(/-cli$/, "", $2)
@@ -1589,6 +1597,8 @@ function upgrade_php_output_default_branch() {
 }
 
 # 0 genuine archive candidate, 1 unavailable, 2 failed query. Never use status-only versions.
+# Candidate: 8.4.1-1 plus madison "php-cli | 8.4.1-1 | https://deb.debian.org/debian trixie/main amd64 Packages" -> available.
+# Candidate: (none), or a version present only in the dpkg status file, is unavailable.
 function upgrade_php_has_candidate() {
   local policy rows version
   policy=$(LC_ALL=C apt-cache policy "$1") || return 2
@@ -1726,6 +1736,7 @@ function apt_get_apply() {
 )
 }
 
+# APT simulation: Remv php8.2-cli [8.2.1-1] requires an allowed removal; Purg php8.2-cli is always rejected.
 function upgrade_php_check_plan() {
   local allowed=$1 plan=$2 removal_only=${3:-false} native=${4:-} diagnostic=${5:-}
   awk -v removal_only="$removal_only" -v native="$native" -v diagnostic="$diagnostic" '
@@ -2343,6 +2354,7 @@ function upgrade_migrate_php_packages() {
 # shellcheck shell=bash
 # Runtime checks read status/configuration only; they never start or reconfigure services.
 # 0 active, 1 stopped/failed, 2 cannot establish state. Enabled is not the same as active.
+# systemctl ActiveState=active -> running; initctl "nginx stop/waiting" -> stopped.
 function upgrade_php_runtime_service_is_active() {
   local name=$1 state status
   local -a bounded=()
@@ -2368,6 +2380,7 @@ function upgrade_php_runtime_service_is_active() {
 }
 
 # One batch query; conffiles-only and partially configured packages are not running roles.
+# php8.4-fpm:amd64<TAB>install ok installed -> fpm<TAB>php8.4-fpm; config-files state produces no role.
 function upgrade_php_runtime_output_roles() {
   local packages roles
   packages=$(dpkg-query -W -f='${Package}\t${Status}\n') || return 1
@@ -2435,6 +2448,8 @@ function upgrade_php_runtime_output_directives() {
   local kind=$1 file=$2
   case "$kind" in nginx|fpm) :;; *) return 1;; esac
   [ -f "$file" ] && [ -r "$file" ] && [ "$(stat -c '%s' -- "$file")" -le 1048576 ] || return 1
+  # nginx: fastcgi_pass unix:/run/php/php8.4-fpm.sock; -> socket<TAB>/run/php/php8.4-fpm.sock.
+  # nginx: fastcgi_pass 127.0.0.1:9000; -> tcp<TAB>127.0.0.1:9000; fastcgi_pass $UPSTREAM; -> unknown.
   LC_ALL=C awk -v kind="$kind" '
     function unresolved(reason) { if (!reported[reason]++) print "unknown\t" reason }
     function emit() {
@@ -2452,6 +2467,7 @@ function upgrade_php_runtime_output_directives() {
     function word() { if (token != "") words[++count]=token; token="" }
     FNR > 20000 { print "unknown\tline_limit"; exit }
     kind == "fpm" {
+      # [www] followed by listen = /run/php/php8.4-fpm.sock -> socket<TAB>/run/php/php8.4-fpm.sock<TAB>www.
       line=$0; sub(/[;#].*$/, "", line)
       if (line ~ /^[ \t]*\[[^]]+\][ \t\r]*$/) {
         sub(/^[ \t]*\[/, "", line); sub(/\][ \t\r]*$/, "", line); pool=line
@@ -2768,6 +2784,7 @@ function upgrade_php_runtime_verify() {
 # shellcheck shell=bash
 # Common service checks complement the PHP/web runtime check. All probes are read-only.
 # Rows: family, status selector, owning package. Service aliases can change between releases.
+# mariadb-server<TAB>install ok installed -> database<TAB>mariadb<TAB>mariadb-server.
 function upgrade_services_output_roles() {
   local packages roles
   packages=$(dpkg-query -W -f='${Package}\t${Status}\n') || return 1
@@ -2813,6 +2830,7 @@ function upgrade_services_is_active() {
       version=${selector%%/*}; cluster=${selector#*/}
       [ "$version" != "$selector" ] || return 2
       state=$(LC_ALL=C "${bounded[@]}" pg_lsclusters) || return 2
+      # 16 main 5432 online ... -> running for selector=16/main; down -> stopped; duplicate rows -> unknown.
       state=$(awk -v version="$version" -v cluster="$cluster" '$1 == version && $2 == cluster { if (found++) exit 2; state=$4 } END { if (found == 1) print state; else exit 2 }' <<< "$state") || return 2
       case "$state" in online|online,*) return 0;; down|down,*) return 1;; *) return 2;; esac;;
   esac
@@ -3186,6 +3204,7 @@ function crossgrade_check_apt_architecture_preferences() {
   done
   for file in "${files[@]}"; do
     # Package/Pin/Pin-Priority stanzas: positive i386 pins and negative amd64 pins need review.
+    # Package: *:i386, Pin: version *, Pin-Priority: 500 (separate lines) -> block; amd64 at -1 also blocks.
     if ! awk '
       function check( pintext,has_i386,has_amd64) {
         pintext=tolower(pin); gsub(/["\047]/, "", pintext)
@@ -3974,6 +3993,7 @@ function packages_output_backend() {
 
 # Tab records: name, full distribution version, installed/selection state, architecture.
 # Keep dpkg partial states for callers; RPM queries return installed packages only.
+# RPM bash<TAB>0<TAB>5.2-1<TAB>x86_64 -> bash<TAB>5.2-1<TAB>installed<TAB>x86_64; epoch 2 yields 2:5.2-1.
 function packages_output_inventory() {
   local backend=$1 records
   case "$backend" in
@@ -3988,6 +4008,8 @@ function packages_output_inventory() {
 }
 
 # Exactly one configured package owner, no owner (1), or ambiguous/query failure (2).
+# dpkg-query -S: libc6:amd64: /lib/x86_64-linux-gnu/libc.so.6 -> libc6:amd64, if installed.
+# Multiple records or comma-separated owners are ambiguous, returning status 2.
 function packages_output_file_owner() {
   local path=$1 owners owner status backend=${2:-dpkg}
   if [ "$backend" = rpm ]; then
@@ -4041,11 +4063,13 @@ function packages_output_file_origin() {
   case "$backend" in
     dpkg)
       if ! records=$(LC_ALL=C dpkg-query -W -f='${Conffiles}\n' "$owner" 2>/dev/null); then printf 'unknown\t%s\n' "$owner"; return 1; fi
+      # Conffile row " /etc/hosts 0123456789abcdef0123456789abcdef" -> trailing MD5 for /etc/hosts.
       checksum=$(printf '%s\n' "$records" | PACKAGE_ORIGIN_PATH="$path" awk 'BEGIN { path=ENVIRON["PACKAGE_ORIGIN_PATH"] } index($0," " path " ") == 1 { value=substr($0,length(path)+3); sub(/[ \t].*/,"",value); print value; exit }')
       if [ -z "$checksum" ]; then
         metadata="$root/var/lib/dpkg/info/$owner.md5sums"
         [ -f "$metadata" ] || metadata="$root/var/lib/dpkg/info/${owner%%:*}.md5sums"
         if [ -f "$metadata" ] && [ ! -L "$metadata" ] && [ -r "$metadata" ]; then
+          # md5sums row "0123456789abcdef0123456789abcdef  usr/bin/bash" -> leading MD5 for /usr/bin/bash.
           checksum=$(head -c 1048576 -- "$metadata" | PACKAGE_ORIGIN_PATH="${path#/}" awk 'BEGIN { path=ENVIRON["PACKAGE_ORIGIN_PATH"] } NR > 20000 { exit } { hash=$1; value=$0; sub(/^[^ \t]+[ \t]+/,"",value); if (value == path) { print hash; exit } }')
         fi
       fi
@@ -4404,6 +4428,8 @@ function apt_state_output_signature() {
       fi
     done
     # Signed-By may reference keys outside the normal keyring directories.
+    # [signed-by=/etc/apt/keyrings/debian.gpg] or Signed-By: /etc/apt/keyrings/debian.gpg -> that absolute path.
+    # Embedded key text and fingerprint-only values do not yield file paths.
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       keypaths=$(awk '
@@ -4640,6 +4666,8 @@ function check_systemd_install_matches_init() {
 # shellcheck shell=bash
 # Bookworm crossgrade keeps unavailable foreign applications and never autoremoves.
 # https://wiki.debian.org/CrossGrading (Bookworm dpkg/tar/apt bootstrap recipe)
+# Candidate: 2.36-1 plus madison "libc6 | 2.36-1 | https://deb.debian.org/debian bookworm/main amd64 Packages" -> 2.36-1.
+# Candidate: (none), or a matching version available only for i386, produces no candidate.
 function crossgrade_bookworm_output_candidate() {
   local package=$1 version rows policy
   policy=$(LC_ALL=C apt-cache policy "$package:amd64") || return 2
@@ -4656,6 +4684,8 @@ function crossgrade_bookworm_output_candidate() {
 # Every executed removal needs its native replacement or a verified obsolete-package opt-in.
 # Bootstrap only downloads; raw dpkg
 # never applies the simulated removals of the two installed architecture-all task selectors.
+# Remv libc6:i386 [2.36-1] plus Inst libc6:amd64 (2.36-1 Debian:12 [amd64]) can satisfy replacement checks.
+# Purg libc6:i386 is rejected; the saved target and installed inventories must also permit each removal.
 function crossgrade_bookworm_check_plan() {
   local plan=$1 targets=$2 installed=$3 phase=${4:-remaining} obsolete=${5:-/dev/null}
   awk -F '\t' -v phase="$phase" '
@@ -6051,6 +6081,8 @@ function remove_leftover_packages() {
 }
 
 # Keep the six cleanup fields first; Description is multiline on historical dpkg.
+# install ok installed<TAB>bash<TAB>amd64<TAB>5.2-1<TAB>yes<TAB>required<TAB>GNU shell -> one row.
+# An indented Description continuation is skipped; a malformed non-indented record fails the inventory.
 function apt_packages_output_inventory() {
 (
   set -o pipefail
@@ -6069,6 +6101,8 @@ function apt_packages_output_inventory() {
 
 # Report from existing indexes only; this deliberately does not use the mutating leftover helpers.
 # Existing indexes only: package, query architecture, version, URI, suite/component.
+# bash | 5.2-1 | https://deb.debian.org/debian bookworm/main amd64 Packages
+# -> bash<TAB>amd64<TAB>5.2-1<TAB>https://deb.debian.org/debian<TAB>bookworm/main; Sources rows are skipped.
 function apt_packages_output_repository_versions() {
   local inventory=$1 native=$2 directory=$3 architecture package arch status _ architectures
   architectures=$(awk -F '\t' -v native="$native" '$1 ~ / installed$/ { print ($3 == "all" ? native : $3) }' "$inventory" | LC_ALL=C sort -u) || return 1
@@ -6100,6 +6134,8 @@ function apt_packages_output_repository_versions() {
 }
 
 # List installed versions that match official repositories, excluding ambiguous vendor matches.
+# Installed bash/amd64/5.2-1 plus that version from an official bookworm source -> bash<TAB>amd64<TAB>5.2-1.
+# The same version also matching a nonofficial source makes the origin ambiguous and suppresses the result.
 function apt_packages_output_official_installed_versions() {
   local family=$1 release=$2 native=$3 sources=$4 inventory=$5 archive_records=$6
   awk -F '\t' -v OFS='\t' -v family="$family" -v release="$release" -v native="$native" '
@@ -6139,6 +6175,9 @@ function apt_packages_output_official_installed_versions() {
 
 # Classification is evidence, not removal permission. Inputs retain installed-version metadata.
 # Output: package, architecture, installed version, class, reason (tab-separated).
+# deinstall ok config-files -> residual-config; install ok unpacked -> incomplete.
+# No current binary plus exact previous official version -> obsolete; without that provenance -> unavailable.
+# An available official installed version described as "transitional dummy package" -> transitional.
 function apt_packages_output_classifications() {
   local inventory=$1 native=$2 archive_records=$3 previous_provenance=${4:-/dev/null} current_provenance=${5:-/dev/null}
   awk -F '\t' -v OFS='\t' -v native="$native" '
@@ -6194,6 +6233,8 @@ function upgrade_record_package_origins() {
 }
 
 # Reject package installation/configuration; status 3 identifies unapproved removals for the bounded fallback.
+# Allowed bash<TAB>amd64 plus Remv bash [5.2-1] -> bash:amd64; unapproved Remv -> status 3.
+# Any Inst, Conf or Purg row -> status 4, even when a removal is allowed.
 function upgrade_cleanup_output_removals() {
   local plan=$1 allowed=$2 native=$3
   awk -F '\t' -v native="$native" '
@@ -7156,6 +7197,8 @@ function print_pkg_to_modified_diff() {
     esac
     if [ "$mode" = review ]; then case "$package_status" in *' ok installed') :;; *) continue;; esac; fi
     # Retired conffiles are not shipped, including newconffile remove-on-upgrade records.
+    # " /etc/ssh/sshd_config 0123456789abcdef0123456789abcdef" -> absolute path plus trailing MD5.
+    # A trailing obsolete or remove-on-upgrade marker skips the record before checksum extraction.
     case "$line" in *' obsolete'|*' remove-on-upgrade') continue;; esac
     checksum=${line##* }; file=${line% *}
     case "$file" in /*) :;; *) echo 'dss:warn: Invalid conffile path in package metadata.' >&2; report_status=1; continue;; esac
@@ -7759,6 +7802,12 @@ return $ret
 
 # Read identity as data, never source release files or infer a derivative from ID_LIKE.
 # One tab-separated record: distribution ID, installed version, linux|stream.
+# os-release input (separate lines):
+# ID=centos
+# VERSION_ID="8"
+# VARIANT_ID=stream
+# -> centos<TAB>8<TAB>stream.
+# Legacy line "CentOS Linux release 7.9.2009 (Core)" -> centos<TAB>7.9.2009<TAB>linux.
 function rpm_distro_output_identity() {
   local root=${1:-} records file LC_ALL=C
   if [ -e "$root/etc/os-release" ]; then
@@ -7852,6 +7901,8 @@ function rpm_sources_output_vault_rewrite() {
             return ""
         }
         function url_component(url, rest, count, part, i, pair, release, component) {
+            # /centos/7/os/$basearch/ and ?release=7&repo=os -> component=os for major=7.
+            # /centos/8/AppStream/$basearch/os/ -> component=AppStream for major=8.
             rest=url; sub(/^https?:\/\/[^/]+/, "", rest)
             if (rest ~ /\?/) {
                 sub(/^[^?]*\?/, "", rest)
@@ -7959,6 +8010,7 @@ function rpm_sources_prepare() {
   for file in /etc/yum.conf /etc/dnf/dnf.conf; do
     [ -f "$file" ] || continue
     settings=$(awk '
+      # [main] followed by reposdir=/etc/yum.repos.d -> no finding; include=/etc/yum.conf -> include.
       /^[ \t]*\[/ { main=($0 ~ /^[ \t]*\[main\][ \t]*$/) }
       main && /^[ \t]*reposdir[ \t]*=/ { value=$0; sub(/^[^=]*=[ \t]*/,"",value); sub(/[ \t]+[#;].*$/,"",value); sub(/[ \t]+$/,"",value); if (value != "/etc/yum.repos.d") print "custom" }
       /^[ \t]*include[ \t]*=/ { print "include" }
@@ -8278,6 +8330,7 @@ function dist_upgrade_to_latest() {
 }
 
 # Application/service manifest: bounded read-only collection.
+# Parser examples use reserved example.invalid names, standard layouts and explicit USER placeholders.
 # shellcheck shell=bash
 # Manifest collection is read-only: parse configuration and application metadata, never run application code.
 function manifest_json_string() {
@@ -8745,6 +8798,7 @@ function manifest_service() {
     postgresql-*) if [ "$manifest_package_backend" = dpkg ] && [ ! -e "$manifest_root/etc/init.d/$name" ]; then selector=postgresql; fi;;
   esac
   if [ "$manifest_package_backend" = dpkg ] && [[ "$name" == postgresql-* ]] && command -v pg_lsclusters >/dev/null 2>&1; then
+    # pg_lsclusters: 15 main 5432 online ... -> running=yes for postgresql-15; down -> running=no.
     if clusters=$(manifest_run_bounded 2 pg_lsclusters 2>/dev/null); then
       while read -r cluster_version cluster port cluster_state row; do
         [ "$cluster_version" = "${name#postgresql-}" ] || continue
@@ -8771,6 +8825,7 @@ function manifest_service() {
     if printf '%s\n' "$processes" | grep -qxE "$state"; then running=yes; running_source=process_name; fi
   fi
   if $systemd && command -v systemctl >/dev/null 2>&1; then
+    # UnitFileState=enabled-runtime -> enabled=yes; UnitFileState=masked -> enabled=no.
     if state=$(manifest_run_bounded 2 systemctl show -p UnitFileState "$selector.service" 2>/dev/null); then
       case "$state" in UnitFileState=enabled|UnitFileState=enabled-runtime) enabled=yes;; UnitFileState=disabled|UnitFileState=masked|UnitFileState=masked-runtime) enabled=no;; esac
       enabled_source=systemd
@@ -8797,6 +8852,8 @@ function manifest_packages() {
     return
   fi
   # Prefer the daemon owner over plugins and transitional package names.
+  # nginx:amd64<TAB>1.24.0<TAB>install ok installed<TAB>amd64 -> name=nginx, version=1.24.0.
+  # dovecot-core plus dovecot-imapd -> one service owned by dovecot-core; residual config-files rows are skipped.
   records=$(set -o pipefail; printf '%s\n' "$records" | awk -F '\t' '
     $3 ~ /(^| )installed$/ {
       name=$1; sub(/:.*/, "", name); key=$1 SUBSEP $4; rows[key]=$0; names[key]=name; score=0
@@ -8883,6 +8940,7 @@ function manifest_apache_php() {
   if [ -r "$manifest_root/etc/httpd/conf/httpd.conf" ]; then
     metadata=$(manifest_read_metadata "$manifest_root/etc/httpd/conf/httpd.conf") || { manifest_collection_failed=true; return; }
     server_root=$(awk '
+      # ServerRoot "/etc/httpd" -> /etc/httpd; ServerRoot ${HTTPD_ROOT} -> unknown.
       BEGIN { root="/etc/httpd" }
       tolower($1) == "serverroot" { root=$2; gsub(/[\042\047]/,"",root); if (NF != 2 || root !~ /^\// || root ~ /[$%{}]/) root="unknown" }
       END { print root }' <<< "$metadata") || { manifest_collection_failed=true; return; }
@@ -8897,6 +8955,7 @@ function manifest_apache_php() {
       tolower($1) ~ /^<if/ { conditional++ }
       tolower($1) ~ /^<\/if/ && conditional > 0 { conditional-- }
       tolower($1) == "loadmodule" && tolower($2) ~ /^php[0-9.]*_module$/ {
+        # LoadModule php_module modules/libphp.so -> modules/libphp.so<TAB>false outside an If block.
         path=$3; gsub(/[\042\047]/,"",path)
         print path "\t" (conditional ? "true" : "false")
       }' <<< "$metadata") || { manifest_collection_failed=true; continue; }
@@ -8978,6 +9037,8 @@ function manifest_fpm_pools() {
       done
     fi
     metadata=$(manifest_read_metadata "$file") || { manifest_collection_failed=true; continue; }
+    # [www], listen = /run/php/php8.2-fpm.sock, user = USER (separate lines)
+    # -> pool=www, socket=/run/php/php8.2-fpm.sock, user=USER; missing group/chroot stay unknown.
     records=$(awk '
       function reset() { socket="unknown"; user="unknown"; group="unknown"; chroot="unknown" }
       function output() { if (pool != "" && pool != "global") print pool "\t" socket "\t" user "\t" group "\t" chroot }
@@ -9011,6 +9072,7 @@ function manifest_dns() {
   manifest_dns_addresses=unknown
   manifest_dns_result=unknown
   if ! $manifest_dns_enabled; then manifest_dns_reason=disabled; return; fi
+  # example.invalid passes syntax checking; *.example.invalid and ${DOMAIN} remain unresolved names.
   if [[ ! "$domain" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[.][A-Za-z0-9-]+$ ]]; then
     manifest_dns_reason=wildcard_or_dynamic_name; return
   fi
@@ -9028,6 +9090,7 @@ function manifest_dns() {
     manifest_dns_reason=resolver_or_timeout_unavailable; return
   fi
   if command -v getent >/dev/null 2>&1 && addresses=$(manifest_run_bounded 2 getent ahosts "$domain" 2>/dev/null); then
+    # 192.0.2.1 STREAM example.invalid plus a DGRAM row for the same address -> one 192.0.2.1.
     addresses=$(printf '%s\n' "$addresses" | awk '!seen[$1]++ { if (value != "") value=value ","; value=value $1 } END { print value }')
     if [ -n "$addresses" ]; then
       for address in ${addresses//,/ }; do
@@ -9050,6 +9113,8 @@ function manifest_dns() {
       124|142) reason=timed_out;;
       *)
         diagnostic=$(awk -v requested="$domain" '
+          # Host example.invalid not found: 3(NXDOMAIN) -> nxdomain for requested=example.invalid.
+          # If example.invalid is an alias for missing.example.invalid., a target NXDOMAIN -> cname_target_not_found.
           BEGIN { requested=tolower(requested) }
           $2 == "is" && $3 == "an" && $4 == "alias" && $5 == "for" {
             name=tolower($1); sub(/[.]$/, "", name)
@@ -9089,21 +9154,27 @@ function manifest_application() {
   case "$document_root" in *'$'*|*'%'*|*'{'*|*'}'*) return ;; esac
   if [ -f "$manifest_root$document_root/wp-includes/version.php" ]; then
     file="$manifest_root$document_root/wp-includes/version.php"; application=WordPress; language=PHP
+    # $wp_version = "6.5.3"; -> version=6.5.3.
     version=$(awk '/^[ \t]*\$wp_version[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/administrator/manifests/files/joomla.xml" ]; then
     file="$manifest_root$document_root/administrator/manifests/files/joomla.xml"; application=Joomla; language=PHP
+    # <version>5.1.0</version> -> version=5.1.0.
     version=$(awk 'match($0,/<version>[^<]+/) { print substr($0,RSTART+9,RLENGTH-9); exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/core/lib/Drupal.php" ]; then
     file="$manifest_root$document_root/core/lib/Drupal.php"; application=Drupal; language=PHP
+    # const VERSION = "10.2.0"; -> version=10.2.0.
     version=$(awk '/const VERSION[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/includes/constants.php" ] && grep -q 'PHPBB_VERSION' <<< "$(manifest_read_metadata "$manifest_root$document_root/includes/constants.php")"; then
     file="$manifest_root$document_root/includes/constants.php"; application=phpBB; language=PHP
+    # define("PHPBB_VERSION", "3.3.12"); -> version=3.3.12.
     version=$(awk '/define[ \t]*\([ \t]*[\047\042]PHPBB_VERSION[\047\042]/ { line=$0; sub(/^.*PHPBB_VERSION[\047\042][ \t]*,[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/includes/DefaultSettings.php" ] && grep -q "\\\$wgVersion" <<< "$(manifest_read_metadata "$manifest_root$document_root/includes/DefaultSettings.php")"; then
     file="$manifest_root$document_root/includes/DefaultSettings.php"; application=MediaWiki; language=PHP
+    # $wgVersion = "1.41.0"; -> version=1.41.0.
     version=$(awk '/^[ \t]*\$wgVersion[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/version.php" ] && [ -f "$manifest_root$document_root/lib/moodlelib.php" ]; then
     file="$manifest_root$document_root/version.php"; application=Moodle; language=PHP
+    # $release = "4.3.3"; -> version=4.3.3; a Build: suffix becomes unknown because the whitelist rejects colons.
     version=$(awk '/^[ \t]*\$release[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/artisan" ]; then application=Laravel; language=PHP
   elif [ -f "$manifest_root$document_root/config.ru" ] || [ -f "$manifest_root$document_root/Gemfile" ]; then language=Ruby
@@ -9112,9 +9183,11 @@ function manifest_application() {
   elif [ -f "$manifest_root$document_root/index.php" ]; then language=PHP
   elif [ -f "$manifest_root$document_root/index.pl" ]; then language=Perl
   elif [ -f "$manifest_root$document_root/index.cgi" ]; then
+    # First line #!/usr/bin/perl -> language=Perl; #!/usr/bin/python3 -> language=Python.
     language=$(awk 'NR == 1 { if ($0 ~ /^#!.*perl/) print "Perl"; else if ($0 ~ /^#!.*python/) print "Python"; else print "unknown"; exit }' <<< "$(manifest_read_metadata "$manifest_root$document_root/index.cgi")")
   fi
   # A version is metadata, never an arbitrary expression or configuration value.
+  # 6.5.3 and 6.5.3 (stable) pass; VERSION_CONSTANT and 6.5.3;extra become unknown.
   if [[ ! "$version" =~ $version_pattern ]]; then version=unknown; fi
   if [ -n "$file" ]; then modified=$(stat -c '%y' -- "$file" 2>/dev/null) || modified=unknown; fi
   case "$language" in
@@ -9123,6 +9196,7 @@ function manifest_application() {
     *) file= ;;
   esac
   if [ -n "$file" ] && [ -r "$file" ]; then
+    # First line 3.11.8 in .python-version -> language_version=3.11.8, declared by the project.
     language_version=$(awk 'NR == 1 { print; exit }' <<< "$(manifest_read_metadata "$file")")
     if [[ "$language_version" =~ ^[0-9][0-9A-Za-z.+_-]{0,60}$ ]]; then version_source=project_declared_not_verified_runtime
     else language_version=unknown; fi
@@ -9177,6 +9251,7 @@ function manifest_website() {
   fi
   [ "$tls" != true ] || scheme=https
   # Configs use comma-separated names internally; whitespace and controls are removed by the parsers.
+  # example.invalid:8443 -> name=example.invalid, port=8443; [2001:db8::1]:443 keeps the brackets.
   for name in ${names//,/ }; do
     case "$name" in https://*) scheme=https; name=${name#https://} ;; http://*) scheme=http; name=${name#http://} ;; esac
     if [[ "$name" =~ $name_port_pattern ]]; then
@@ -9207,6 +9282,7 @@ function manifest_websites() {
     case "$server" in
       apache)
         if [ -r "$manifest_root/etc/apache2/envvars" ]; then
+          # export APACHE_RUN_USER=www-data -> default_user=www-data; variable expressions are not expanded.
           default_user=$(awk '/^[ \t]*(export[ \t]+)?APACHE_RUN_USER=[A-Za-z_][A-Za-z0-9_-]*[ \t]*$/ { sub(/^.*=/, ""); gsub(/[ \t]/, ""); print; exit }' <<< "$(manifest_read_metadata "$manifest_root/etc/apache2/envvars")")
           [ -n "$default_user" ] || default_user=unknown
         elif [ -r "$manifest_root/etc/httpd/conf/httpd.conf" ]; then
@@ -9240,6 +9316,7 @@ function manifest_websites() {
           else if (certificate != value) certificate="multiple"
         }
         # Retain only a literal authority; userinfo, paths, query strings and fragments can contain secrets.
+        # http://127.0.0.1:8080/private?token=TOKEN -> proxy=127.0.0.1:8080; http://${UPSTREAM} -> unresolved.
         function record_proxy(value, endpoint) {
           gsub(/^[\042\047]|[;\042\047]+$/,"",value)
           if (value ~ /[$%{}]/) { proxy="unresolved"; return }
@@ -9259,6 +9336,8 @@ function manifest_websites() {
         {
           line=$0; sub(/[ \t]+#.*/,"",line); $0=line
           if (server == "apache") {
+            # <VirtualHost *:443>, ServerName example.invalid, DocumentRoot /var/www/html (separate lines)
+            # -> names=example.invalid, port=443, root=/var/www/html; SSLEngine on sets tls=true.
             key=tolower($1)
             if (key == "<virtualhost") { emit(); reset(); active=1; port=$2; gsub(/[>]/,"",port); sub(/^.*:/,"",port); next }
             if (key == "</virtualhost>") { emit(); active=0; next }
@@ -9282,6 +9361,8 @@ function manifest_websites() {
               else if ($0 ~ /fcgi/) runtime="fastcgi_version_unknown"
             }
           } else if (server == "nginx") {
+            # In a server block: listen 443 ssl; -> port=443, tls=true; root /var/www/html; -> root=/var/www/html.
+            # fastcgi_pass unix:/run/php/php8.2-fpm.sock; -> runtime=/run/php/php8.2-fpm.sock.
             opens=gsub(/\{/,"{",line); closes=gsub(/\}/,"}",line)
             if (!active && $1 == "server" && opens > 0) { reset(); active=1; depth=0 }
             if (active) {
@@ -9303,6 +9384,8 @@ function manifest_websites() {
               if (depth <= 0) { emit(); active=0 }
             }
           } else if (server == "caddy") {
+            # example.invalid { starts a site on 443; root * /var/www/html sets root=/var/www/html.
+            # php_fastcgi unix//run/php/php8.2-fpm.sock -> runtime=/run/php/php8.2-fpm.sock.
             opens=gsub(/\{/,"{",line); closes=gsub(/\}/,"}",line)
             if (!active && opens > 0 && $1 !~ /^\(/ && $1 != "{") { reset(); active=1; depth=0; append_names(1,NF-1); port="443"; tls="true"; if ($1 ~ /^http:\/\//) { port="80"; tls="false" }; sub(/^https?:\/\//,"",names) }
             if (active) {
@@ -9328,6 +9411,7 @@ function manifest_websites() {
 }
 
 # Limit both configured paths and resolved aliases before probing mail data.
+# /home2/USER/Maildir is narrow; /home2/USER and /homebackup/USER/Maildir are not.
 function manifest_mail_path_is_narrow() {
   local home_number
   case "$1" in
@@ -9357,6 +9441,7 @@ function manifest_mail_root() {
   case "$path" in /*) ;; *) return ;; esac
   case "$path" in *'$'*|*'%'*|*'~'*|*'{'*|*'}'*)
     # Measure an existing literal parent, not an unresolved per-user template or a broad home tree.
+    # /var/vmail/%d/%n -> /var/vmail; /home/%u/Maildir -> /home, which is rejected as too broad.
     path=${path%%\%*}; path=${path%%\$*}; path=${path%%\~*}; path=${path%%\{*}; path=${path%/*}
     case "$path" in ''|/|/home|/var|/srv) return;; esac
     source="$source:template_root";;
@@ -9387,6 +9472,7 @@ function manifest_mail_root() {
       if ! manifest_mail_path_is_narrow "$actual"; then actual=; reason=resolved_path_not_scanned; fi
       if [ -n "$actual" ]; then
         if output=$(manifest_run_bounded 3 du -skx -- "$actual" 2>/dev/null); then
+          # du -skx: 1536<TAB>/var/mail -> size_mib=1.500; the value is allocated KiB divided by 1024.
           if size=$(awk '$1 ~ /^[0-9]+$/ { printf "%.3f", $1/1024; found=1 } END { exit !found }' <<< "$output"); then reason=measured
           else size=unknown; reason=invalid_du_output; fi
         else reason=limit_or_permissions; fi
@@ -9409,6 +9495,8 @@ function manifest_mail() {
     if [ ! -f "$file" ] || [ ! -r "$file" ]; then continue; fi
     file_count=$((file_count+1)); [ "$file_count" -le 200 ] || break
     metadata=$(manifest_read_metadata "$file") || { manifest_collection_failed=true; continue; }
+    # virtual_mailbox_base = /var/vmail -> key=virtual_mailbox_base, value=/var/vmail.
+    # mail_location = maildir:/var/vmail/%d/%n:INDEX=/tmp -> path=/var/vmail/%d/%n before template handling.
     records=$(awk '
       FNR > 20000 { exit }
       /^[ \t]*[#;]/ { next }
@@ -9479,6 +9567,7 @@ function manifest_migration_systemd_target() {
   [ -f "$target" ] && [ ! -L "$target" ] || return 1
   if [ "$name" != "${target##*/}" ]; then
     # A different name is routine only when the vendor unit declares that alias.
+    # [Install] followed by Alias=example.service -> accepts a link named example.service; Alias= alone resets the list.
     (set -o pipefail; manifest_read_metadata "$target" | MANIFEST_UNIT_ALIAS="$name" awk '
       /^[ \t]*\[/ { install=($0 ~ /^[ \t]*\[Install\][ \t]*$/) }
       install && /^[ \t]*Alias[ \t]*=/ {
@@ -9553,6 +9642,8 @@ function manifest_migration_paths() {
 
 function manifest_migration_identities() {
   local records user uid gid home shell count=0
+  # USER:x:1000:1000::/home/USER:/bin/bash -> USER<TAB>1000<TAB>1000<TAB>/home/USER<TAB>/bin/bash.
+  # The password placeholder and GECOS field are omitted; non-root accounts with unrelated homes are skipped.
   if ! records=$(set -o pipefail; manifest_read_metadata "$manifest_root/etc/passwd" | awk -F : '
     NF == 7 && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && ($3 == 0 || $6 ~ /^\/(home|srv|var\/www|var\/vmail|opt)(\/|$)/) {
       printf "%s\t%s\t%s\t%s\t%s\n", $1, $3, $4, $6, $7
@@ -9576,6 +9667,7 @@ function manifest_migration_mounts() {
   local records target type count=0
   [ -e "$manifest_root/etc/fstab" ] || return
   # Device fields and options may contain credentials; select target/type before emitting anything.
+  # UUID=PLACEHOLDER /home ext4 defaults 0 2 -> /home<TAB>ext4; the device and options are omitted.
   if ! records=$(set -o pipefail; manifest_read_metadata "$manifest_root/etc/fstab" | awk '
     /^[ \t]*#/ || NF < 3 {next}
     {printf "%s\t%s\n", $2, $3}
@@ -9695,6 +9787,7 @@ function manifest_capture() {
 function manifest_print_key_changes() {
   local baseline=$3
   # Review records use tab-separated key="JSON value" fields; retain escaping in display text.
+  # listener<TAB>address="::1"<TAB>port="25"<TAB>program="master" -> endpoint=[::1]:25, program=master.
   awk -F '\t' '
     $1 == "listener" {
       for (key in fields) delete fields[key]
@@ -9933,6 +10026,7 @@ function support_print_report() {
   if [ "$family" = unknown ]; then release=unknown; status=1; fi
   architecture=$(dpkg --print-architecture 2>/dev/null) || architecture=unknown
   case "$architecture" in amd64|i386|arm64|armhf|armel|ppc64el|s390x|riscv64|mips|mipsel|mips64el) :;; *) architecture=unknown; status=1;; esac
+  # uname -r: 6.1.0-18-amd64 -> kernel=6.1; build suffixes and host-specific text are omitted.
   kernel=$(uname -r 2>/dev/null | awk 'match($0,/^[0-9]+[.][0-9]+/) { print substr($0,RSTART,RLENGTH); exit }') || kernel=unknown
   if [ -z "$kernel" ] || [ "$kernel" = unknown ]; then kernel=unknown; status=1; fi
   printf '%s\n' 'distrorejuve support report v1' 'Review before posting. No raw logs, configuration, host identifiers or installed package lists are included.'
@@ -9941,6 +10035,7 @@ function support_print_report() {
   printf 'current_distribution: %s\ncurrent_release: %s\ncurrent_package_architecture: %s\ncurrent_kernel_series: %s\ncollector_bash_version: %s.%s.%s\n' \
     "$family" "$release" "$architecture" "${kernel:-unknown}" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${BASH_VERSINFO[2]}"
   if counts=$(LC_ALL=C dpkg-query -W -f='${Status}\n' 2>/dev/null | awk '
+    # hold ok installed -> installed++ and held++; deinstall ok config-files -> residual++.
     /^[a-z-]+ [a-z-]+ [a-z-]+$/ {
       if ($0 ~ /^(install|hold) ok installed$/) { installed++; if ($1 == "hold") held++ }
       else if ($3 == "config-files") residual++
@@ -9967,6 +10062,7 @@ function support_print_report() {
   probe_status=$?
   printf 'current_index_dist_upgrade_exit_status: %s\n' "$probe_status"
   if [ "$probe_status" -eq 0 ] && counts=$(printf '%s\n' "$plan" | awk '
+    # Inst bash ... then Conf bash ... -> install_or_upgrade=1, configure=1; require the numeric summary too.
     /^[0-9]+ upgraded, [0-9]+ newly installed, [0-9]+ to remove/ { summary=1 }
     /^Inst / { install++ } /^Remv / { remove++ } /^Purg / { purge++ } /^Conf / { configure++ }
     END { if (!summary) exit 1; printf "install_or_upgrade=%d remove=%d purge=%d configure=%d", install, remove, purge, configure }
@@ -9988,6 +10084,8 @@ function support_print_report() {
       ' "$directory/php-runtime.findings.tsv") || { local_review=incomplete; status=1; }
     fi
     # Match known messages to fixed labels; only known distribution codenames may be copied.
+    # E: Could not get lock /var/lib/dpkg/lock-frontend -> package_lock (and the generic apt label).
+    # Temporary failure resolving example.invalid -> network_dns; raw log text is not copied.
     LC_ALL=C awk -v verification="$verification" -v run_status="$exit_status" -v known_releases="$ALL_DEBIAN $ALL_UBUNTU" -v current_review="$local_review" '
       function codename(text) {
         if (match(text, /[(][a-z]+[)]$/)) {

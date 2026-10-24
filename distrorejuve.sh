@@ -9,7 +9,7 @@ function environment_validate_settings() {
       DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_MAIL_METRICS DR_PREFER_PACKAGED_USRMERGE_FILES \
       DR_PURGE_INCOMPATIBLE_PACKAGES DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES DR_REMOVE_X11_PACKAGES \
       DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK DR_SKIP_DISK_SPACE_CHECK DR_SKIP_DOVECOT_MIGRATION_CHECK \
-      DR_SKIP_KERNEL_CHECK DR_SKIP_OLD_PACKAGE_CHECK DR_SKIP_X11_CHECK; do
+      DR_SKIP_KERNEL_CHECK DR_SKIP_OLD_PACKAGE_CHECK DR_SKIP_X11_CHECK DR_UNPRIVILEGED; do
     value=${!name}
     case "$value" in
       ''|true|false) :;;
@@ -103,13 +103,13 @@ Uses:
 - Install missing Debian keys
 - Designed to run unattended without lots of prompting.
 - Burgeoning support to cross grade 32 bit distros to 64 bit
-- Show/remove cruft to permit tidy up of packages installed from non-current (old) repositories
+- List/remove leftover packages installed from non-current (old) repositories
 
 Arguments:
 
 Run with --help to get this message
 
-Run with --check (or no argument) to report disk space, kernel, distro version and configuration changes. Leave DR_REMOVE_X11_PACKAGES unset for a read-only check.
+Run with --check-upgrade (or no argument) for a read-only report of the current distro, intended target and known upgrade blockers.
 
 Run with --to-latest to upgrade through releases to Debian stable or the latest Ubuntu LTS.
 
@@ -132,10 +132,17 @@ Run with --support-report [RUN_DIRECTORY] to print a minimal report for a public
 Review it before posting. It omits raw logs, configuration and host identifiers; no upload occurs.
 
 Run with --manifest or --manifest-json to collect a read-only application/service/migration inventory (dpkg or RPM).
+Non-root users automatically use reduced collection; --unprivileged or DR_UNPRIVILEGED=true forces it.
+Reduced collection skips service status scripts, listener process ownership and mail size scans.
+It reports incomplete visibility and never invokes sudo. Run bash directly when already root.
+Commands that change the system, including --show-changes and --list-leftover-packages, require root outside reduced mode.
 DNS checks are enabled by default; DR_MANIFEST_DNS=false skips them.
 DR_MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
 Website records include the primary configured URL and local certificate-file presence.
 Missing names, indirect configuration and automatically managed certificates may remain unknown.
+Potential compromise indicators include suspicious process commands, kernel-thread name masquerading,
+temporary-path execution, suspicious scheduled commands and dot-prefixed listeners. Raw command bodies are not printed.
+These heuristics require manual review; missing indicators do not establish a clean server.
 
 Upgrade commands automatically retain private detailed logs in /root/distrorejuveinfo/runs.
 Use --verbose to show command output too, or --trace to write a separate Bash trace.
@@ -143,9 +150,9 @@ DR_LOG_DIRECTORY changes the log parent directory. NO_COLOR disables bold termin
 
 Run with --show-changes to report the differences pre/post upgrading (packages installed, config files, ports, etc).
 
-Run with --show-cruft to see packages that do not belong to the current distro.  e.g. leftover packages from older distros.  And to see 32 bit packages installed on 64 bit distros.
+Run with --list-leftover-packages to see packages that do not belong to the current distro.  e.g. leftover packages from older distros.  And to see 32 bit packages installed on 64 bit distros.
 
-Run with --remove-cruft to remove old packages and 32 bit applications on 64 bit distros.
+Run with --remove-leftover-packages to remove old packages and 32 bit applications on 64 bit distros.
 
 Run with --remove-deprecated-packages to remove old packages
 
@@ -170,7 +177,7 @@ Run with --resume to resume a paused distro rejuve running process (rm -f ~/dist
 
 Disk space: upgrades and crossgrades require 5120 MiB free on package/cache/state filesystems.
 Set DR_MIN_FREE_DISK_MIB to a positive integer to adjust the floor, or DR_SKIP_DISK_SPACE_CHECK=true to bypass.
---check reports a failed precondition with a nonzero exit status. Help and cleanup commands do not require this floor.
+--check-upgrade reports a failed precondition with a nonzero exit status. Help and cleanup commands do not require this floor.
 Skip controls accept true/false: DR_SKIP_KERNEL_CHECK, DR_SKIP_X11_CHECK, DR_ALLOW_BACKPORTS,
 DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK (current-release only), DR_SKIP_OLD_PACKAGE_CHECK, DR_SKIP_DOVECOT_MIGRATION_CHECK (2.4 migration only).
 DR_REMOVE_X11_PACKAGES enables X11 removal; DR_ENABLE_UBUNTU_CROSSGRADE permits experimental Ubuntu crossgrading.
@@ -3646,6 +3653,8 @@ function upgrade_check_path() {
   else repository_target=$(ubuntu_output_next_release "$current") || return 1; fi
   [ -n "$repository_target" ] || return 1
   apt_sources_check_releases_and_vendors "$repository_target" || return 1
+  # Readiness must not repair usrmerge or purge incompatible packages.
+  [ "${4:-requested}" != review ] || return 0
   usrmerge_recover_pending || return $?
   upgrade_check_incompatible_packages "$family" "$current" "$target"
 }
@@ -5589,7 +5598,7 @@ function crossgrade_debian() {
   fi
 
   [  ! -x /usr/bin/apt-show-versions ] && echo "dss:info:installing apt-show-versions" && apt_get_install apt-show-versions
-  ! "${DR_SKIP_OLD_PACKAGE_CHECK:-false}" && has_cruft_packages oldpkg && show_cruft_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --show-cruft followed by bash $0 --remove-cruft.  Or to ignore that, run export DR_SKIP_OLD_PACKAGE_CHECK=true and re-run this command. " && return 1
+  ! "${DR_SKIP_OLD_PACKAGE_CHECK:-false}" && has_leftover_packages oldpkg && show_leftover_packages oldpkg && echo "dss:warn:There are some old packages installed.  Best to remove them before proceeding.  Do that by running bash $0 --list-leftover-packages followed by bash $0 --remove-leftover-packages.  Or to ignore that, run export DR_SKIP_OLD_PACKAGE_CHECK=true and re-run this command. " && return 1
 
   dpkg --add-architecture amd64
   [ $? -ne 0 ] && echo "dss:error: Failed adding amd64 architecture." 2>&1 && return 1
@@ -5953,8 +5962,8 @@ function crossgrade_debian() {
 
   apt-get $APT_GET_INSTALL_OPTIONS autoremove
 
-  if has_cruft_packages 32bit; then 
-    show_cruft_packages
+  if has_leftover_packages 32bit; then
+    show_leftover_packages
     echo "dss:error:after cross grade, 32 bit packages remain." >&2
     return 1
   else 
@@ -6022,22 +6031,22 @@ function crossgrade_debian() {
   # return 0
 }
 
-# e.g. has_cruft_packages && show_cruft_packages && reduce_cruft_packages
-function has_cruft_packages() {
-   cruft_packages0 has $1
-   # returns 0 if cruft packages
+# e.g. has_leftover_packages && show_leftover_packages && remove_leftover_packages
+function has_leftover_packages() {
+   leftover_packages0 has $1
+   # returns 0 if leftover packages
    return $?
 }
-function show_cruft_packages() {
-   cruft_packages0 show $1
+function show_leftover_packages() {
+   leftover_packages0 show $1
    return $?
 }
 
-function remove_cruft_packages() {
-   cruft_packages0 remove  $1
+function remove_leftover_packages() {
+   leftover_packages0 remove  $1
    local ret=$?
-   [ "$ret" -eq 0 ] && echo "dss:trace:removed_cruft_packages completed."
-   [ "$ret" -ne 0 ] && echo "dss:error:remove cruft packages failed." >&2
+   [ "$ret" -eq 0 ] && echo "dss:trace:removed_leftover_packages completed."
+   [ "$ret" -ne 0 ] && echo "dss:error:remove leftover packages failed." >&2
    return $ret
 }
 
@@ -6058,7 +6067,7 @@ function apt_packages_output_inventory() {
 )
 }
 
-# Report from existing indexes only; this deliberately does not use the mutating cruft helpers.
+# Report from existing indexes only; this deliberately does not use the mutating leftover helpers.
 # Existing indexes only: package, query architecture, version, URI, suite/component.
 function apt_packages_output_repository_versions() {
   local inventory=$1 native=$2 directory=$3 architecture package arch status _ architectures
@@ -6707,11 +6716,11 @@ function print_no_available_versions() {
   $remove_amd64
 }
 
-# e.g. cruft_packages0 show 32bit
-function cruft_packages0() {
+# e.g. leftover_packages0 show 32bit
+function leftover_packages0() {
   [  ! -f /etc/debian_version ] && return 0
   if [ ! -x /usr/bin/apt-show-versions ]; then apt_get_install apt-show-versions || return $?; fi
-  local cruftlog=$(mktemp "cruftpackages.log.XXXXXX")
+  local leftover_log=$(mktemp "leftover-packages.log.XXXXXX")
   [ "$1" = "show" ] && local show="true"
   [ "$1" = "has" ] && local has="true" && local hasold="yes" && local has32bit="true"
   [ "$1" = "remove" ] || [  -z "$1" ]&& local remove="true"
@@ -6720,7 +6729,7 @@ function cruft_packages0() {
   [ "$2" = "oldpkg" ] && oldpkg=true && bit32=
   [ "$2" = "32bit" ] && bit32=true && oldpkg=
 
-  local has_cruft=0
+  local leftover_count=0
   local commandret=0
 
   # apt-show-versions
@@ -6728,15 +6737,15 @@ function cruft_packages0() {
   # openssl-blacklist:all 0.5-3 installed: No available version in archive
   # ruby-did-you-mean:all/stretch 1.0.0-2 uptodate
 
-  #echo "dss:trace: cruft show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
+  #echo "dss:trace: leftover show=$show has=$has remove=$remove oldpkg=$oldpgk 32bit=$bit32"
 
-  ignorablecruft="^lib|webmin|virtualmin|usermin"
-  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(print_no_available_versions | egrep -v "$ignorablecruft" | wc -l) ]; then
-    has_cruft=$((has_cruft+1))
-    [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(print_no_available_versions |egrep -v "$ignorablecruft" | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
+  ignorable_leftovers="^lib|webmin|virtualmin|usermin"
+  if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(print_no_available_versions | egrep -v "$ignorable_leftovers" | wc -l) ]; then
+    leftover_count=$((leftover_count+1))
+    [  ! -z "$show" ] && echo "dss:warn: Applications from non-current distro versions installed: $(print_no_available_versions |egrep -v "$ignorable_leftovers" | grep -v '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then
       echo "dss:trace: Working out the old packages to resume."
-      local oldpkgstoremove="$(print_no_available_versions | egrep -v "$ignorablecruft" | awk '{print $1}' | tr '\n' ' ')"
+      local oldpkgstoremove="$(print_no_available_versions | egrep -v "$ignorable_leftovers" | awk '{print $1}' | tr '\n' ' ')"
       # e.g. oldpkgstoremove has mysql-server-5.0:i386 mysql-server-core-5.0:i386
       [  $? -ne 0 ] && commandret=$((commandret+1))
       # /var/log/mysql/error.log:
@@ -6752,7 +6761,7 @@ function cruft_packages0() {
     fi
   fi
   if [  ! -z "$oldpkg" ] && [ -x /usr/bin/apt-show-versions ]  && [  0 -ne $(print_no_available_versions | grep '^lib' | wc -l) ]; then
-    has_cruft=$((has_cruft+1))
+    leftover_count=$((leftover_count+1))
     [  ! -z "$show" ] && echo "dss:warn: Libraries from non-current distro versions installed: $(print_no_available_versions | grep '^lib' | awk '{print $1}' | tr '\n' ' ')"
     if [  ! -z "$remove" ]; then
       apt_get_remove $(print_no_available_versions | grep '^lib' | awk '{print $1}' | tr '\n' ' ')
@@ -6762,10 +6771,10 @@ function cruft_packages0() {
   fi
   if [  ! -z "$bit32" ]; then
     if [ $(getconf LONG_BIT) -eq 64 ]; then
-      dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
-      if [  $(cat "$cruftlog" | head | wc -l ) -gt 0 ]; then
-        has_cruft=$((has_cruft+1))
-        [  ! -z "$show" ] && echo "dss:warn: There are some i386 application packages still installed.  They can be removed by running bash $0 --remove-cruft.  They are: $(grep -v '^lib' "$cruftlog" | tr '\n' ' ') $(grep '^lib' "$cruftlog" | tr '\n' ' ')."
+      dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$leftover_log"
+      if [  $(cat "$leftover_log" | head | wc -l ) -gt 0 ]; then
+        leftover_count=$((leftover_count+1))
+        [  ! -z "$show" ] && echo "dss:warn: There are some i386 application packages still installed.  They can be removed by running bash $0 --remove-leftover-packages.  They are: $(grep -v '^lib' "$leftover_log" | tr '\n' ' ') $(grep '^lib' "$leftover_log" | tr '\n' ' ')."
         if [  ! -z "$remove" ]; then
 
           local loop=0
@@ -6779,19 +6788,19 @@ function cruft_packages0() {
               dpkg_install $(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$')
               [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
               mv $(find /var/cache/apt/archives/ -type f | egrep 'amd64.deb$|all.deb$')  /root/distrorejuveinfo/$$
-              dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
+              dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$leftover_log"
             else
               echo "dss:trace: cross grading downloading essential packages (after download+install failed) via download and separate install"
               apt-get $APT_GET_INSTALL_OPTIONS download $essentialpackages
               dpkg_install $(find . -type f |  egrep 'amd64.deb$|all.deb$')
               [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
               mv $(find /var/cache/apt/archives/ -type f  | egrep 'amd64.deb$|all.deb$') /root/distrorejuveinfo/$$
-              dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$cruftlog"
+              dpkg -l | grep 'i386' | grep '^ii' | awk '{print $2}' > "$leftover_log"
             fi
           done
 
           # install 64 versions of the packages if we can.
-          local lib64="$(grep -v '^lib' "$cruftlog" | sed 's/:i386/:amd64/g' | tr '\n' ' ')"
+          local lib64="$(grep -v '^lib' "$leftover_log" | sed 's/:i386/:amd64/g' | tr '\n' ' ')"
           echo "dss:trace: bulk installing 64bit versions of installed i386 apps: $lib64"
           apt_get_install $lib64
           echo "dss:trace: force install check"
@@ -6803,7 +6812,7 @@ function cruft_packages0() {
           apt_get_f_install
           # [  $? -ne 0 ] && commandret=$((commandret+1))
           echo "dss:trace: removing 32 bit libraries"
-          apt_get_remove $(grep -v '^lib' "$cruftlog" | sed 's/:i386//' | sed 's/$/:i386/' | tr '\n' ' ' )
+          apt_get_remove $(grep -v '^lib' "$leftover_log" | sed 's/:i386//' | sed 's/$/:i386/' | tr '\n' ' ' )
           local lib32="$(dpkg -l | grep ':i386' | grep '^ii' | awk '{print $2}' | grep 'lib' )"
           echo "dss:trace: individually removing i386 libraries: $lib32"
           for i in $lib32; do apt_get_remove $i; done
@@ -6813,10 +6822,10 @@ function cruft_packages0() {
       fi
     fi
   fi # if32
-  [  -f "$cruftlog" ] && rm -f "$cruftlog"
-  # returns 0 if cruft packages
+  [  -f "$leftover_log" ] && rm -f "$leftover_log"
+  # returns 0 if leftover packages
   [  ! -z "$remove" ] && return $commandret
-  if [  ! -z "$has" ]; then [ $has_cruft -gt 0 ] && return 0 || return 1; fi
+  if [  ! -z "$has" ]; then [ $leftover_count -gt 0 ] && return 0 || return 1; fi
   [  ! -z "$show" ] && return 0
 }
 
@@ -8297,6 +8306,8 @@ function manifest_json_string() {
 function manifest_output_review_record() {
   local type=$1 key value
   shift
+  # Process IDs and counts are transient observations, not migration configuration.
+  case "$type:${2:-}" in security_indicator:*|warning:security_*) return 0;; esac
   printf '%s' "$type"
   while [ "$#" -ge 2 ]; do
     key=$1; value=$2; shift 2
@@ -8337,10 +8348,11 @@ function manifest_emit() {
 # A listening socket proves a local bind, not public reachability. Firewalls,
 # NAT and proxies can change which service an external visitor reaches.
 function manifest_listeners() {
-  local raw parsed source protocol address port program scope application
-  if command -v ss >/dev/null 2>&1 && raw=$(ss -lntp 2>/dev/null); then
+  local raw parsed source protocol address port program scope application listener_options=-lntp
+  if "${manifest_unprivileged:-false}"; then listener_options=-lnt; fi
+  if command -v ss >/dev/null 2>&1 && raw=$(ss "$listener_options" 2>/dev/null); then
     source=ss
-  elif command -v netstat >/dev/null 2>&1 && raw=$(netstat -lntp 2>/dev/null); then
+  elif command -v netstat >/dev/null 2>&1 && raw=$(netstat "$listener_options" 2>/dev/null); then
     source=netstat
   else
     manifest_emit warning area listeners reason 'ss/netstat unavailable or permission denied'
@@ -8403,7 +8415,263 @@ function manifest_listeners() {
       *) protocol=tcp ;;
     esac
     manifest_emit listener service "$protocol" address "$address" port "$port" program "$program" application "$application" binding "$scope" reachability unknown
+    case "$program" in .*)
+      manifest_emit security_indicator indicator dot_prefixed_listener program "$program" address "$address" port "$port" assessment requires_review reason 'Dot-prefixed listening process name; inspect its owner and executable. A name alone does not establish compromise.';;
+    esac
   done <<< "$parsed"
+}
+
+# Inspect arguments as data only; emit fixed indicators and numeric references, never raw commands.
+function manifest_process_indicators() {
+  local records indicator count pid ppid uid reason
+  # ps -eww -o pid=,ppid=,uid=,vsz=,args=, for example:
+  # 101 50 1001 9000 sh -c echo 'app ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+  # 102 50 1001 4000 [kworker/0:0] 47128 -> userspace_kernel_name, not a kernel thread.
+  if ! records=$(set -o pipefail; LC_ALL=C manifest_run_bounded 5 ps -eww -o pid=,ppid=,uid=,vsz=,args= 2>/dev/null | LC_ALL=C awk '
+    function record(indicator, key) {
+      key=indicator SUBSEP $2 SUBSEP $3
+      if (!(key in counts)) {
+        if (groups >= 200) { limited=1; return }
+        groups++; kinds[key]=indicator; pids[key]=$1; parents[key]=$2; uids[key]=$3
+      }
+      counts[key]++
+    }
+    NR > 20000 { limited=1; next }
+    $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || NF < 5 { bad=1; next }
+    {
+      args=$0; sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+/, "", args)
+      if (args ~ />[[:space:]]*[\047\042]?\/etc\/sudoers([.]d\/|[[:space:]\047\042;|&]|$)/ ||
+          args ~ /(^|[[:space:]/])tee([[:space:]]+-[a-zA-Z]+)*[[:space:]]+[\047\042]?\/etc\/sudoers([.]d\/|[[:space:]\047\042;|&]|$)/) record("sudoers_write_command")
+      if (args ~ /(^|[[:space:]/])base64([[:space:]]|$)/ &&
+          args ~ /(^|[[:space:]])(-d|--decode)([[:space:]]|$)/ &&
+          args ~ /\|[[:space:]]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([[:space:];|&]|$)/) record("encoded_shell_pipeline")
+      if ($5 ~ /^[[]?(kworker\/|kthreadd(]|$)|ksoftirqd\/|migration\/|rcu_(sched|gp|par_gp|tasks))/ && ($3 != 0 || $4 > 0)) record("userspace_kernel_name")
+      if ($5 ~ /^\/(tmp|var\/tmp|dev\/shm)\//) record("temporary_executable")
+      if (args ~ /\/webmin\/miniserv[.]pl([[:space:]]|$)/ && args ~ /\/etc\/webmin\/miniserv[.]conf([[:space:]]|$)/) record("panel_worker_concentration")
+      program=$5; sub(/^.*\//, "", program)
+      if (program ~ /^(sh|bash|dash|ash|ksh|zsh|python([0-9]+([.][0-9]+)*)?|perl|ruby|node)$/) {
+        # Common single-word flags such as python -u; -c/-e denotes code, not a script pathname.
+        i=6
+        while (i <= NF && $i ~ /^-/ && $i !~ /^--$/) {
+          if ($i ~ /^-[^-]*[ce]/) break
+          i++
+        }
+        if ($i == "--") i++
+        if ($i ~ /^\/(tmp|var\/tmp|dev\/shm)\//) record("temporary_script")
+      }
+    }
+    END {
+      for (key in counts) {
+        if (kinds[key] == "panel_worker_concentration" && counts[key] < 20) continue
+        printf "%s\t%d\t%s\t%s\t%s\n", kinds[key], counts[key], pids[key], parents[key], uids[key]
+      }
+      if (limited) print "limit"
+      if (bad) print "parse_failed"
+    }
+  ' | LC_ALL=C sort); then
+    manifest_emit warning area security_processes reason 'Process snapshot failed or timed out; potential compromise indicators could not be evaluated.'
+    return
+  fi
+  while IFS=$'\t' read -r indicator count pid ppid uid; do
+    case "$indicator" in
+      '') continue;;
+      limit) manifest_emit warning area security_processes reason 'Only the first 20000 processes and 200 indicator/parent/UID groups were examined; coverage is incomplete.'; continue;;
+      parse_failed) manifest_emit warning area security_processes reason 'Some process rows could not be parsed; coverage is incomplete.'; continue;;
+      sudoers_write_command) reason='Command references a sudoers write; verify authorization and whether the write succeeded.';;
+      encoded_shell_pipeline) reason='Command decodes Base64 and pipes to a shell; review its origin without executing the payload.';;
+      panel_worker_concentration) reason='At least 20 Webmin workers share a parent and UID; review sessions, logs and expected concurrency. High concurrency alone does not establish compromise.';;
+      userspace_kernel_name) reason='Kernel-thread-style command name has a nonzero UID or userspace memory; investigate possible masquerading.';;
+      temporary_executable|temporary_script) reason='Executable or interpreter script starts from a temporary directory; legitimate installers can also do this.';;
+      *) continue;;
+    esac
+    manifest_emit security_indicator indicator "$indicator" process_count "$count" sample_pid "$pid" parent_pid "$ppid" uid "$uid" assessment requires_review reason "$reason"
+  done <<< "$records"
+}
+
+# Inspect the kernel's executable links too: argv can hide a running, unlinked binary.
+function manifest_executable_indicators() {
+  local records indicator count pid location reason incomplete=false
+  [ -d "$manifest_root/proc" ] || return
+  # find prints parent<TAB>link, e.g. /proc/101<TAB>/root/tool (deleted).
+  # Never follow the link, read the binary or print its potentially sensitive pathname.
+  if ! records=$(set -o pipefail; LC_ALL=C manifest_run_bounded 5 find "$manifest_root/proc" -mindepth 2 -maxdepth 2 -name exe -type l -printf '%h\t%l\n' 2>/dev/null | LC_ALL=C awk -F '\t' '
+    function record(kind, place, key) {
+      key=kind SUBSEP place; counts[key]++; kinds[key]=kind; locations[key]=place
+      if (!(key in pids)) pids[key]=pid
+    }
+    NR > 20000 { limited=1; next }
+    {
+      pid=$1; sub(/^.*\//, "", pid)
+      if (pid !~ /^[0-9]+$/ || NF != 2 || $2 == "") next
+      path=$2; deleted=sub(/ [(]deleted[)]$/, "", path)
+      if (path ~ /^\/(tmp|var\/tmp|dev\/shm)\//) record("temporary_executable_target", "temporary_directory")
+      if (deleted && path ~ /^\/(root|home|tmp|var\/tmp|dev\/shm)\//) record("deleted_executable_in_writable_location", "home_or_temporary_directory")
+    }
+    END {
+      for (key in counts) printf "%s\t%d\t%s\t%s\n", kinds[key], counts[key], pids[key], locations[key]
+      if (limited) print "limit"
+    }' | LC_ALL=C sort); then incomplete=true; fi
+  while IFS=$'\t' read -r indicator count pid location; do
+    case "$indicator" in
+      '') continue;;
+      limit) incomplete=true; continue;;
+      temporary_executable_target) reason='Kernel executable link points into temporary storage, even if the process command name hides it.';;
+      deleted_executable_in_writable_location) reason='A running executable was unlinked from a home or temporary directory. Legitimate application updates can also do this.';;
+      *) continue;;
+    esac
+    manifest_emit security_indicator indicator "$indicator" process_count "$count" sample_pid "$pid" location "$location" evidence proc_exe assessment requires_review reason "$reason"
+  done <<< "$records"
+  if $incomplete; then
+    manifest_emit warning area security_executables reason 'Executable-link coverage is incomplete: permissions, exited processes or limits (5 seconds, 20000 links).'
+  fi
+}
+
+# Inspect a small set of website files as text; never invoke PHP or decode a payload.
+function manifest_web_indicators() {
+  local document_root=$1 resolved relative directory depth files file size content records indicator line mode
+  if [ $((SECONDS-manifest_web_started)) -ge 15 ]; then manifest_web_incomplete=true; return; fi
+  case "$document_root" in /*) ;; *) return;; esac
+  resolved=$(readlink -f -- "$manifest_root$document_root" 2>/dev/null) || return
+  [ -d "$resolved" ] || return
+  case "$resolved/" in "$manifest_root/"*) ;; *) manifest_web_incomplete=true; return;; esac
+  relative=${resolved#"$manifest_root"}
+  # Reject broad or special roots even when reached through an alias in a vhost.
+  case "$relative" in ''|/|/home|/root|/srv|/var|/var/www|/tmp|/var/tmp|/usr|/opt|/etc|/etc/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*) return;; esac
+  manifest_web_roots=$((manifest_web_roots+1))
+  if [ "$manifest_web_roots" -gt 20 ]; then manifest_web_incomplete=true; return; fi
+  for directory in "$resolved" "$resolved/tmp" "$resolved/uploads" "$resolved/images" "$resolved/cache" "$resolved/wp-content/uploads"; do
+    if [ ! -d "$directory" ] || [ -L "$directory" ]; then continue; fi
+    if [ $((SECONDS-manifest_web_started)) -ge 15 ] || [ "$manifest_web_findings" -ge 200 ]; then manifest_web_incomplete=true; return; fi
+    relative=$(readlink -f -- "$directory" 2>/dev/null) || { manifest_web_incomplete=true; continue; }
+    case "$relative" in "$resolved"|"$resolved"/*) ;; *) manifest_web_incomplete=true; continue;; esac
+    mode=$(stat -c %a -- "$directory" 2>/dev/null) || { manifest_web_incomplete=true; continue; }
+    case "$mode" in *[2367])
+      manifest_web_findings=$((manifest_web_findings+1))
+      manifest_emit security_indicator indicator world_writable_web_directory path "${directory#"$manifest_root"}" assessment requires_review reason 'Directory permits writes by any local user; check ownership and intended access. Permissions alone do not establish compromise.';;
+    esac
+    depth=3; [ "$directory" != "$resolved" ] || depth=1
+    # Prune control-character names before using newline-delimited paths. Root-level
+    # PHP files and common upload/cache directories take priority over vendor libraries.
+    if ! files=$(set -o pipefail; LC_ALL=C manifest_run_bounded 3 find "$directory" -maxdepth "$depth" \( -name '*[[:cntrl:]]*' -prune \) -o \( -type f \( -iname '*.php' -o -iname '*.phtml' -o -iname '*.php[0-9]' -o -iname '*.jpg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.css' -o -iname '*.js' -o -iname '*.txt' -o -iname '*.html' \) -print \) 2>/dev/null | head -n 201); then manifest_web_incomplete=true; fi
+    while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      if [ "$manifest_web_files" -ge 200 ] || [ $((SECONDS-manifest_web_started)) -ge 15 ]; then manifest_web_incomplete=true; return; fi
+      manifest_web_files=$((manifest_web_files+1))
+      # Resolve again before reading: never cross out of the selected website via a link.
+      relative=$(readlink -f -- "$file" 2>/dev/null) || { manifest_web_incomplete=true; continue; }
+      case "$relative" in "$resolved"/*) ;; *) manifest_web_incomplete=true; continue;; esac
+      if [ ! -f "$file" ] || [ ! -r "$file" ]; then manifest_web_incomplete=true; continue; fi
+      size=$(stat -c %s -- "$file" 2>/dev/null) || { manifest_web_incomplete=true; continue; }
+      if [ "$size" -gt 262144 ]; then manifest_web_incomplete=true; continue; fi
+      # Strip NUL bytes from bounded binary/image samples without shell substitution warnings.
+      content=$(set -o pipefail; manifest_run_bounded 1 head -c 262144 -- "$file" 2>/dev/null | LC_ALL=C tr -d '\000') || { manifest_web_incomplete=true; continue; }
+      records=$(LC_ALL=C awk '
+        # Correlated features, not an assertion of PHP data flow: eval(base64_decode(...))
+        # or request input plus command execution and file-manager/error-suppression features.
+        {
+          text=tolower($0)
+          if (text ~ /<[?](php|=)/) php=1
+          if (text ~ /(^|[^a-z0-9_])(eval|assert)[[:space:]]*[(]/) { evaluate=1; if (!eval_line) eval_line=NR }
+          if (text ~ /(^|[^a-z0-9_])(base64_decode|gzinflate|gzuncompress|str_rot13)[[:space:]]*[(]/) decode=1
+          if (text ~ /(^|[^a-z0-9_])(shell_exec|exec|system|passthru|popen|proc_open)[[:space:]]*[(]/) { execute=1; if (!exec_line) exec_line=NR }
+          if (text ~ /\$_(get|post|request|cookie)[[:space:]]*\[/) request=1
+          if (text ~ /error_reporting[[:space:]]*[(][[:space:]]*0[[:space:]]*[)]/ || text ~ /move_uploaded_file[[:space:]]*[(]/ || text ~ /open_basedir/) manager=1
+          if (text ~ /hacked[[:space:]]+by[[:space:]]+[a-z0-9_]/ && !deface_line) deface_line=NR
+        }
+        END {
+          if (php && evaluate && decode) print "php_encoded_execution\t" eval_line
+          if (php && request && execute && manager) print "php_webshell_features\t" exec_line
+          if (deface_line) print "possible_web_defacement\t" deface_line
+        }' <<< "$content") || { manifest_web_incomplete=true; continue; }
+      while IFS=$'\t' read -r indicator line; do
+        [ -n "$indicator" ] || continue
+        if [ "$indicator" = possible_web_defacement ] && [ "$directory" = "$resolved" ]; then continue; fi
+        if [ "$manifest_web_findings" -ge 200 ]; then manifest_web_incomplete=true; return; fi
+        manifest_web_findings=$((manifest_web_findings+1))
+        manifest_emit security_indicator indicator "$indicator" path "${file#"$manifest_root"}" line "$line" assessment requires_review reason 'Website file contains correlated code or defacement markers; review manually. Comments, examples and authorized tools can also match. File contents are omitted.'
+      done <<< "$records"
+    done <<< "$files"
+  done
+}
+
+# Inspect job bodies as data; never emit command bodies or environment values.
+function manifest_schedule_commands() {
+  local path=$1 kind=$2 content=$3 records indicator line target
+  # User: "@reboot /bin/sh /var/tmp/.cache/.s"; system: "*/10 * * * * app /bin/sh /tmp/job".
+  records=$(LC_ALL=C awk -v kind="$kind" '
+    function output(indicator, target) { printf "%s\t%d\t%s\n", indicator, NR, target }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      command=$0; sub(/^[[:space:]]+/, "", command)
+      if (command ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/) {
+        if (command !~ /^SHELL[[:space:]]*=/) next
+        sub(/^SHELL[[:space:]]*=[[:space:]]*/, "", command)
+      } else if (kind != "script") {
+        fields=(kind == "anacron" ? 3 : (command ~ /^@/ ? 1 : 5))
+        if (kind == "system") fields++
+        for (i=0; i<fields; i++) sub(/^[^[:space:]]+[[:space:]]+/, "", command)
+      }
+      if (command ~ /(^|[;|&])[[:space:]]*[\047\042]?\/(tmp|var\/tmp|dev\/shm)\// ||
+          command ~ /(^|[[:space:];|&])((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh|python[0-9.]*|perl|ruby|node|source|[.])[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*[\047\042]?\/(tmp|var\/tmp|dev\/shm)\//) {
+        if (match(command, /\/(tmp|var\/tmp|dev\/shm)\/[^[:space:]\047\042;|&<>]+/)) target=substr(command,RSTART,RLENGTH)
+        else target="unknown"
+        output("scheduled_temporary_execution", target)
+      }
+      if (command ~ /(^|[[:space:];|&])cd[[:space:]]+[\047\042]?\/(tmp|var\/tmp|dev\/shm)(\/|[[:space:]\047\042;|&]|$)/ &&
+          command ~ /[;&][[:space:]]*((python[0-9.]*|sh|bash|perl)[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*)?([.]\/|[.][A-Za-z0-9_])/) output("scheduled_temporary_workdir", "temporary_directory")
+      if (command ~ /(^|[[:space:]/])base64([[:space:]]|$)/ &&
+          command ~ /(^|[[:space:]])(-d|--decode)([[:space:]]|$)/ &&
+          command ~ /\|[[:space:]]*((\/usr)?\/bin\/)?(sh|bash|dash|ash|ksh|zsh)([[:space:];|&]|$)/) output("scheduled_encoded_shell", "unknown")
+      if (command ~ />[[:space:]]*[\047\042]?\/etc\/sudoers([.]d\/|[[:space:]\047\042;|&]|$)/ ||
+          command ~ /(^|[[:space:]/])tee([[:space:]]+-[a-zA-Z]+)*[[:space:]]+[\047\042]?\/etc\/sudoers([.]d\/|[[:space:]\047\042;|&]|$)/) output("scheduled_sudoers_write", "/etc/sudoers")
+    }
+  ' <<< "$content") || { manifest_schedule_incomplete=true; return; }
+  while IFS=$'\t' read -r indicator line target; do
+    [ -n "$indicator" ] || continue
+    if [ "$manifest_schedule_findings" -ge 200 ]; then manifest_schedule_incomplete=true; break; fi
+    manifest_schedule_findings=$((manifest_schedule_findings+1))
+    manifest_emit security_indicator indicator "$indicator" path "$path" line "$line" target "$target" assessment requires_review reason 'Scheduled command has a potential compromise indicator; review its source and authorization. Command arguments are omitted.'
+  done <<< "$records"
+}
+
+function manifest_current_crontab_indicators() {
+  local jobs status
+  if ! command -v crontab >/dev/null 2>&1; then manifest_schedule_incomplete=true; return; fi
+  jobs=$(LC_ALL=C manifest_run_bounded 2 crontab -l 2>&1)
+  status=$?
+  if [ "$status" -eq 0 ]; then manifest_schedule_commands current_user_crontab user "$jobs"
+  elif [ "$status" -eq 1 ] && [[ "$jobs" == *'no crontab for '* ]]; then :
+  else manifest_schedule_incomplete=true; fi
+}
+
+function manifest_schedule_indicators() {
+  local file directory kind size content count=0 manifest_schedule_findings=0 manifest_schedule_incomplete=false
+  for directory in /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /var/spool/cron /var/spool/cron/crontabs; do
+    if [ -d "$manifest_root$directory" ] && { [ ! -r "$manifest_root$directory" ] || [ ! -x "$manifest_root$directory" ]; }; then manifest_schedule_incomplete=true; fi
+  done
+  for file in "$manifest_root"/etc/crontab "$manifest_root"/etc/anacrontab \
+      "$manifest_root"/etc/cron.d/* "$manifest_root"/etc/cron.hourly/* "$manifest_root"/etc/cron.daily/* \
+      "$manifest_root"/etc/cron.weekly/* "$manifest_root"/etc/cron.monthly/* \
+      "$manifest_root"/var/spool/cron/* "$manifest_root"/var/spool/cron/crontabs/*; do
+    [ -f "$file" ] || continue
+    count=$((count+1))
+    if [ "$count" -gt 200 ] || [ "$manifest_schedule_findings" -ge 200 ]; then manifest_schedule_incomplete=true; break; fi
+    size=$(stat -L -c %s -- "$file" 2>/dev/null) || { manifest_schedule_incomplete=true; continue; }
+    if [ "$size" -gt 1048576 ] || [ ! -r "$file" ]; then manifest_schedule_incomplete=true; continue; fi
+    content=$(manifest_read_metadata "$file") || { manifest_schedule_incomplete=true; continue; }
+    case "${file#"$manifest_root"}" in
+      /etc/crontab|/etc/cron.d/*) kind=system;;
+      /etc/anacrontab) kind=anacron;;
+      /var/spool/cron/*) kind=user;;
+      *) kind=script;;
+    esac
+    manifest_schedule_commands "${file#"$manifest_root"}" "$kind" "$content"
+  done
+  # The crontab tool can expose the current users jobs even when its spool is private.
+  if [ -z "$manifest_root" ] && "${manifest_unprivileged:-false}"; then manifest_current_crontab_indicators; fi
+  if $manifest_schedule_incomplete; then
+    manifest_emit warning area security_schedules reason 'Schedule coverage is incomplete: unreadable/failed probes or collection limits (200 files, 1 MiB per file, 200 findings).'
+  fi
 }
 
 # Perl's alarm survives exec; use the already-installed interpreter when old coreutils lacks timeout.
@@ -8434,7 +8702,7 @@ function manifest_service() {
       done <<< "$clusters"
       running_source=pg_lsclusters
     fi
-  elif command -v upgrade_services_is_active >/dev/null 2>&1; then
+  elif ! "${manifest_unprivileged:-false}" && command -v upgrade_services_is_active >/dev/null 2>&1; then
     if upgrade_services_is_active "$name" "$selector"; then running=yes; running_source=service_status
     else
       result=$?
@@ -8876,7 +9144,8 @@ function manifest_website() {
   done
   case "|$manifest_seen_roots|" in *"|$document_root|"*) ;; *)
     manifest_seen_roots="$manifest_seen_roots|$document_root"
-    manifest_application "$document_root" ;;
+    manifest_application "$document_root"
+    manifest_web_indicators "$document_root" ;;
   esac
 }
 
@@ -9010,10 +9279,25 @@ function manifest_websites() {
 
 # Limit both configured paths and resolved aliases before probing mail data.
 function manifest_mail_path_is_narrow() {
+  local home_number
   case "$1" in
-    "$manifest_root"/var/mail|"$manifest_root"/var/spool/mail|"$manifest_root"/var/vmail|"$manifest_root"/var/mail/*|"$manifest_root"/var/spool/mail/*|"$manifest_root"/var/vmail/*|"$manifest_root"/home/*/Maildir|"$manifest_root"/root/Maildir|"$manifest_root"/var/qmail/mailnames|"$manifest_root"/home/*/mail) return 0;;
-    *) return 1;;
+    "$manifest_root"/var/mail|"$manifest_root"/var/mail/*|\
+    "$manifest_root"/var/spool/mail|"$manifest_root"/var/spool/mail/*|\
+    "$manifest_root"/var/vmail|"$manifest_root"/var/vmail/*|\
+    "$manifest_root"/home/vmail|"$manifest_root"/home/vmail/*|\
+    "$manifest_root"/www/vmail|"$manifest_root"/www/vmail/*|\
+    "$manifest_root"/var/customers/mail|"$manifest_root"/var/customers/mail/*|\
+    "$manifest_root"/var/qmail/mailnames|"$manifest_root"/var/qmail/mailnames/*|\
+    "$manifest_root"/root/Maildir|"$manifest_root"/root/.Maildir) return 0;;
+    "$manifest_root"/home/*|"$manifest_root"/home[0-9]*/*)
+      # cPanel can place accounts on /home2, /home10, etc.; reject other /home* trees.
+      home_number=${1#"$manifest_root"/home}; home_number=${home_number%%/*}
+      case "$home_number" in *[!0-9]*) return 1;; esac
+      case "$1" in
+        */Maildir|*/Maildir/*|*/.Maildir|*/.Maildir/*|*/mail|*/mail/*|*/imap|*/imap/*) return 0;;
+      esac;;
   esac
+  return 1
 }
 
 # Mail stores can contain millions of files. Bound scans by time and path
@@ -9043,7 +9327,8 @@ function manifest_mail_root() {
   if [ -d "$actual/cur" ] && [ -d "$actual/new" ] && [ -d "$actual/tmp" ]; then count=1; count_reason=maildir; fi
   # Only conventional narrow mail roots are scanned; a configured / or /home is never traversed.
   if manifest_mail_path_is_narrow "$actual"; then
-    if ! $manifest_mail_metrics; then reason=disabled
+    if "${manifest_unprivileged:-false}"; then reason=unprivileged
+    elif ! $manifest_mail_metrics; then reason=disabled
     elif [ "$manifest_mail_count" -gt 8 ]; then reason=directory_limit
     elif ! command -v timeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; then reason=bounded_probe_unavailable
     else
@@ -9068,9 +9353,9 @@ function manifest_mail_root() {
 }
 
 function manifest_mail() {
-  local file path key value home count=0 file_count=0
-  local records metadata
-  for file in "$manifest_root"/etc/postfix/main.cf "$manifest_root"/etc/dovecot/dovecot.conf "$manifest_root"/etc/dovecot/conf.d/*.conf "$manifest_root"/etc/exim4/exim4.conf.template "$manifest_root"/etc/exim4/conf.d/main/* "$manifest_root"/etc/courier/imapd "$manifest_root"/etc/courier/pop3d "$manifest_root"/etc/psa/psa.conf; do
+  local file path key value home home_base source count=0 file_count=0
+  local records metadata account_mail_source='' directadmin=false interworx=false
+  for file in "$manifest_root"/etc/postfix/main.cf "$manifest_root"/etc/dovecot.conf "$manifest_root"/etc/dovecot/dovecot.conf "$manifest_root"/etc/dovecot/conf.d/*.conf "$manifest_root"/etc/dovecot/conf.keyhelp.d/*.conf "$manifest_root"/etc/exim4/exim4.conf.template "$manifest_root"/etc/exim4/conf.d/main/* "$manifest_root"/etc/courier/imapd "$manifest_root"/etc/courier/pop3d "$manifest_root"/etc/psa/psa.conf; do
     if [ ! -f "$file" ] || [ ! -r "$file" ]; then continue; fi
     file_count=$((file_count+1)); [ "$file_count" -le 200 ] || break
     metadata=$(manifest_read_metadata "$file") || { manifest_collection_failed=true; continue; }
@@ -9095,19 +9380,42 @@ function manifest_mail() {
   manifest_mail_root /var/mail conventional
   manifest_mail_root /var/spool/mail conventional
   manifest_mail_root /var/vmail conventional
+  manifest_mail_root /home/vmail conventional
+  manifest_mail_root /www/vmail conventional
+  manifest_mail_root /var/customers/mail conventional
   manifest_mail_root /var/qmail/mailnames conventional
-  if [ -d "$manifest_root/usr/local/cpanel" ] || [ -d "$manifest_root/var/cpanel" ]; then
-    for home in "$manifest_root"/home/*/mail; do
+  if [ -d "$manifest_root/usr/local/cpanel" ] || [ -d "$manifest_root/var/cpanel" ]; then account_mail_source=cpanel
+  elif [ -d "$manifest_root/usr/local/hestia" ] || [ -d "$manifest_root/etc/hestiacp" ]; then account_mail_source=hestiacp
+  elif [ -d "$manifest_root/usr/local/vesta" ]; then account_mail_source=vestacp
+  elif [ -d "$manifest_root/etc/webmin/virtual-server" ] || [ -d "$manifest_root/usr/share/webmin/virtual-server" ]; then account_mail_source=virtualmin; fi
+  [ ! -d "$manifest_root/usr/local/directadmin" ] || directadmin=true
+  [ ! -d "$manifest_root/home/interworx" ] || interworx=true
+  # Expand only known mailbox layouts, never recursively search or measure /home.
+  for home_base in "$manifest_root"/home "$manifest_root"/home[0-9]*; do
+    [ -d "$home_base" ] || continue
+    case "${home_base#"$manifest_root"/home}" in *[!0-9]*) continue;; esac
+    for home in "$home_base"/*/mail "$home_base"/*/imap "$home_base"/*/var/*/mail \
+        "$home_base"/*/Maildir "$home_base"/*/.Maildir \
+        "$home_base"/*/homes/*/Maildir "$home_base"/*/homes/*/.Maildir \
+        "$home_base"/*/domains/*/Maildir "$home_base"/*/domains/*/.Maildir \
+        "$home_base"/*/domains/*/homes/*/Maildir "$home_base"/*/domains/*/homes/*/.Maildir; do
       [ -d "$home" ] || continue
-      count=$((count+1)); [ "$count" -le 20 ] || break
-      manifest_mail_root "${home#"$manifest_root"}" cpanel
+      source=conventional
+      case "${home#"$home_base"}" in
+        */var/*/mail) $interworx || continue; source=interworx;;
+        */mail) [ -n "$account_mail_source" ] || continue; source=$account_mail_source;;
+        */imap) $directadmin || continue; source=directadmin;;
+      esac
+      if [ "$count" -ge 20 ]; then
+        manifest_emit warning area mail_storage reason 'Only the first 20 account mail directories were examined; coverage is incomplete.'
+        return
+      fi
+      count=$((count+1))
+      manifest_mail_root "${home#"$manifest_root"}" "$source"
     done
-  fi
-  for home in "$manifest_root"/home/*/Maildir "$manifest_root"/root/Maildir; do
-    [ -d "$home" ] || continue
-    count=$((count+1)); [ "$count" -le 20 ] || break
-    manifest_mail_root "${home#"$manifest_root"}" conventional
   done
+  manifest_mail_root /root/Maildir conventional
+  manifest_mail_root /root/.Maildir conventional
 }
 
 # Passive migration hints: paths and fixed identity fields, never configured commands or secrets.
@@ -9256,9 +9564,13 @@ function manifest_hosting_panels() {
 
 function manifest_output() (
   local manifest_format="${1:-text}" manifest_dns_enabled="${2:-${DR_MANIFEST_DNS:-true}}" manifest_root="${3:-/}"
+  local manifest_unprivileged=${DR_UNPRIVILEGED:-false}
+  case "$manifest_unprivileged" in true|false) :;; *) return 1;; esac
+  [ "$(id -u)" = 0 ] || manifest_unprivileged=true
   local manifest_processes='' manifest_package_backend=unknown
   local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
   local manifest_review_file=${4:-} manifest_collection_failed=false
+  local manifest_web_roots=0 manifest_web_files=0 manifest_web_findings=0 manifest_web_incomplete=false manifest_web_started=$SECONDS
   local manifest_dns_limit=20 manifest_mail_metrics="${DR_MANIFEST_MAIL_METRICS:-true}"
   local manifest_dns_addresses manifest_dns_result manifest_dns_reason
   local manifest_apache_php_available=false manifest_apache_php_version=unknown manifest_apache_php_package=unknown
@@ -9283,17 +9595,28 @@ function manifest_output() (
   [ "$manifest_format" != json ] || printf '{"schema_version":1,"records":['
   manifest_package_backend=$(packages_output_backend "$manifest_root") || manifest_package_backend=unknown
   manifest_emit system package_backend "$manifest_package_backend" hostname "$(hostname 2>/dev/null || printf unknown)" generated_utc "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" local_addresses "${manifest_local_addresses:-unknown}"
+  if $manifest_unprivileged; then
+    manifest_emit warning area privileges reason 'Unprivileged collection: service status scripts, listener process ownership and mail size scans are skipped. Unreadable configuration, application files, private cron jobs and mail stores may be omitted; missing results are unknown.'
+  fi
   manifest_hosting_panels || manifest_collection_failed=true
   manifest_listeners
+  manifest_process_indicators
+  manifest_executable_indicators
+  manifest_schedule_indicators
   manifest_processes=$(ps -eo comm= 2>/dev/null) || manifest_processes=
   manifest_packages
   manifest_apache_php
   manifest_fpm_pools
   manifest_mail
+  manifest_web_started=$SECONDS
   manifest_websites
+  if $manifest_web_incomplete; then
+    manifest_emit warning area security_websites reason 'Website security sampling is incomplete: unreadable, large or indirect files, failed probes or limits (20 roots, 200 files/findings, 256 KiB per file, 15 seconds plus the final probe). Only top-level files and common upload/cache directories to depth 3 are sampled.'
+  fi
   manifest_migration
   if $manifest_collection_failed; then manifest_emit warning area collection reason 'One or more collectors failed; missing inventory sections are unknown.'; fi
   manifest_emit warning area interpretation reason 'Reads common configuration files; custom settings may be missed. Websites and applications are not tested. Certificate files are listed, but HTTPS and certificate validity are not checked.'
+  manifest_emit warning area security_review reason 'Potential compromise indicators require manual review; missing findings do not establish a clean system.'
   [ "$manifest_format" != json ] || printf ']}\n' || return 1
   # Ordinary inventories retain partial findings; comparisons require their core collectors to succeed.
   [ -z "$manifest_review_file" ] || ! $manifest_collection_failed
@@ -9398,6 +9721,55 @@ function manifest_compare_baseline() {
 # TODO: allow a small declarative before/after assertion file once its format is agreed.
 # Keep customer application checks opt-in and separate from package/service verification.
 
+function upgrade_print_check() {
+  local backend family current target native audit status=0 identity id version variant
+  # Checks must report removals/conversions as blockers, never apply inherited repair controls.
+  local DR_REMOVE_X11_PACKAGES=false DR_PURGE_INCOMPATIBLE_PACKAGES=false DR_ALLOW_CROSSGRADE_BLOCKERS=false
+  local UPGRADE_CROSSGRADE=false
+  local DR_PREFER_PACKAGED_USRMERGE_FILES=false DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=false
+  local DR_SKIP_DOVECOT_MIGRATION_CHECK=false DR_SKIP_KERNEL_CHECK=false DR_SKIP_X11_CHECK=false
+  local DR_SKIP_DISK_SPACE_CHECK=false DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK=false DR_ALLOW_BACKPORTS=false
+  backend=$(packages_output_backend) || { echo 'dss:error: Cannot identify the package backend.' >&2; return 1; }
+  if [ "$backend" = rpm ]; then
+    identity=$(rpm_distro_output_identity '') || { echo 'dss:error: Cannot identify the RPM distribution.' >&2; return 1; }
+    IFS=$'\t' read -r id version variant <<< "$identity"
+    printf 'dss:info: Current distribution: %s %s (%s); kernel: %s\n' "$id" "$version" "$variant" "$(uname -rm)"
+    report_unsupported || status=1
+    check_disk_space || status=1
+    upgrade_panel_refuse_generic || status=1
+    echo 'dss:error: No automatic newer-major-release target is supported for this RPM distribution. Plan a clean installation/migration to a supported release, or a separately reviewed vendor/ELevate procedure.' >&2
+    echo 'dss:info: Same-major CentOS conversion, where eligible, uses DR_RPM_MIGRATION_TARGET with --upgrade; it is not a major-release upgrade.'
+    return 1
+  fi
+  current=$(distro_output_codename) || { echo 'dss:error: Cannot identify the installed distribution.' >&2; return 1; }
+  case " $ALL_DEBIAN " in
+    *" $current "*) family=debian; target=trixie;;
+    *)
+      case " $ALL_UBUNTU " in
+        *" $current "*) family=ubuntu; target=$(ubuntu_output_latest_lts "$current") || return 1;;
+        *) echo "dss:error: No known upgrade path for $current." >&2; return 1;;
+      esac;;
+  esac
+  native=$(dpkg --print-architecture) || { native=unknown; status=1; }
+  printf 'dss:info: Current distribution: %s %s; target: %s; architecture: %s; kernel: %s\n' "$family" "$current" "$target" "$native" "$(uname -rm)"
+  [ "$current" != "$target" ] || echo 'dss:info: Already at the configured target release; checking current system prerequisites.'
+  report_unsupported || :
+  upgrade_precondition_checks || status=1
+  if audit=$(LC_ALL=C dpkg --audit 2>&1); then
+    if [ -n "$audit" ]; then printf 'dss:error: Incomplete package work:\n%s\n' "$audit" >&2; status=1; fi
+  else
+    printf 'dss:error: Cannot verify package database health:\n%s\n' "$audit" >&2; status=1
+  fi
+  upgrade_check_path "$family" "$current" "$target" review || status=1
+  if [ "$status" -eq 0 ]; then
+    echo 'dss:info: No known checked blockers found; application compatibility and target repository/package availability still need review.'
+  else
+    echo 'dss:error: Upgrade readiness blocked or incomplete; resolve the checks above.' >&2
+  fi
+  echo 'dss:info: Read-only review: no package indexes refreshed and no system changes made.'
+  return "$status"
+}
+
 # Read-only handover facts for a developer or AI; existing APT indexes may be stale.
 function upgrade_print_report() {
   local dns=${1:-${DR_MANIFEST_DNS:-true}} current=unknown family=unknown target=unknown native=unknown status=0 records audit file release crossgrade_release=''
@@ -9490,7 +9862,7 @@ function support_print_report() {
     if [ "${#exit_status}" -gt 3 ] || [ "$exit_status" -gt 255 ]; then exit_status=unknown; fi;;
   esac
   case "$action" in
-    --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages) :;;
+    --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages) :;;
     *) action=unknown;;
   esac
   case "$crossgrade" in true|false) :;; *) crossgrade=unknown;; esac
@@ -9842,7 +10214,7 @@ if [ "${DR_ACTION:-$1}" = --support-report ]; then
 fi
 [ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json ] || [ "${DR_ACTION:-$1}" = --upgrade-report ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
 case "${DR_ACTION:-${1:-}}" in
-  --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages)
+  --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages)
     upgrade_panel_dispatch "$@" || return $?
     if $upgrade_panel_handled; then return 0; fi;;
 esac
@@ -9855,13 +10227,9 @@ if [ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json
   exit $?
 elif [ "--help" = "${DR_ACTION:-$1}" ]; then
   print_usage
-elif [ "--check" = "${DR_ACTION:-$1}" ] || [ -z "${DR_ACTION:-$1}" ] ; then
+elif [ "--check-upgrade" = "${DR_ACTION:-$1}" ] || [ -z "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
-  print_info
-  upgrade_precondition_checks
-  ret=$?
-  report_unsupported
-  [ "$ret" -eq 0 ]
+  upgrade_print_check
 elif [ "--to-debian-release" = "${DR_ACTION:-$1}" ] ; then
   version="$2"
   [ -z "$version" ] && echo "dss:error: Need a version e.g. 11 for --to-debian-release" && exit 1
@@ -9934,21 +10302,21 @@ elif [ "--dist-update" = "${DR_ACTION:-$1}" ] ; then
     if [ -f /etc/redhat-release ]; then echo 'dss:info: --dist-update completed; review the RPM evidence directory in the detailed run log.'
     else echo "dss:info: --dist-update completed ok. Use $0 --show-changes to see changes."; fi
   fi
-elif [ "--show-cruft" = "${DR_ACTION:-$1}" ] ; then
+elif [ "--list-leftover-packages" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
-  ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install)." && exit 0
-  show_cruft_packages
-  echo "To remove those packages, re-run with bash $0 --remove-cruft"
+  ! has_leftover_packages && echo "No leftover packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install)." && exit 0
+  show_leftover_packages
+  echo "To remove those packages, re-run with bash $0 --remove-leftover-packages"
   exit 0
-elif [ "--remove-cruft" = "${DR_ACTION:-$1}" ] ; then
+elif [ "--remove-leftover-packages" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
-  ! has_cruft_packages && echo "No cruft packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install).  Nothing to do.  All good." && exit 0
-  remove_cruft_packages
+  ! has_leftover_packages && echo "No leftover packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install).  Nothing to do.  All good." && exit 0
+  remove_leftover_packages
   exit $?
 elif [ "--remove-deprecated-packages" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
-  ! has_cruft_packages oldpkg && echo "No cruft packages (all installed packages from the current distro).  Nothing to do.  All good." && exit 0
-  remove_cruft_packages oldpkg
+  ! has_leftover_packages oldpkg && echo "No leftover packages (all installed packages from the current distro).  Nothing to do.  All good." && exit 0
+  remove_leftover_packages oldpkg
   exit $?
 elif [ "--to-64bit" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
@@ -9958,14 +10326,14 @@ elif [ "--to-64bit" = "${DR_ACTION:-$1}" ] ; then
     exit $?
   fi
   if [  64 -eq $(getconf LONG_BIT) ]; then
-    if has_cruft_packages 32bit; then
+    if has_leftover_packages 32bit; then
       echo "dss:stage: System is already 64-bit; continuing conversion of remaining 32-bit packages."
     else
       echo "dss:stage: System is already 64-bit; no 32-bit packages remain."
       exit 0
     fi
   fi
-  has_cruft_packages oldpkg && ! "${DR_SKIP_OLD_PACKAGE_CHECK:-false}" && show_cruft_packages && echo "dss:error: Old packages must be removed before crossgrading. Run bash $0 --remove-cruft, or set DR_SKIP_OLD_PACKAGE_CHECK=true to override this check." >&2 && exit 1
+  has_leftover_packages oldpkg && ! "${DR_SKIP_OLD_PACKAGE_CHECK:-false}" && show_leftover_packages && echo "dss:error: Old packages must be removed before crossgrading. Run bash $0 --remove-leftover-packages, or set DR_SKIP_OLD_PACKAGE_CHECK=true to override this check." >&2 && exit 1
   crossgrade_debian
   ret=$?
   [ $ret -ne 0 ] && echo "dss:error: crossgrade failed, see above for any details"
@@ -9994,24 +10362,36 @@ fi
 
 function distrorejuve_run() {
   local argument action LOG_VERBOSE=false LOG_TRACE=false UPGRADE_CROSSGRADE=false
-  # An explicit public-report command must not enter an inherited upgrade DR_ACTION.
-  if [ "${1:-}" = --support-report ]; then
-    local DR_ACTION=--support-report
-    distrorejuve_main "$@"
-    return $?
-  fi
-  environment_validate_settings || return 1
+  local DR_UNPRIVILEGED=${DR_UNPRIVILEGED:-false}
   local -a arguments=()
   local -a upgrade_retry_command=(bash "$0" "$@")
   for argument in "$@"; do
     case "$argument" in
+      --unprivileged) DR_UNPRIVILEGED=true;;
       --verbose) LOG_VERBOSE=true;;
       --trace) LOG_TRACE=true;;
       --crossgrade) UPGRADE_CROSSGRADE=true;;
       *) arguments+=("$argument");;
     esac
   done
+  # An explicit public-report command must not enter an inherited upgrade DR_ACTION.
+  if [ "${arguments[0]:-}" = --support-report ]; then
+    local DR_ACTION=--support-report
+    distrorejuve_main "${arguments[@]}"
+    return $?
+  fi
+  # An explicit read-only check must not inherit an upgrade action.
+  if [ "${arguments[0]:-}" = --check-upgrade ]; then local DR_ACTION=--check-upgrade; fi
+  environment_validate_settings || return 1
+  [ "$(id -u)" = 0 ] || DR_UNPRIVILEGED=true
   action=${DR_ACTION:-${arguments[0]:-}}
+  if $DR_UNPRIVILEGED; then
+    case "$action" in
+      --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages|--show-changes|--list-leftover-packages|--pause|--resume)
+        printf 'dss:error: %s is not available in unprivileged mode. Run as root without --unprivileged or DR_UNPRIVILEGED=true; use sudo bash if needed.\n' "$action" >&2
+        return 1;;
+    esac
+  fi
   if $UPGRADE_CROSSGRADE; then
     case "$action" in
       --to-latest|--to-debian-release|--to-next-ubuntu) :;;
@@ -10019,7 +10399,7 @@ function distrorejuve_run() {
     esac
   fi
   case "$action" in
-    --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-cruft|--remove-deprecated-packages)
+    --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages)
       logging_run distrorejuve_main "${arguments[@]}";;
     *)
       if $LOG_VERBOSE || $LOG_TRACE; then

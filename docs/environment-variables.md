@@ -7,6 +7,11 @@ Settings are checked once before logging or system work. Boolean settings accept
 only `true` or `false`. Unset or empty settings use the documented defaults.
 `DR_MIN_FREE_DISK_MIB` and `DR_CONFIGURATION_HISTORY_DAYS` must be positive integers.
 
+`DR_UNPRIVILEGED` defaults to `true` for a non-root effective user and `false` for root.
+`--unprivileged` forces it to `true`. Setting it to `false` cannot override a non-root
+identity. The script never tries sudo; request elevation explicitly when needed.
+See [migration inventory](../README.md#migration-inventory) for reduced coverage.
+
 An explicit `--support-report` remains available even when an inherited upgrade
 setting is invalid.
 

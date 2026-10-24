@@ -45,7 +45,7 @@ The `+` adds these methods after the modern defaults. Host-key verification stil
 
 Keep these legacy settings on the individual command. See the
 [OpenSSH legacy connection guide](https://www.openssh.org/legacy.html).
-After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /root/distrorejuve.sh --check`.
+After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /root/distrorejuve.sh --check-upgrade`.
 
 ## Reporting upgrade problems
 

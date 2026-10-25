@@ -31,21 +31,34 @@ add the required option to this SCP command:
   Use `-oKexAlgorithms=+diffie-hellman-group1-sha1` only if that is the available method.
 - If an existing RSA login key needs SHA-1 signatures, add `-oPubkeyAcceptedAlgorithms=+ssh-rsa`.
 
-To try the legacy RSA methods and both SHA-1 key exchanges in one command:
+For a server requiring several legacy methods, use a Bash array so the same
+options work for both copying and logging in. Run on the newer computer:
 
-```sh
-scp -O \
-  -oHostKeyAlgorithms=+ssh-rsa \
-  -oPubkeyAcceptedAlgorithms=+ssh-rsa \
-  -oKexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1 \
-  distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
+```bash
+SSH_OPTS=(
+  -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1
+  -o Ciphers=+aes128-cbc
+  -o HostKeyAlgorithms=+ssh-rsa
+  -o PubkeyAcceptedAlgorithms=+ssh-rsa
+)
+scp -O "${SSH_OPTS[@]}" distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
+ssh "${SSH_OPTS[@]}" root@OLD_SERVER
 ```
 
-The `+` adds these methods after the modern defaults. Host-key verification still applies.
+Replace `OLD_SERVER` with the intended address. Use only the options required by
+its negotiation errors; the full array is a compatibility example. `-O` selects
+the older SCP protocol when the server lacks SFTP; it does not fix SSH algorithm
+negotiation. Omit it when unnecessary or unsupported by your local scp client.
 
-Keep these legacy settings on the individual command. See the
-[OpenSSH legacy connection guide](https://www.openssh.org/legacy.html).
-After copying, inspect `/root/distrorejuve.sh` on the old server and run `bash /root/distrorejuve.sh --check-upgrade`.
+The `+` appends legacy algorithms to modern defaults. These methods are disabled
+by default for security reasons. Keep exceptions on the individual command and
+remove them when the server supports current algorithms. Host-key verification
+still applies. An older local client may need `PubkeyAcceptedKeyTypes` instead
+of `PubkeyAcceptedAlgorithms`; check its manual if it rejects that option.
+See the [OpenSSH legacy connection guide](https://www.openssh.org/legacy.html)
+and [scp protocol option](https://man.openbsd.org/scp#O).
+After copying, inspect `/root/distrorejuve.sh` on the old server and run
+`bash /root/distrorejuve.sh --check-upgrade`.
 
 ## Reporting upgrade problems
 

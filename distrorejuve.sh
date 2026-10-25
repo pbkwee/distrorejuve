@@ -175,7 +175,7 @@ Run with --pause to pause a distro rejuve running process (touch ~/distrorejuve.
 
 Run with --resume to resume a paused distro rejuve running process (rm -f ~/distrorejuve.pause)
 
-Disk space: upgrades and crossgrades require 5120 MiB free on package/cache/state filesystems.
+Disk space: upgrades and crossgrades require 2048 MiB free on package/cache/state filesystems.
 Set DR_MIN_FREE_DISK_MIB to a positive integer to adjust the floor, or DR_SKIP_DISK_SPACE_CHECK=true to bypass.
 --check-upgrade reports a failed precondition with a nonzero exit status. Help and cleanup commands do not require this floor.
 Skip controls accept true/false: DR_SKIP_KERNEL_CHECK, DR_SKIP_X11_CHECK, DR_ALLOW_BACKPORTS,
@@ -856,9 +856,11 @@ function upgrade_panel_output_installed() {
           file="$root/usr/local/cpanel/version"
         else continue; fi;;
       virtualmin)
-        if [ -e "$root/etc/webmin/virtual-server/config" ] || [ -e "$root/usr/share/webmin/virtual-server/module.info" ] ||
-            { [ -z "$root" ] && command -v virtualmin >/dev/null 2>&1; }; then
-          file="$root/usr/share/webmin/virtual-server/module.info"
+        if [ -f "$root/usr/share/webmin/virtual-server/module.info" ] ||
+            [ -f "$root/usr/libexec/webmin/virtual-server/module.info" ]; then
+          for candidate in /usr/share/webmin/virtual-server/module.info /usr/libexec/webmin/virtual-server/module.info; do
+            [ ! -f "$root$candidate" ] || { file="$root$candidate"; break; }
+          done
         else continue; fi;;
       # Marker files only: panel configuration and databases can contain credentials.
       directadmin) [ -f "$root/usr/local/directadmin/conf/directadmin.conf" ] || continue;;
@@ -904,7 +906,17 @@ function upgrade_panel_output_procedure_url() {
 function upgrade_panel_refuse_generic() {
   local panels panel version url
   panels=$(upgrade_panel_output_installed) || return 1
-  [ -n "$panels" ] || return 0
+  if [ -z "$panels" ]; then
+    # A removed module with surviving config or a custom command is ambiguous.
+    # Keep it out of installed inventory, but do not authorize a generic upgrade
+    # from missing conventional files alone. An operator must reconcile it.
+    if [ -e /etc/webmin/virtual-server/config ] || command -v virtualmin >/dev/null 2>&1; then
+      echo 'dss:error: Possible Virtualmin remnants/custom installation require review; generic upgrade is blocked until panel ownership and installation state are reconciled.' >&2
+      upgrade_preflight_blocked=true
+      return 1
+    fi
+    return 0
+  fi
   echo 'dss:error: Hosting panel detected; generic package/configuration changes are disabled. Use the panel upgrade procedure; see --manifest and docs/hosting-panels.md.' >&2
   while IFS=$'\t' read -r panel version; do
     if url=$(upgrade_panel_output_procedure_url "$panel"); then
@@ -1198,7 +1210,7 @@ function apt_sources_upgrade() {
 
 # Require free space on each package/cache/state filesystem before changing packages.
 function check_disk_space() {
-  local skip=${DR_SKIP_DISK_SPACE_CHECK:-false} minimum=${DR_MIN_FREE_DISK_MIB:-5120}
+  local skip=${DR_SKIP_DISK_SPACE_CHECK:-false} minimum=${DR_MIN_FREE_DISK_MIB:-2048}
   local path output available
   $skip && return 0
   # Probe package/cache/state paths individually to catch separate mounts and symlinks.
@@ -1227,10 +1239,130 @@ function check_disk_space() {
   return 0
 }
 
+# Read conventional configuration as data. Findings require review; never repair
+# service identities, monitoring, filesystem policy or database grants implicitly.
+function upgrade_configuration_review() {
+  local root=${1:-} findings kind path line detail file size resolved seen=$'\n' count=0
+  local -a files=()
+  root=${root%/}
+  for file in "$root/etc/network/interfaces" "$root/etc/fstab" "$root/etc/logrotate.conf" \
+      "$root"/etc/logrotate.d/* "$root/etc/monit/monitrc" "$root"/etc/monit/conf.d/* "$root"/etc/monit/conf-enabled/*; do
+    [ -f "$file" ] || continue
+    resolved=$(readlink -f -- "$file" 2>/dev/null) || resolved=$file
+    case "$seen" in *$'\n'"$resolved"$'\n'*) continue;; esac
+    seen="$seen$resolved"$'\n'
+    count=$((count+1))
+    if [ "$count" -gt 200 ]; then echo 'dss:warn: Configuration review file limit reached; coverage is incomplete.' >&2; break; fi
+    size=$(stat -Lc %s -- "$file" 2>/dev/null)
+    if ! [ "$size" -le 1048576 ] 2>/dev/null; then
+      printf 'dss:warn: Configuration review skipped unreadable/large file %s; coverage is incomplete.\n' "$file" >&2
+      continue
+    fi
+    files+=("$file")
+  done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  # interfaces: "iface tun0 inet6 v4tunnel" twice -> duplicate_interface with line numbers.
+  # fstab: "/dev/vda1 / ext4 defaults,usrquota 0 1" -> quota_dependency for /.
+  findings=$(LC_ALL=C awk '
+    FILENAME ~ /\/interfaces$/ && $1 == "iface" && NF >= 4 {
+      key=$2 " " $3 " " $4
+      if (key in seen) printf "duplicate_interface\t%s\t%d\tprevious line %d\n", FILENAME, FNR, seen[key]
+      else seen[key]=FNR
+    }
+    # logrotate: "/var/log/example.log {" in two files -> duplicate_log_path.
+    # Only literal unquoted paths are compared; wildcard overlap is unknown.
+    FILENAME ~ /\/logrotate([.]conf|[.]d\/)/ {
+      if (FNR == 1) script=0
+      if ($1 ~ /^(prerotate|postrotate|firstaction|lastaction|preremove)$/) { script=1; next }
+      if ($1 == "endscript") { script=0; next }
+      if (!script && $0 ~ /^[ \t]*\//) {
+        for (i=1; i<=NF && $i != "{"; i++) {
+          path=$i; sub(/\{$/, "", path)
+          if (path !~ /^\// || path ~ /[*?\[\]"\047]/) continue
+          if (path in logs) printf "duplicate_log_path\t%s\t%d\tprevious header %s\n", FILENAME, FNR, logs[path]
+          else logs[path]=FILENAME ":" FNR
+        }
+      }
+    }
+    # Monit: "if failed port 808080 then restart" -> invalid_monitor_port.
+    # start program = "service nginx start" -> relative_monitor_program.
+    FILENAME ~ /\/monit\// && $0 !~ /^[ \t]*#/ {
+      for (i=1; i<NF; i++) if (tolower($i) == "port" && $(i+1) ~ /^[0-9]+$/ && ($(i+1) < 1 || $(i+1) > 65535))
+        printf "invalid_monitor_port\t%s\t%d\tport is outside 1..65535\n", FILENAME, FNR
+      lower=tolower($0)
+      if (lower ~ /^[ \t]*(start|stop|restart)[ \t]+program[ \t]*=/) {
+        command=$0; sub(/^[^=]*=[ \t]*["\047]?/, "", command)
+        split(command, words, /[ \t"\047]/)
+        if (words[1] != "" && words[1] !~ /^\//)
+          printf "relative_monitor_program\t%s\t%d\tprogram requires an absolute executable pathname\n", FILENAME, FNR
+      }
+    }
+    FILENAME ~ /\/fstab$/ && $0 !~ /^[ \t]*#/ && NF >= 4 && $4 ~ /(^|,)(usrquota|grpquota|quota|uquota|gquota)(,|$)/ {
+      printf "quota_dependency\t%s\t%d\tconfigured filesystem quotas require working quota boot utilities\n", FILENAME, FNR
+    }
+  ' "${files[@]}" 2>/dev/null) || echo 'dss:warn: Configuration review could not read all conventional files; coverage is incomplete.' >&2
+  while IFS=$'\t' read -r kind path line detail; do
+    [ -n "$kind" ] || continue
+    printf 'dss:warn: Configuration review: %s at %s:%s; %s.\n' "$kind" "$path" "$line" "$detail" >&2
+    if [ "$kind" = quota_dependency ] && [ -z "$root" ] && ! command -v quotaon >/dev/null 2>&1; then
+      echo 'dss:warn: quotaon is missing; review target boot dependencies and existing limits before enabling or changing quota policy.' >&2
+    fi
+  done <<< "$findings"
+  echo 'dss:info: Review custom PHP pool accounts/socket permissions, monitoring executable paths/live checks, provider boot selection and duplicate logrotate entries before the release hop.' >&2
+}
+
+# This query returns fixed labels only, never authentication strings. A daemon
+# being active does not prove local root can maintain it or upgrade its tables.
+function upgrade_database_verify() {
+  local client result memory buffer target=${1:-}
+  local -a auth_options=(--no-defaults --protocol=socket --user=root)
+  if command -v mariadb >/dev/null 2>&1; then client=mariadb
+  elif command -v mysql >/dev/null 2>&1; then client=mysql
+  else echo 'dss:error: Database client unavailable; authenticated maintenance is unverified.' >&2; return 1; fi
+  if ! result=$(manifest_run_bounded 10 "$client" "${auth_options[@]}" --batch --skip-column-names --execute='SELECT 1' 2>/dev/null) || [ "$result" != 1 ]; then
+    # Older servers often configure a local administrative password in root's
+    # option file. Read it through the client; never copy it into argv or logs.
+    auth_options=(--protocol=socket --user=root)
+    if ! result=$(manifest_run_bounded 10 "$client" "${auth_options[@]}" --batch --skip-column-names --execute='SELECT 1' 2>/dev/null) || [ "$result" != 1 ]; then
+      echo 'dss:error: Local root maintenance failed with socket/default credentials; review authentication and database upgrade logs. No grant changes attempted.' >&2
+      return 1
+    fi
+  fi
+  memory=$(awk '$1 == "MemTotal:" && $2 ~ /^[0-9]+$/ { print $2 * 1024; exit }' /proc/meminfo 2>/dev/null)
+  buffer=$(manifest_run_bounded 10 "$client" "${auth_options[@]}" --batch --skip-column-names --execute='SELECT @@innodb_buffer_pool_size' 2>/dev/null)
+  # SQL output "2147483648" means 2 GiB; compare bytes with physical RAM.
+  if awk -v memory="$memory" -v buffer="$buffer" 'BEGIN { exit !(memory ~ /^[0-9.e+]+$/ && buffer ~ /^[0-9]+$/ && memory > 0 && buffer >= memory * 0.7) }'; then
+    echo 'dss:warn: InnoDB buffer pool uses at least 70% of physical RAM; review startup memory, cgroup limits and other services before restarting the database.' >&2
+  fi
+  # MariaDB 11.6 begins enforcing the external identity in unix_socket grants.
+  # mysql.global_priv JSON example: {"plugin":"unix_socket","authentication_string":"legacy-hash"}
+  # -> socket_identity_requires_review; blank or "root" -> no row. Values stay on server.
+  if [ "$client" = mariadb ]; then
+    if result=$(manifest_run_bounded 10 "$client" "${auth_options[@]}" --batch --skip-column-names --execute="SELECT 'socket_identity_requires_review' FROM mysql.global_priv WHERE User='root' AND Host='localhost' AND JSON_UNQUOTE(JSON_EXTRACT(Priv,'$.plugin'))='unix_socket' AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(Priv,'$.authentication_string')),'') NOT IN ('','root')" 2>/dev/null); then
+      if [ -n "$result" ]; then
+        case "$target" in
+          trixie)
+            echo 'dss:error: Root unix_socket external identity requires review before the target MariaDB version; authentication values omitted. No grant changes attempted.' >&2
+            return 1;;
+          *) echo 'dss:warn: Root unix_socket external identity requires review before MariaDB 11.6 or newer; authentication values omitted. No grant changes attempted.' >&2;;
+        esac
+      fi
+    else
+      echo 'dss:warn: Socket identity compatibility query unavailable (older grant layout or permissions); manually review before MariaDB 11.6 or newer.' >&2
+    fi
+  fi
+  echo 'dss:info: Local root socket maintenance succeeded. Review database startup/upgrade logs and table-upgrade completion separately.' >&2
+}
+
 function upgrade_precondition_checks() {
   upgrade_panel_refuse_generic || return 1
   check_disk_space || return 1
   local ret=0
+  upgrade_configuration_review
+  echo 'dss:info: Conffile policy: dpkg prefers packaged files and restores missing files; ucf honors UCF_FORCE_CONFFOLD when set. Review custom service settings before accepting the result.' >&2
+  if ! "${DR_UNPRIVILEGED:-false}" && { pgrep -x mariadbd >/dev/null 2>&1 || pgrep -x mysqld >/dev/null 2>&1; }; then
+    upgrade_database_verify "${1:-}" || ret=1
+  fi
   # e.g. 3.12.1
   if uname -r | grep -qai '^[12]'; then
     echo "dss:warn:Running an old kernel.  May not work with the latest packages (e.g. udev).  Please upgrade.  Note RimuHosting customers can set the kernel at https://rimuhosting.com/cp/vps/kernel.jsp.  To skip this check run: export DR_SKIP_KERNEL_CHECK=true"
@@ -2953,7 +3085,10 @@ function upgrade_services_check() {
     if [ "$family" = database ]; then
       selector=$(awk -F '\t' '$1 == "database" { print $2 }' <<< "$roles") || return 2
     fi
-    if upgrade_services_is_active "$family" "$selector"; then :
+    if upgrade_services_is_active "$family" "$selector"; then
+      if [ "$family" = database ] && { [ "$selector" = mariadb ] || [ "$selector" = mysql ]; }; then
+        upgrade_database_verify || status=1
+      fi
     else
       result=$?
       if [ "$result" -eq 1 ]; then
@@ -8360,7 +8495,7 @@ function manifest_output_review_record() {
   local type=$1 key value
   shift
   # Process IDs and counts are transient observations, not migration configuration.
-  case "$type:${2:-}" in security_indicator:*|warning:security_*) return 0;; esac
+  case "$type:${2:-}" in security_indicator:*|collection_status:*|probe_status:*|warning:security_*) return 0;; esac
   printf '%s' "$type"
   while [ "$#" -ge 2 ]; do
     key=$1; value=$2; shift 2
@@ -8376,6 +8511,7 @@ function manifest_emit() {
     manifest_output_review_record "$@" >> "$manifest_review_file" || manifest_collection_failed=true
   fi
   local record_type="$1" key value
+  if [ "$record_type" = warning ]; then manifest_warning_count=$(( ${manifest_warning_count:-0} + 1 )); fi
   shift
   if [ "$manifest_format" = json ]; then
     printf '%s{"type":' "$manifest_separator"
@@ -8480,11 +8616,19 @@ function manifest_listeners() {
 # Explicit C whitespace and escaped regex slashes also work with pre-POSIX-class AWK.
 # Detection examples are invented. USER, HIDDEN, URL, ENCODED and TOKEN are placeholders.
 function manifest_process_indicators() {
-  local records indicator count pid ppid uid reason
+  local records snapshot indicator count pid ppid uid reason
   # ps -eww -o pid=,ppid=,uid=,vsz=,args=, for example:
   # 101 50 1001 9000 tee -a /etc/sudoers -> sudoers_write_command.
   # 102 50 1001 4000 [kworker/0:0] 47128 -> userspace_kernel_name, not a kernel thread.
-  if ! records=$(set -o pipefail; LC_ALL=C manifest_run_bounded 5 ps -eww -o pid=,ppid=,uid=,vsz=,args= 2>/dev/null | LC_ALL=C awk '
+  # Finish ps before starting the parser: otherwise ps can collect AWK's own
+  # regex program, whose mining examples match the heuristic. Do not exclude
+  # descendants or generic awk processes; their arguments remain evidence.
+  if ! snapshot=$(LC_ALL=C manifest_run_bounded 5 ps -eww -o pid=,ppid=,uid=,vsz=,args= 2>/dev/null); then
+    manifest_emit warning area security_processes reason 'Process snapshot failed or timed out; potential compromise indicators could not be evaluated.'
+    manifest_collection_failed=true
+    return
+  fi
+  if ! records=$(set -o pipefail; LC_ALL=C awk '
     function record(indicator, key) {
       key=indicator SUBSEP $2 SUBSEP $3
       if (!(key in counts)) {
@@ -8539,8 +8683,9 @@ function manifest_process_indicators() {
       if (limited) print "limit"
       if (bad) print "parse_failed"
     }
-  ' | LC_ALL=C sort); then
+  ' <<< "$snapshot" | LC_ALL=C sort); then
     manifest_emit warning area security_processes reason 'Process snapshot failed or timed out; potential compromise indicators could not be evaluated.'
+    manifest_collection_failed=true
     return
   fi
   while IFS=$'\t' read -r indicator count pid ppid uid; do
@@ -9698,10 +9843,30 @@ function manifest_migration() {
 function manifest_hosting_panels() {
   local panels panel version
   panels=$(upgrade_panel_output_installed "$manifest_root") || return 1
+  if [ -e "$manifest_root/etc/webmin/virtual-server/config" ] &&
+      [ ! -f "$manifest_root/usr/share/webmin/virtual-server/module.info" ] &&
+      [ ! -f "$manifest_root/usr/libexec/webmin/virtual-server/module.info" ]; then
+    manifest_emit panel_remnant name virtualmin evidence /etc/webmin/virtual-server/config installed unknown running unknown reason 'Configuration remains without a conventional module installation; inspect package state and custom locations before removal.'
+  fi
   while IFS=$'\t' read -r panel version; do
     [ -n "$panel" ] || continue
     manifest_emit hosting_panel name "$panel" version "$version"
   done <<< "$panels"
+}
+
+# A successful command can still return partial evidence. Per-probe outcomes
+# preserve warnings and never label a read-only inventory as complete coverage.
+function manifest_probe() {
+  local name=$1 before=${manifest_warning_count:-0} status state=observed
+  shift
+  "$@"
+  status=$?
+  # Some legacy collectors return a predicate's status for an absent optional
+  # path. Preserve that status as unknown; it is not a proven collector failure.
+  if [ "$status" -ne 0 ]; then state=unknown
+  elif [ "${manifest_warning_count:-0}" -gt "$before" ]; then state=partial; fi
+  manifest_emit probe_status probe "$name" result "$state" command_status "$status" coverage requires_review
+  return "$status"
 }
 
 function manifest_output() (
@@ -9711,7 +9876,7 @@ function manifest_output() (
   [ "$(id -u)" = 0 ] || manifest_unprivileged=true
   local manifest_processes='' manifest_package_backend=unknown
   local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
-  local manifest_review_file=${4:-} manifest_collection_failed=false
+  local manifest_review_file=${4:-} manifest_collection_failed=false manifest_warning_count=0
   local manifest_web_roots=0 manifest_web_files=0 manifest_web_findings=0 manifest_web_incomplete=false manifest_web_started=$SECONDS
   local manifest_dns_limit=20 manifest_mail_metrics="${DR_MANIFEST_MAIL_METRICS:-true}"
   local manifest_dns_addresses manifest_dns_result manifest_dns_reason
@@ -9740,25 +9905,26 @@ function manifest_output() (
   if $manifest_unprivileged; then
     manifest_emit warning area privileges reason 'Unprivileged collection: service status scripts, listener process ownership and mail size scans are skipped. Unreadable configuration, application files, private cron jobs and mail stores may be omitted; missing results are unknown.'
   fi
-  manifest_hosting_panels || manifest_collection_failed=true
-  manifest_listeners
-  manifest_process_indicators
-  manifest_executable_indicators
-  manifest_schedule_indicators
+  manifest_probe hosting_panels manifest_hosting_panels || manifest_collection_failed=true
+  manifest_probe listeners manifest_listeners
+  manifest_probe process_indicators manifest_process_indicators
+  manifest_probe executable_indicators manifest_executable_indicators
+  manifest_probe schedule_indicators manifest_schedule_indicators
   manifest_processes=$(ps -eo comm= 2>/dev/null) || manifest_processes=
-  manifest_packages
-  manifest_apache_php
-  manifest_fpm_pools
-  manifest_mail
+  manifest_probe packages manifest_packages
+  manifest_probe apache_php manifest_apache_php
+  manifest_probe fpm_pools manifest_fpm_pools
+  manifest_probe mail manifest_mail
   manifest_web_started=$SECONDS
-  manifest_websites
+  manifest_probe websites manifest_websites
   if $manifest_web_incomplete; then
     manifest_emit warning area security_websites reason 'Website security sampling is incomplete: unreadable, large or indirect files, failed probes or limits (20 roots, 200 files/findings, 256 KiB per file, 15 seconds plus the final probe). Only top-level files and common upload/cache and WordPress plugin directories to depth 3 are sampled.'
   fi
-  manifest_migration
+  manifest_probe migration manifest_migration
   if $manifest_collection_failed; then manifest_emit warning area collection reason 'One or more collectors failed; missing inventory sections are unknown.'; fi
   manifest_emit warning area interpretation reason 'Reads common configuration files; custom settings may be missed. Websites and applications are not tested. Certificate files are listed, but HTTPS and certificate validity are not checked.'
   manifest_emit warning area security_review reason 'Potential compromise indicators require manual review; missing findings do not establish a clean system.'
+  manifest_emit collection_status core_collectors_failed "$manifest_collection_failed" warning_count "$manifest_warning_count" completeness requires_review
   [ "$manifest_format" != json ] || printf ']}\n' || return 1
   # Ordinary inventories retain partial findings; comparisons require their core collectors to succeed.
   [ -z "$manifest_review_file" ] || ! $manifest_collection_failed

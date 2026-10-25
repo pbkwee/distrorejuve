@@ -1,5 +1,7 @@
 # distrorejuve
 
+![distrorejuve. Move your Linux server forward. Linux release upgrades and migration checks.](assets/branding/readme-banner.png)
+
 distrorejuve is a Bash utility for upgrading Debian and Ubuntu systems. It can perform
 release upgrades, update packages, check upgrade preconditions and report configuration changes.
 It also updates RPM packages using DNF/YUM, repairs selected CentOS archive sources,
@@ -135,17 +137,8 @@ bash distrorejuve.sh --manifest
 bash distrorejuve.sh --manifest-json > manifest.json
 ```
 
-Non-root users automatically get a reduced inventory. Add `--unprivileged` or set
-`DR_UNPRIVILEGED=true` to request reduced collection explicitly. This skips service
-status scripts, listener process ownership and mail size scans. Readable package,
-configuration, process and migration information is still collected. A warning in
-text and JSON output explains that inaccessible data may be omitted; missing results
-are unknown, not proof that a service or application is absent.
-
-The script never invokes sudo automatically. For fuller visibility, run as root
-or explicitly use `sudo bash distrorejuve.sh --manifest`. When already root, use
-`bash` directly. Reduced mode restricts the script's operations; it does not drop
-root privileges or hide files root can read.
+The manifest can run as a non-privileged user. See [manifest privileges](docs/manifest.md)
+for the differences in service checks, listener details, mail measurements and file access.
 
 Upgrade/removal commands, pause/resume, `--show-changes` (which writes a snapshot)
 and `--list-leftover-packages` (which can install a helper) require root outside reduced mode.
@@ -225,11 +218,18 @@ Migration hints include local program and service paths, cron files and custom t
 paths, selected local user IDs/groups/homes/shells, and configured mount targets and
 filesystem types. Service, cron and timer files whose contents match their installed
 package are omitted, including routine systemd links to unchanged vendor units.
-Customer edits, unowned files and unknown ownership remain visible, including stopped
-or disabled services that may need migration.
-Nonexecutable periodic cron jobs also remain visible because removing execute
-permission can disable a package job. Other permission/owner changes are not checked.
+Package backup files (`.dpkg-*`, `.ucf-*`, `.rpmnew`, `.rpmsave`, `.rpmorig`, `~`),
+cron placeholders and SysV dependency metadata are omitted. Routine boot/console,
+legacy OS logging and file-indexing scripts are also omitted unless package checks
+confirm local content changes. These filters affect migration hints only; security
+indicator scans still examine their existing paths.
+Other customer edits, unowned files and unknown ownership remain visible, including
+stopped or disabled application services and custom jobs that may need migration.
+Nonexecutable periodic cron jobs remain visible because removing execute permission
+can disable a package job. Other permission/owner changes are not checked.
 Unverifiable files, other symlinks and files over 1 MiB remain for manual review.
+Ownership-query failures produce one summary warning with a count; affected paths
+retain `ownership=unknown`.
 
 Collection reads conventional paths to depth 2, examines at most 200 file paths per
 directory and limits each filesystem scan to five seconds. File metadata is capped
@@ -303,3 +303,8 @@ since 2003 and use this script internally to upgrade older servers.
 We can also help you upgrade an old server and migrate it to our modern hardware and VM hosting
 platform. [Contact us](https://rimuhosting.com/contact.jsp) to discuss your server, or read about our
 [distro upgrade service](https://blog.rimuhosting.com/2021/07/12/distro-upgrade-as-a-service/).
+
+## Branding
+
+See the [branding guide](docs/branding.md) for the editable SVG logo, PNG exports
+and README banner.

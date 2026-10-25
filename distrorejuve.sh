@@ -9582,7 +9582,27 @@ function manifest_migration_systemd_target() {
 
 function manifest_migration_path() {
   local kind=$1 file=$2 source=$3 records ownership=not_checked package=unknown checked_file=$2
+  local housekeeping=false ownership_failed=false
   if [ "$kind" = scheduled_task ] || [ "$kind" = custom_service ]; then
+    case "$source" in /etc/init.d|*/systemd/system|/etc/cron.*)
+      # Package backups and cron placeholders are not live service or job definitions.
+      case "${file##*/}" in *.dpkg-*|*.ucf-*|*.rpmnew|*.rpmsave|*.rpmorig|*~) return 0;; esac;;
+    esac
+    case "$source:${file##*/}" in
+      /etc/cron.*:.placeholder|/etc/init.d:.depend.boot|/etc/init.d:.depend.start|/etc/init.d:.depend.stop|/etc/init.d:README|/etc/init.d:skeleton) return 0;;
+    esac
+    case "$source" in
+      /etc/init.d)
+        case "${file##*/}" in
+          console-screen.sh|console-setup|console-setup.sh|hwclock|hwclock.sh|hwclockfirst.sh|keyboard-setup|keyboard-setup.sh|klogd|plymouth|plymouth-log|sysklogd)
+            housekeeping=true;;
+        esac;;
+      /etc/cron.hourly|/etc/cron.daily|/etc/cron.weekly|/etc/cron.monthly)
+        case "${file##*/}" in
+          bsdmainutils|find|locate|mlocate|slocate|makewhatis|makewhatis.cron|man|man-db|rpm|sysklogd|upstart|apt-xapian-index)
+            housekeeping=true;;
+        esac;;
+    esac
     case "$source" in */systemd/system)
       if [ -L "$file" ]; then checked_file=$(manifest_migration_systemd_target "$file") || checked_file=$file; fi;;
     esac
@@ -9598,8 +9618,12 @@ function manifest_migration_path() {
         esac
       fi
     else
-      ownership=unknown; package=unknown
-      manifest_emit warning area migration_paths path "${file#"$manifest_root"}" reason 'Package ownership could not be checked; retaining this path for review.'
+      ownership=unknown; package=unknown; ownership_failed=true
+    fi
+    # Keep confirmed local edits even when the script normally performs OS housekeeping.
+    if $housekeeping && [ "$ownership" != modified_package ]; then return 0; fi
+    if $ownership_failed; then
+      manifest_migration_unverified=$(( ${manifest_migration_unverified:-0} + 1 ))
       manifest_collection_failed=true
     fi
   fi
@@ -9607,7 +9631,7 @@ function manifest_migration_path() {
 }
 
 function manifest_migration_paths() {
-  local directory kind entry_kind file count records
+  local directory kind entry_kind file count records manifest_migration_unverified=0
   for directory in /usr/local/bin /usr/local/sbin /opt /etc/systemd/system /usr/local/lib/systemd/system /etc/init.d /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /var/spool/cron; do
     [ -d "$manifest_root$directory" ] || continue
     case "$directory" in
@@ -9638,6 +9662,9 @@ function manifest_migration_paths() {
     [ -f "$manifest_root$file" ] || continue
     manifest_migration_path scheduled_task "$manifest_root$file" system_schedule
   done
+  if [ "$manifest_migration_unverified" -gt 0 ]; then
+    manifest_emit warning area migration_paths unverified_paths "$manifest_migration_unverified" reason 'Package ownership could not be checked for these migration paths; entries with unknown ownership remain for review.'
+  fi
 }
 
 function manifest_migration_identities() {
@@ -9691,7 +9718,7 @@ function manifest_migration() {
   manifest_migration_paths
   manifest_migration_identities
   manifest_migration_mounts
-  manifest_emit warning area migration_review reason 'Conventional paths only, depth 2 and at most 200 files per directory; scans stop after 5 seconds. Local account selection includes root and conventional application homes. LDAP/NSS users, commands, schedules, service enablement and mount availability are not evaluated. File metadata is capped at 1 MiB; paths may include package-managed files. Names containing control characters and their subdirectories are omitted. Service and scheduled-task files with matching package content, including routine links to vendor units, are omitted, except nonexecutable periodic jobs. Other permission/owner changes are not checked; modified, unowned and unverified paths need review, including stopped or disabled services.'
+  manifest_emit warning area migration_review reason 'Conventional paths only, depth 2 and at most 200 files per directory; scans stop after 5 seconds. Local account selection includes root and conventional application homes. LDAP/NSS users, commands, schedules, service enablement and mount availability are not evaluated. File metadata is capped at 1 MiB; paths may include package-managed files. Names containing control characters and their subdirectories are omitted. Service and scheduled-task files with matching package content, including routine links to vendor units, are omitted, except nonexecutable periodic jobs. Package backup artifacts, placeholders and routine OS housekeeping are omitted; confirmed package-content edits remain visible. Other permission/owner changes are not checked; retained modified, unowned and unverified paths need review, including stopped or disabled services.'
 }
 
 # FORMAT is text or json; ROOT is used only by isolated fixtures, never a chroot or executable source.

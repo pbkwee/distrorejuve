@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">distrorejuve logo</title>
+  <desc id="description">Three server-release stages rise from lower left to upper right and increase in size. A forward arrow represents progress through Linux releases and renewing an existing server.</desc>
+  <g transform="translate(32 298) scale(0.62)" fill="#996444"><path d="M16 0H152Q168 0 168 16V140Q168 156 152 156H16Q0 156 0 140V16Q0 0 16 0Z M20 18H148Q152 18 152 22V64Q152 68 148 68H20Q16 68 16 64V22Q16 18 20 18Z M20 86H148Q152 86 152 90V132Q152 136 148 136H20Q16 136 16 132V90Q16 86 20 86Z" fill-rule="evenodd" /><circle cx="134" cy="43" r="9" fill="#88AA00" /><circle cx="134" cy="111" r="9" fill="#88AA00" /></g>
+  <g transform="translate(158 220) scale(0.8)" fill="#996444"><path d="M16 0H152Q168 0 168 16V140Q168 156 152 156H16Q0 156 0 140V16Q0 0 16 0Z M20 18H148Q152 18 152 22V64Q152 68 148 68H20Q16 68 16 64V22Q16 18 20 18Z M20 86H148Q152 86 152 90V132Q152 136 148 136H20Q16 136 16 132V90Q16 86 20 86Z" fill-rule="evenodd" /><circle cx="134" cy="43" r="9" fill="#88AA00" /><circle cx="134" cy="111" r="9" fill="#88AA00" /></g>
+  <g transform="translate(320 110) scale(1)" fill="#996444"><path d="M16 0H152Q168 0 168 16V140Q168 156 152 156H16Q0 156 0 140V16Q0 0 16 0Z M20 18H148Q152 18 152 22V64Q152 68 148 68H20Q16 68 16 64V22Q16 18 20 18Z M20 86H148Q152 86 152 90V132Q152 136 148 136H20Q16 136 16 132V90Q16 86 20 86Z" fill-rule="evenodd" /><circle cx="134" cy="43" r="9" fill="#88AA00" /><circle cx="134" cy="111" r="9" fill="#88AA00" /></g>
+  <circle cx="454" cy="153" r="9" fill="#88AA00" />
+  <path d="M48 430C200 428 326 389 392 326L374 314L426 294L418 350L406 338C320 410 204 442 48 430Z" fill="#587200" />
+</svg>

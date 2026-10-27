@@ -4899,12 +4899,13 @@ function crossgrade_bookworm_download() {
   cache=$(mktemp -d "$directory/$phase.XXXXXX") || return 1
   mkdir "$cache/partial" || return 1
   printf '%s\n' "$cache" > "$directory/$phase.cache" || return 1
+  echo "dss:stage: Simulating Bookworm crossgrade $phase package plan" >&2
   while :; do
     printf '%s\n' "$@" > "$directory/$phase.arguments.new" || return 1
     if LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::AllowUnauthenticated=false \
       -o APT::Get::AutomaticRemove=false -o APT::Get::Purge=false "${essential_options[@]}" --fix-broken --simulate install "$@" \
-      > "$directory/$phase.plan" 2>&1; then break; fi
-    [ "$phase" != cleanup ] || echo "dss:error: APT could not simulate foreign-package cleanup; inspect $directory/$phase.plan." >&2
+      > "$directory/$phase.plan" 2>&1; then break; else status=$?; fi
+    echo "dss:warn: Bookworm crossgrade $phase APT simulation failed (status $status); inspect $directory/$phase.plan and $directory/$phase.arguments.new." >&2
     # APT 2.6 can omit new direct dependencies while repairing a broken crossgrade.
     [ "$phase" = remaining ] && [ "$retries" -lt 8 ] || return 1
     retries=$((retries+1))
@@ -4945,6 +4946,12 @@ function crossgrade_bookworm_download() {
     done <<< "$candidates"
     if ! $progress; then
       echo "dss:error: Cannot resolve native dependencies safely; inspect $directory/$phase.plan before retrying." >&2
+      # Distinguish current installed-state errors from conflicts in the proposed conversion.
+      if LC_ALL=C apt-get check > "$directory/$phase.installed-check.log" 2>&1; then :
+      else
+        status=$?
+        echo "dss:error: Current installed package dependency check failed (status $status); inspect $directory/$phase.installed-check.log. This does not establish when the package problem began." >&2
+      fi
       return 1
     fi
   done
@@ -10302,6 +10309,11 @@ function support_print_report() {
       /^dss:stage[: ]/ {
         if (/Checking complete requested upgrade path|Rechecking .* before this release transition/) stage="preflight"
         else if (/Refreshing APT package indexes/) stage="apt_update"
+        else if (/Bookworm crossgrade inventory\/backups:/) stage="crossgrade_inventory"
+        else if (/Checking 64-bit replacements for installed 32-bit packages/) stage="crossgrade_candidates"
+        else if (/Simulating Bookworm crossgrade bootstrap package plan/) stage="crossgrade_bootstrap"
+        else if (/Simulating Bookworm crossgrade remaining package plan/) stage="crossgrade_remaining"
+        else if (/Simulating Bookworm crossgrade cleanup package plan/) stage="crossgrade_cleanup"
         else if (/Checking package dependencies|Rechecking dependencies/) stage="dependency_check"
         else if (/Performing full package upgrade|Rechecking the full upgrade|Retrying the full upgrade/) stage="full_upgrade"
         else if (/Upgrading current packages/) stage="package_upgrade"
@@ -10312,6 +10324,27 @@ function support_print_report() {
       }
       { line=tolower($0)
         if (line ~ /unmet dependencies|held broken packages/) errors["dependencies"]=1
+        if (line ~ /^dss:warn: bookworm crossgrade .* apt simulation failed /) {
+          errors["crossgrade_plan"]=1; crossgrade_phase=crossgrade_status="unknown"
+          if (line ~ /^dss:warn: bookworm crossgrade bootstrap apt /) crossgrade_phase="bootstrap"
+          else if (line ~ /^dss:warn: bookworm crossgrade remaining apt /) crossgrade_phase="remaining"
+          else if (line ~ /^dss:warn: bookworm crossgrade cleanup apt /) crossgrade_phase="cleanup"
+          if (crossgrade_phase != "unknown") stage="crossgrade_" crossgrade_phase
+          if (match(line, /[(]status [0-9]+[)]/)) {
+            code=substr(line, RSTART+8, RLENGTH-9)
+            if (length(code) <= 3 && code+0 > 0 && code+0 <= 255) crossgrade_status=code+0
+          }
+        }
+        if (line ~ /^dss:error: cannot resolve native dependencies safely;/) {
+          errors["dependencies"]=errors["crossgrade_plan"]=1; stage="crossgrade_remaining"
+          if (crossgrade_phase != "remaining") {crossgrade_phase="remaining"; crossgrade_status="unknown"}
+        }
+        if (line ~ /^dss:error: apt could not simulate foreign-package cleanup;/) {
+          errors["crossgrade_plan"]=1; stage="crossgrade_cleanup"
+          if (crossgrade_phase != "cleanup") {crossgrade_phase="cleanup"; crossgrade_status="unknown"}
+        }
+        if (line ~ /^dss:error: crossgrade plan would remove a protected package or reverse architecture;/) errors["crossgrade_plan_rejected"]=1
+        if (line ~ /^dss:error: current installed package dependency check failed /) errors["installed_dependencies"]=1
         if (line ~ /hash sum mismatch/) errors["download_checksum"]=1
         if (line ~ /^dss:error: apache\/php (preparation|completion) failed/) errors["php_apache_handoff"]=1
         if (line ~ /^dss:error: (cannot establish whether apache is in use|apache use changed)/) { errors["php_apache_usage"]=1; stage="php_migration" }
@@ -10363,6 +10396,7 @@ function support_print_report() {
         printf "recorded_release_codename: %s\nrecorded_package_release_codename: %s\n", (outcome ? release_name : "not_recorded"), (outcome ? package_release_name : "not_recorded")
         printf "recorded_local_configuration_review: %s\n", (current_review != "legacy" ? current_review : (local_review ? "required" : "not_recorded"))
         printf "last_recorded_apt_update_failure_phase: %s\nlast_recorded_apt_update_exit_status: %s\n", (update_phase == "" ? "not_recorded" : update_phase), (update_status == "" ? "not_recorded" : update_status)
+        printf "last_recorded_crossgrade_plan_failure_phase: %s\nlast_recorded_crossgrade_plan_exit_status: %s\n", (crossgrade_phase == "" ? "not_recorded" : crossgrade_phase), (crossgrade_status == "" ? "not_recorded" : crossgrade_status)
         printf "last_recognised_stage: %s\n", (stage == "" ? "unknown" : stage)
         printf "observed_error_categories:"
         for (error in errors) { printf " %s", error; found=1 }
@@ -10376,6 +10410,7 @@ function support_print_report() {
       'recorded_release_codename: not_recorded' 'recorded_package_release_codename: not_recorded' \
       'recorded_local_configuration_review: not_recorded' \
       'last_recorded_apt_update_failure_phase: not_recorded' 'last_recorded_apt_update_exit_status: not_recorded' \
+      'last_recorded_crossgrade_plan_failure_phase: not_recorded' 'last_recorded_crossgrade_plan_exit_status: not_recorded' \
       'last_recognised_stage: unknown' 'observed_error_categories: unknown'
     [ -z "$directory" ] || status=1
   fi

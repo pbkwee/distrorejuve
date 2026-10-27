@@ -151,7 +151,23 @@ Simulation counts describe the currently configured indexes; zero planned change
 A current release label or clean package database does not establish successful release, package and service verification.
 Current system facts describe collection time; they are not the original pre-upgrade baseline.
 Known stage/error messages become fixed category labels. The report does not copy log excerpts.
+Bookworm crossgrades distinguish inventory, replacement checks and bootstrap,
+remaining-package and cleanup planning. Failed simulations report the phase and
+APT exit status separately from current-system probes. Older failures can identify
+the phase while leaving the original exit status unknown.
 An observed error category can refer to an earlier failed attempt within the run; it does not prove a current fault.
+
+For a failed crossgrade plan, retain the matching `bootstrap.plan`, `remaining.plan`
+or `cleanup.plan` and its `.arguments.new` file from the inventory directory printed
+in the log. These files describe that simulation, including the arguments used.
+A different phase's plan does not explain the failure. Proposed removals in a
+simulation do not establish that those removals were executed. Keep these files
+private and review them before sharing with a maintainer.
+If remaining-package planning cannot select another safe native dependency,
+a read-only `apt-get check` saves current installed-package diagnostics in
+`remaining.installed-check.log` beside that plan. A failed check identifies a
+current package-state problem; it does not establish when it began. No automatic
+dependency repair or mail-package removal is attempted.
 
 The report omits hostnames, IP/email addresses, repository URLs, usernames, installed package lists,
 application inventories, environment values, arbitrary paths and configuration contents.

@@ -22,31 +22,50 @@ scp -O distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
 
 ## SSH connection errors
 
+For job-specific access, generate and install the public keys using
+[SSH setup](ai-assisted-migration.md#arrange-ssh-discovery). Try Ed25519 alone first;
+use the RSA fallback if the server cannot accept Ed25519. An RSA public-key line
+starts with `ssh-rsa` even when authentication uses SHA-2 signatures. Generating
+an RSA key does not itself enable RSA/SHA-1 on the client.
+
 `scp -O` selects the legacy SCP transfer protocol for old SSH servers. If an older SCP
 client does not recognize `-O`, omit it. If SSH also reports a negotiation failure,
-add the required option to this SCP command:
+add only the required option to the connection:
 
 - If the host-key error offers `ssh-rsa`, add `-oHostKeyAlgorithms=+ssh-rsa`.
 - If the key-exchange error offers `diffie-hellman-group14-sha1`, add `-oKexAlgorithms=+diffie-hellman-group14-sha1`.
   Use `-oKexAlgorithms=+diffie-hellman-group1-sha1` only if that is the available method.
-- If an existing RSA login key needs SHA-1 signatures, add `-oPubkeyAcceptedAlgorithms=+ssh-rsa`.
+- If the RSA login key needs SHA-1 signatures, add `-oPubkeyAcceptedAlgorithms=+ssh-rsa`.
+- If the cipher error offers only CBC ciphers, add an offered cipher supported by the client, such as `-oCiphers=+aes128-cbc`.
+- If the MAC error requires it, add an offered MAC supported by the client, such as `-oMACs=+hmac-sha1`.
 
-For a server requiring several legacy methods, use a Bash array so the same
-options work for both copying and logging in. Run on the newer computer:
+Use a Bash array so copying, login and report retrieval use the same job keys
+and options. The identities below list Ed25519 first and RSA second. If both are
+loaded in an agent, the agent can affect offer order; the linked Ed25519-only test
+establishes the preferred working key. On a modern server, omit the RSA identity.
+Run on the newer computer; uncomment only exceptions required by this old server:
 
 ```bash
 SSH_OPTS=(
-  -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1
-  -o Ciphers=+aes128-cbc
-  -o HostKeyAlgorithms=+ssh-rsa
-  -o PubkeyAcceptedAlgorithms=+ssh-rsa
+  -F /dev/null
+  -o IdentitiesOnly=yes
+  -i "$HOME/.ssh/server-migration-example"
+  -i "$HOME/.ssh/server-migration-example-rsa"
+  # -o PubkeyAcceptedAlgorithms=+ssh-rsa
+  # -o HostKeyAlgorithms=+ssh-rsa
+  # -o KexAlgorithms=+diffie-hellman-group14-sha1
+  # -o Ciphers=+aes128-cbc
+  # -o MACs=+hmac-sha1
 )
 scp -O "${SSH_OPTS[@]}" distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
 ssh "${SSH_OPTS[@]}" root@OLD_SERVER
 ```
 
 Replace `OLD_SERVER` with the intended address. Use only the options required by
-its negotiation errors; the full array is a compatibility example. `-O` selects
+its negotiation errors. Use the same array for downloads and later reconnects;
+`-F /dev/null` excludes user/system SSH configuration. Add any agreed bastion or
+known-hosts options explicitly; for a custom port add `-o Port=2222` for both tools.
+`-O` selects
 the older SCP protocol when the server lacks SFTP; it does not fix SSH algorithm
 negotiation. Omit it when unnecessary or unsupported by your local scp client.
 
@@ -55,6 +74,23 @@ by default for security reasons. Keep exceptions on the individual command and
 remove them when the server supports current algorithms. Host-key verification
 still applies. An older local client may need `PubkeyAcceptedKeyTypes` instead
 of `PubkeyAcceptedAlgorithms`; check its manual if it rejects that option.
+Changing a key cannot fix an algorithm removed from the client. Check support
+with `ssh -Q key`, `ssh -Q kex`, `ssh -Q cipher` and `ssh -Q mac`. For a server
+offering only removed methods such as DSA, use an approved isolated compatibility
+client or console-assisted SSH repair; do not disable host verification or
+generate a new DSA key. Retest Ed25519 and remove legacy exceptions after upgrading.
+
+A shell array affects only commands that explicitly use it. For a tool that calls
+SSH internally, use a narrowly scoped entry for the exact source in trusted SSH
+configuration, with `IdentitiesOnly yes`, the required `IdentityFile` entries and
+only the tested compatibility options. Keep source exceptions off destinations.
+This applies to S2I's `mysqlbackup.sh`: it creates its own RSA backup key and calls
+SSH/SCP internally; it does not consume `SSH_OPTS`. Install/verify the public key
+for the actual sending account and connection direction, or transfer completed
+dumps with the tested client yourself. An old initiating client may need an RSA
+private key in PEM format; the old remote server alone does not. See
+[S2I's legacy SSH guide](https://github.com/pbkwee/s2i/blob/master/docs/legacy-ssh.md).
+
 See the [OpenSSH legacy connection guide](https://www.openssh.org/legacy.html)
 and [scp protocol option](https://man.openbsd.org/scp#O).
 After copying, inspect `/root/distrorejuve.sh` on the old server and run

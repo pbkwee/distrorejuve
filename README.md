@@ -31,6 +31,15 @@ sudo bash distrorejuve.sh --check-upgrade
 Run `bash distrorejuve.sh --help` to see the available actions.
 Take a full backup before running an upgrade.
 
+## AI-assisted assessment and migration
+
+You can use these tools wherever your server is hosted. Follow the
+[step-by-step guide](docs/ai-assisted-migration.md) to supply a private manifest
+or arrange SSH access, review a recommendation, and choose an in-place upgrade,
+an upgraded copy or a fresh-server migration. Agents can use the
+[server-upgrade skill](.agents/skills/server-upgrade/SKILL.md).
+For a new RimuHosting destination, see [account and API setup](docs/rimuhosting.md).
+
 ## Documentation
 
 - [Usage](docs/usage.md): upgrade actions, reports and logs.

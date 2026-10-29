@@ -34,7 +34,8 @@ links. Store the file under `/root`; distrorejuve checks these requirements befo
 
 ## Hosting-panel upgrades
 
-`DR_PANEL_UPGRADE` accepts `plesk` or `cpanel`. An unset or empty value does not enable panel automation.
+`DR_PANEL_UPGRADE` accepts `plesk` or `cpanel`. An unset or empty value does not enable those vendor tools.
+Virtualmin, ISPConfig and standalone Webmin use the normal distro path without this setting.
 Other detected hosting panels stop with their vendor upgrade or migration URL; this setting does not bypass that stop.
 `DR_PLESK_UPGRADE_TOOL` must be an absolute path to the reviewed, executable vendor tool.
 See [hosting-panel upgrades](hosting-panels.md) for supported transitions, vendor checks and automatic reboots.
@@ -80,6 +81,7 @@ Boolean settings accept `true` or `false`. Unset or empty settings use their doc
 Use the `DR_` names; older environment names are not supported.
 Standard tool settings such as `UCF_FORCE_CONFFOLD`, `APT_CONFIG` and `NO_COLOR` retain their names.
 
-Hosting-panel servers use a separate vendor upgrade procedure.
+Virtualmin, ISPConfig and standalone Webmin use normal distro upgrade checks.
+Other detected hosting panels use a separate vendor upgrade procedure.
 See [hosting-panel upgrades](hosting-panels.md) for supported Plesk/cPanel paths and
 manual upgrade or migration guidance for other detected panels.

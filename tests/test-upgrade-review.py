@@ -83,14 +83,26 @@ manifest_probe broken probe_failure
         self.assertIn('result partial', result.stdout)
         self.assertIn('result unknown command_status 7', result.stdout)
 
-    def test_custom_virtualmin_command_blocks_generic(self):
-        result = run(['upgrade_panel_refuse_generic'], """
+    def test_custom_virtualmin_command_allows_normal_checks(self):
+        result = run(['upgrade_panel_refuse_generic', 'upgrade_panel_uses_distro_packages'], """
 upgrade_panel_output_installed() { :; }
 virtualmin() { :; }
 upgrade_panel_refuse_generic
 """)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('custom installation require review', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('blocked', result.stderr)
+
+    def test_distro_panels_pass_generic_guard_but_other_panels_still_block(self):
+        for panels, expected in [('virtualmin', 0), ('ispconfig', 0),
+                                 ('virtualmin ispconfig', 0), ('virtualmin directadmin', 1),
+                                 ('plesk', 1), ('cpanel', 1), ('hestiacp', 1)]:
+            with self.subTest(panels=panels):
+                result = run(['upgrade_panel_refuse_generic', 'upgrade_panel_uses_distro_packages',
+                              'upgrade_panel_output_procedure_url'], f'''
+upgrade_panel_output_installed() {{ for panel in {panels}; do printf '%s\\tunknown\\n' "$panel"; done; }}
+upgrade_panel_refuse_generic
+''')
+                self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_collection_status_is_transient(self):
         result = run(['manifest_output_review_record'], "manifest_output_review_record collection_status warning_count 2")

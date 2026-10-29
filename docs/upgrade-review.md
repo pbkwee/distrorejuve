@@ -68,8 +68,9 @@ are preserved. A false failure flag reports no core collector failures; inspect
 warnings and per-collector coverage for gaps. Virtualmin configuration without a conventional module installation is
 reported as `panel_remnant`, with installation/runtime state unknown. This is not
 removal authority; inspect custom installations and package state separately.
-Ambiguous Virtualmin configuration or a surviving command still blocks generic
-release upgrades until the operator reconciles installation state.
+Virtualmin and ISPConfig use normal distro upgrade checks, including when Virtualmin
+configuration remnants or a custom command survive. Review panel configuration and
+complete the [panel follow-up](hosting-panels.md#panels-using-distro-packages).
 
 Offline regression checks (no production operations):
 

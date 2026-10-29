@@ -1,15 +1,53 @@
 # Hosting-panel upgrades
 
 Hosting panels manage configuration and packages that a generic upgrade can replace.
-Distrorejuve detects these panels before generic package, repository, cleanup or crossgrade work.
-Standalone Webmin does not select this restriction.
+Distrorejuve identifies panels before package, repository, cleanup or crossgrade work.
 Use `--manifest`, `--upgrade-report` and `--show-changes` to collect and review information.
 The manifest includes the detected panel and version. An unreadable version is reported as unknown.
 
+## Panels using distro packages
+
+Virtualmin and ISPConfig use the normal distrorejuve package, release-upgrade,
+cleanup and crossgrade paths. Standalone Webmin also uses these paths.
+No `DR_PANEL_UPGRADE` setting is needed. Panel detection remains in inventories;
+package, repository, architecture, recovery and service checks still apply.
+A detected panel alone does not block these operations.
+
+[Virtualmin documents package-manager updates](https://www.virtualmin.com/docs/faq/#packages-and-web-apps-upgrades)
+and leaves major OS upgrades to the administrator. [ISPConfig's documentation](https://www.ispconfig.org/documentation/)
+links distro-upgrade procedures with additional panel steps. Before starting,
+review the procedure for the installed panel and source/target OS versions.
+After each release hop, review panel settings, PHP handlers and paths, websites,
+mail and database access. ISPConfig requires its service reconfiguration step;
+distrorejuve does not run `ispconfig_update.sh --force` automatically.
+Crossgrades remain experimental and require separate architecture/package review.
+
+The current production Virtualmin APT source (`https://download.virtualmin.com/`,
+suite `virtualmin`, component `main`) and Webmin's stable/legacy sarge channels
+are release-independent. They remain unchanged through release hops, including
+signing options and architecture filters. APT still checks repository signatures,
+availability and dependencies. Release-specific, development and unrecognised
+repository layouts retain the existing review requirement. Older Virtualmin
+repositories may need the [vendor's repository repair/migration procedure](https://www.virtualmin.com/docs/installation/troubleshooting-repositories/);
+distrorejuve does not switch them automatically.
+
+Distrorejuve's dpkg policy prefers packaged configuration and restores missing
+conffiles. Back up panel-managed settings and review the saved configuration
+changes; an OS/package success does not complete panel or application validation.
+Virtualmin configuration remnants or a custom `virtualmin` command alone no longer
+select the blanket panel stop. Inspect custom installations and surviving settings
+before upgrading or removing them.
+
+## Panels using vendor procedures
+
 Set `DR_PANEL_UPGRADE=plesk` or `DR_PANEL_UPGRADE=cpanel` to select a supported vendor OS upgrade.
-The setting is not a bypass for failed checks. Other panels stop with vendor guidance; no automated path is provided.
-Generic `--upgrade`, `--dist-update`, cleanup and crossgrade commands remain blocked on panel hosts.
-Use the panel's own tools for those package updates.
+The setting is not a bypass for failed checks. Other panels below stop with vendor guidance.
+Generic package updates, cleanup and crossgrades remain blocked for these panels:
+some use separate service builds or require panel-specific migration/reconfiguration.
+For example, [DirectAdmin has CustomBuild-managed software](https://docs.directadmin.com/operation-system-level/os-general/package-management.html),
+[Hestia requires OS-specific configuration migration](https://hestiacp.com/docs/server-administration/os-upgrades),
+and [KeyHelp provides OS upgrade procedures](https://www.keyweb.de/en/keyhelp/support/operating-system-upgrades).
+Support for ordinary package updates alone does not establish a generic release/crossgrade path.
 
 ## Panels that require a manual procedure
 
@@ -20,9 +58,7 @@ values or bypass options are provided.
 
 | Panel | Vendor OS upgrade or migration guidance |
 | --- | --- |
-| Virtualmin | [System upgrades](https://www.virtualmin.com/docs/faq/#system-upgrade) |
 | DirectAdmin | [Full server migration](https://docs.directadmin.com/directadmin/backup-restore-migration/full-da-migration.html) |
-| ISPConfig | [Documentation: distribution upgrades](https://www.ispconfig.org/documentation/) |
 | HestiaCP | [Operating system upgrades](https://hestiacp.com/docs/server-administration/os-upgrades) |
 | VestaCP | [Backup and restore to a new server](https://vestacp.com/docs/how-to-migrate-user-to-the-new-server) |
 | CyberPanel | [Remote transfer](https://cyberpanel.net/KnowledgeBase/home/3-remote-transfer/) |
@@ -33,7 +69,7 @@ values or bypass options are provided.
 | InterWorx | [Import hosting accounts](https://appendix.interworx.com/current/nodeworx/account_management/siteworx/imports/import-interworx-hosting-accounts.html) |
 
 A panel update and a major OS upgrade are different operations. HestiaCP and KeyHelp
-provide OS-specific procedures; ISPConfig documents particular distribution upgrades.
+provide OS-specific procedures.
 The migration links describe moving to a prepared destination. For an in-place OS
 upgrade, select vendor guidance covering the actual panel and OS versions.
 
@@ -44,7 +80,7 @@ use the actual vendor's instructions when that applies. Distrorejuve's automatic
 and PHP changes require vendor review for these panels. Follow the panel's normal update
 process for routine package maintenance.
 
-## Supported transitions
+## Supported vendor transitions
 
 Each invocation supports one adjacent release transition on native amd64 with an x86_64 kernel.
 The host must run systemd and must not be a container.
@@ -61,11 +97,10 @@ The host must run systemd and must not be a container.
 
 These integrations follow the vendor procedures checked on 2026-10-23.
 The installed vendor tool must also accept the upgrade.
-Older Plesk transitions, RPM transitions and panel crossgrades are not automated here.
+Older Plesk transitions, RPM transitions and crossgrades for vendor-managed panels
+are not automated by these integrations.
 Use [Plesk's procedure](https://support.plesk.com/hc/en-us/articles/12377714344983-How-to-perform-dist-upgrade-procedure-on-Linux-server-with-Plesk)
 or [cPanel ELevate](https://cpanel.github.io/elevate/getting-started/) for current requirements.
-Virtualmin treats major OS upgrades as a separate administrator-managed task; see its
-[system-upgrade guidance](https://www.virtualmin.com/docs/faq/#system-upgrade).
 
 Multi-release requests stop before the first transition. A future transition can need a different panel version and tool.
 Those checks cannot be completed on the original OS.

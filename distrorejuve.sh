@@ -122,7 +122,8 @@ Run with --dist-update to update packages on the current distro version (no dist
 Hosting panels: DR_PANEL_UPGRADE=plesk|cpanel selects a supported one-release vendor upgrade.
 Plesk also requires DR_PLESK_UPGRADE_TOOL pointing to the reviewed vendor executable.
 Download instructions: https://support.plesk.com/hc/en-us/articles/12377714344983-How-to-perform-dist-upgrade-procedure-on-Linux-server-with-Plesk
-Vendor tools control configuration and automatic reboots; generic upgrades are blocked on panel hosts.
+Virtualmin and ISPConfig use the normal distro upgrade/crossgrade checks; review panel configuration afterwards.
+Other panels require their vendor procedure; vendor tools control configuration and automatic reboots.
 See docs/hosting-panels.md for prerequisites, supported paths and recovery.
 
 Run with --upgrade-report to collect a read-only handover for developer/application upgrade review.
@@ -928,28 +929,30 @@ function upgrade_panel_output_procedure_url() {
   esac
 }
 
+# These panels use distro packages; panel follow-up remains an administrator task.
+# https://www.virtualmin.com/docs/faq/#system-upgrade
+# https://www.ispconfig.org/documentation/
+function upgrade_panel_uses_distro_packages() {
+  case "$1" in virtualmin|ispconfig) return 0;; esac
+  return 1
+}
+
 function upgrade_panel_refuse_generic() {
-  local panels panel version url
+  local panels panel version url blocked=false
   panels=$(upgrade_panel_output_installed) || return 1
-  if [ -z "$panels" ]; then
-    # A removed module with surviving config or a custom command is ambiguous.
-    # Keep it out of installed inventory, but do not authorize a generic upgrade
-    # from missing conventional files alone. An operator must reconcile it.
-    if [ -e /etc/webmin/virtual-server/config ] || command -v virtualmin >/dev/null 2>&1; then
-      echo 'dss:error: Possible Virtualmin remnants/custom installation require review; generic upgrade is blocked until panel ownership and installation state are reconciled.' >&2
-      upgrade_preflight_blocked=true
-      return 1
-    fi
-    return 0
-  fi
-  echo 'dss:error: Hosting panel detected; generic package/configuration changes are disabled. Use the panel upgrade procedure; see --manifest and docs/hosting-panels.md.' >&2
+  [ -n "$panels" ] || return 0
   while IFS=$'\t' read -r panel version; do
+    if upgrade_panel_uses_distro_packages "$panel"; then continue; fi
+    if ! $blocked; then
+      echo 'dss:error: Hosting panel detected; generic package/configuration changes are disabled. Use the panel upgrade procedure; see --manifest and docs/hosting-panels.md.' >&2
+      blocked=true
+    fi
     if url=$(upgrade_panel_output_procedure_url "$panel"); then
       printf 'dss:info: %s upgrade or migration guidance: %s\n' "$panel" "$url" >&2
     fi
   done <<< "$panels"
-  upgrade_preflight_blocked=true
-  return 1
+  if $blocked; then upgrade_preflight_blocked=true; return 1; fi
+  return 0
 }
 
 function upgrade_panel_check_tool() {
@@ -991,6 +994,16 @@ function upgrade_panel_dispatch() {
   fi
   IFS=$'\t' read -r panel version <<< "$panels"
   echo "dss:stage: Detected hosting panel $panel ($version)" >&2
+  if upgrade_panel_uses_distro_packages "$panel"; then
+    if [ -n "${DR_PANEL_UPGRADE:-}" ]; then
+      echo "dss:error: $panel uses the normal distro path; unset DR_PANEL_UPGRADE before continuing." >&2
+      return 1
+    fi
+    echo "dss:warn: $panel uses distro packages; normal upgrade/crossgrade checks apply. Review panel configuration and services afterwards; see docs/hosting-panels.md." >&2
+    upgrade_panel_handled=false
+    upgrade_preflight_blocked=false
+    return 0
+  fi
   case "$panel" in
     plesk|cpanel) :;;
     *) printf 'dss:error: Hosting panel %s: no automated distrorejuve upgrade is available. Follow the vendor upgrade or migration process: %s\n' "$panel" "$(upgrade_panel_output_procedure_url "$panel")" >&2
@@ -1153,6 +1166,17 @@ function apt_sources_check_releases_and_vendors() {
       fi
       continue
     fi
+    # These production channels do not encode a distro release; retain their signing options.
+    # deb https://download.virtualmin.com virtualmin main -> retained across release hops.
+    # Webmin's legacy sarge channel is a vendor label, not the installed Debian release.
+    case "$type:$provider:${uri%/}:$suite:$components" in
+      deb:virtualmin:https://download.virtualmin.com:virtualmin:main|\
+      deb:webmin:https://download.webmin.com/download/newkey/repository:stable:contrib|\
+      deb:webmin:https://download.webmin.com/download/repository:sarge:contrib|\
+      deb:webmin:http://download.webmin.com/download/repository:sarge:contrib)
+        echo "dss:info: $file:$line: Release-independent $provider repository retained; package availability and signing checks remain required."
+        continue;;
+    esac
     [ -z "$target" ] && "${DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK:-false}" && continue
     support=unknown
     status=2

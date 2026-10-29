@@ -71,9 +71,9 @@ explain why agreement to change it is needed.
 Lead with the customer explanation: current setup, proposed changes, particular
 risks, recommendation, likely interruption/cost assumptions, remaining work and
 next decision. Follow with the technical appendix and evidence. Separate observed
-facts, customer statements, inferences, blockers and unknowns. An OS upgrade does
-not prove applications work or modernize their code. Name owners and expected
-checks for work that remains. Scale the report to the actual job.
+facts, customer statements, inferences, blockers and unknowns. Verify application
+functions separately after OS upgrades and identify any required code modernisation.
+Name owners and expected checks for work that remains. Scale the report to the actual job.
 
 If the source runs Dovecot or another IMAP/POP3 service, follow
 [mailbox planning](../../../docs/upgrade-and-migration.md#plan-mailbox-hosting-and-migration).

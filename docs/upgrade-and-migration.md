@@ -74,16 +74,17 @@ collector self-matches from compromise. Removing a service needs explicit scope.
 Use the [assessment report](../.agents/skills/server-upgrade/references/assessment-report.md)
 for the customer explanation and technical appendix. Map each important service
 to its real runtime, data, scheduled work and dependencies. CLI PHP can differ
-from web PHP; package availability and a running process do not prove compatibility.
+from web PHP. Verify compatibility against the applications and their actual runtimes.
 Check CMS/plugins, native extensions, virtual environments, custom services,
 licences, TLS, mail delivery, IP restrictions and application/database conversions.
-Known compromise may require a clean build and selective recovery; copying it
-or seeing no inventory indicators does not establish a clean server.
+Known compromise may require a clean build and selective recovery. Review copied
+content and investigate security risks beyond the inventory's selected indicators.
 
 Prefer in-place work when the supported transition, workload compatibility,
 resources, credible recovery and accepted outage make it straightforward.
 Choose a clone or fresh build for concrete compatibility, recovery or rehearsal
-benefits. Version distance or an unknown fact alone does not decide. Explain
+benefits. Base the choice on supported transitions, workload needs and recovery
+evidence; investigate material unknowns. Explain
 what further evidence would change the recommendation and respect the requested
 route by obtaining agreement before changing it.
 
@@ -97,9 +98,9 @@ horizon, required runtimes/extensions, database paths, native binaries and licen
 Distinguish latest stable from latest LTS. Explain a supported older choice;
 never silently choose testing, unstable or an unsupported OS for an old runtime.
 
-Verify the provider's current image catalog, architecture, storage, networking
-and capacity. A listed/recommended image is not application compatibility or
-capacity evidence. Record sources, dates and the exact image identifier.
+Verify the hosting provider's current image catalog, architecture, storage, networking
+and capacity. Verify application compatibility and available capacity for the selected
+image. Record sources, dates and the exact image identifier.
 Missing compatibility evidence makes the choice provisional.
 
 A clean build installs supported packages and migrates selected data and
@@ -108,20 +109,20 @@ Old-OS release hops are unnecessary; application/database conversions may still
 need stages. For an in-place or cloned-OS upgrade, establish each intermediate
 release and panel transition from official supported paths. Do not trust the
 script's embedded `--to-latest` endpoint as today's latest release. Crossgrades
-are experimental and need a separately established route. RPM inventory and
-package updates do not establish support for an RPM major-release upgrade.
+are experimental and need a separately established route. Verify a supported
+RPM major-release upgrade procedure separately from inventory and package updates.
 Legacy-runtime containment can be considered within scope, with its remaining
 security and maintenance limits explained; it is not automatic modernization.
 
 ## Plan mailbox hosting and migration
 
 When the original server runs Dovecot or another IMAP/POP3 service, establish
-whether it serves active mailboxes. An installed package or open port alone does
-not prove use; unresolved use stays unknown. Ask whether the customer prefers
+whether it serves active mailboxes. Check mailbox accounts and current usage
+alongside installed packages and open ports; unresolved use stays unknown. Ask whether the customer prefers
 [managed email or a self-hosted stack](ai-assisted-migration.md#decide-where-email-will-run).
 Record the choice and an approach in the assessment, including when mail stays
 on a separate existing service. An SMTP-only application sender needs a sending
-plan but does not by itself establish a mailbox migration.
+plan; establish whether any mailboxes also require migration.
 
 - Inventory the required domains, mailboxes, aliases/forwarders, storage, quotas,
   filters, shared access and client protocols within the approved data scope.
@@ -142,7 +143,7 @@ plan but does not by itself establish a mailbox migration.
   Identify concrete compatibility/security blockers and the smallest required fix;
   resolve any material change outside the approved plan before proceeding.
 - For managed email, provision and verify domains, accounts and address mappings
-  through the provider's supported process before changing delivery.
+  through the hosting provider's supported process before changing delivery.
 - For accessible IMAP mailboxes, plan a reviewed repeatable IMAP copy, an initial
   transfer and final catch-up. Verify folders, dates, flags and message coverage;
   decide how concurrent changes and deletions are handled without losing mail.
@@ -173,9 +174,9 @@ Assessment alone does not authorize backup creation, provisioning or execution.
 
 Use [S2I](https://github.com/pbkwee/s2i) only after reading that revision's usage,
 restore and system-recovery guidance. Full archives have exclusions; system
-archives normally omit application data. Provider root-disk snapshots may omit
-separate disks. Neither system files nor a snapshot alone can reverse database
-format changes or merge writes accepted after cutover. Specify database consistency,
+archives normally omit application data. Hosting provider root-disk snapshots may omit
+separate disks. Plan database-format recovery and preservation of writes accepted
+after cutover alongside system-file and snapshot restoration. Specify database consistency,
 backup scope, encryption-key references, off-server storage, integrity/restore
 evidence, console/rescue access, retention and compatible startup order.
 Include expanded data size, dumps, extraction caches, inodes and transfer time
@@ -192,15 +193,15 @@ Assign an owner and expected result to each acceptance check.
 Follow the approved explicit-target procedure and release/panel gates. Avoid
 replacing it with a generic package-manager command. Use an available supervised
 or resumable facility for long operations. Verify completion from actual operation
-and package state; accepted work or a running unit is not completion.
+and package state, including final status after a supervised operation starts.
 
 At release checkpoints, review package health, configuration merges, web worker
 identities, FPM sockets/permissions, monitoring, network/boot settings and database
 maintenance. Do not blindly copy old config or assume packaged config preserves
 custom behaviour. Confirm authenticated database administration and vendor table
 upgrades. MariaDB 11.6+ needs review of legacy socket identity mappings and semantic
-grants; process health and application credentials alone do not prove maintenance
-access. See [upgrade review checks](upgrade-review.md).
+grants; verify administrative maintenance access separately from process health
+and application access. See [upgrade review checks](upgrade-review.md).
 
 Follow approved reboot/reconnection steps. After boot check failed units, mounts,
 required utilities, listeners and dependencies when service names change. Allow
@@ -212,8 +213,8 @@ an incompatible upgraded data directory.
 
 Provision the approved clean VM or prepare the copy target. Verify destination
 ownership, current use and overwrite authority. External sources need S2I copy/import
-or selective application migration; provider clone flags may only accept that
-provider's own images/orders. Follow provider-specific boot, SSH and networking
+or selective application migration; hosting provider clone flags may only accept that
+hosting provider's own images/orders. Follow the hosting provider's boot, SSH and networking
 requirements before a restore. For a clean install keep the new OS intact.
 
 Restrict egress before copied services start. Suppress copied mail, cron/timers,
@@ -242,9 +243,9 @@ Switch the agreed DNS/traffic path, accounting for IPv4/IPv6, proxies, PTR, mail
 SPF/DKIM, TLS and allowlists. Keep one authoritative writable system during
 DNS/cache overlap. Alternatively, an explicitly approved original-image replacement
 needs a complete prepared image, exact overwrite target, recovery and final-server
-boot/network/application checks. The tested temporary VM does not prove that
-replacement will work. A portable image likewise needs a destination-specific
-restore and final-data handover; delivery alone is not successful restoration.
+boot/network/application checks. Verify the final replacement server as well as
+the tested temporary VM. A portable image likewise needs a destination-specific
+restore, final-data handover and acceptance checks after delivery.
 
 Before new destination writes, returning traffic may be straightforward if the
 source is intact and authoritative. After new writes, preserve them before
@@ -254,13 +255,14 @@ choosing reverse migration or repair; an old backup may lose orders, uploads or 
 
 Check real application functions, errors, mail, jobs, resources, boot/SSH,
 monitoring and a usable destination backup. Record customer acceptance, remaining
-work, owners and recovery/retention limits. A home page alone is insufficient.
+work, owners and recovery/retention limits. Test representative application
+transactions as well as the home page.
 
 If traffic moved to the prepared VM, it is production and must remain running.
 After an original-image replacement, retain the temporary VM until final-server
 acceptance and agreed recovery conditions. Identify the actual old/temporary
 server before any shutdown or cancellation. Record recurring charges and cleanup
-ownership separately. External-provider cancellation belongs to the customer
+ownership separately. Cancellation with another hosting provider belongs to the customer
 unless explicitly delegated. Remove job access and revoke temporary credentials
 under the agreed retention/access plan.
 

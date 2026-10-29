@@ -4,7 +4,7 @@ distrorejuve can help you understand an older Linux server and choose a way
 forward, wherever it is hosted. Start with an assessment. You can share a private
 inventory without giving the assistant server access, or authorize SSH discovery.
 You do not need a RimuHosting account for this assessment or for an upgrade at
-your existing provider.
+your existing hosting provider.
 
 The assistant helps explain the options and carry out agreed work. It cannot
 establish application compatibility from a package list alone. Someone who knows
@@ -92,7 +92,7 @@ account for assessment. Privileged discovery or later execution needs separately
 agreed access; a key alone does not grant sudo or make operations read-only.
 
 Give the operator the SSH address, port, username and a host-key fingerprint
-obtained through a trusted route such as the provider console. The operator
+obtained through a trusted route such as the hosting provider console. The operator
 compares that fingerprint and checks the connected server's identity. A changed
 or unexplained key must be resolved before continuing. Keep console/recovery
 access available. Agree when the job key will be removed; a comment on a key
@@ -128,7 +128,7 @@ recommendation from a plan ready to approve.
 | Upgrade a separate copy | Copy the existing installation, upgrade it separately, test, then transfer final data and switch. | You need to rehearse the existing setup before changing production. |
 | Build a fresh server | Install a supported OS and applications, then migrate selected data and reviewed settings. | Rebuilding is simpler or better supported than carrying the old OS forward. |
 
-A separate server may be at your current provider, another provider, or
+A separate server may be at your current hosting provider, another hosting provider, or
 [RimuHosting](rimuhosting.md). A clean install needs application migration;
 restoring the entire old system over it would replace the new OS. A clone carries
 the old system's problems too. S2I can help create or restore file archives, but

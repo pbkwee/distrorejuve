@@ -6,6 +6,16 @@ CentOS Stream releases also keep their native repositories. `--dist-update` uses
 this same RPM update path once. RPM major-release upgrades are separate work;
 `--to-latest` does not perform an ELevate migration.
 
+Before package updates, enabled native repository IDs must cover the distro's
+base and update packages. EL 8+ requires BaseOS and AppStream; older CentOS needs
+base and updates, while Fedora needs fedora and updates. RHEL and Oracle use
+recognized native subscription/channel pairs. EL delivers security fixes through
+these repositories rather than a separate Debian-style security repository.
+Missing or custom repository IDs stop for review; no subscription channel or
+optional repository is enabled automatically. Signature/TLS checks remain required.
+The same gate runs after vendor conversion, and its recovery marker is retained
+until the target repositories pass validation and refresh successfully.
+
 An end-of-life CentOS system stops before source/package changes until you set
 `DR_RPM_MIGRATION_TARGET`. The choices are:
 

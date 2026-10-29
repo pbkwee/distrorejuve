@@ -11,9 +11,9 @@ Non-root users automatically get reduced collection. The script never invokes su
 | Mail storage | Reports discoverable paths; skips size scans and spool counts. | Performs bounded measurements unless disabled. |
 | Scheduled jobs and migration paths | Private cron jobs and unreadable paths may be omitted. | Can inspect more private paths, including root's cron files. |
 
-Text and JSON output warn when collection is unprivileged. Missing results are unknown;
-they do not prove that a service or application is absent. Root collection also has scan
-limits and can return incomplete results.
+Text and JSON output warn when collection is unprivileged. Missing service and
+application results remain unknown until checked with sufficient access and coverage.
+Root collection also has scan limits and can return incomplete results.
 
 For fuller visibility, run as root or explicitly use `sudo bash distrorejuve.sh --manifest`.
 When already root, use `bash` directly.

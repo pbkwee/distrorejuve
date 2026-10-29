@@ -1,7 +1,7 @@
 # Use RimuHosting for the new server
 
 This is an optional destination for the [upgrade and migration workflow](ai-assisted-migration.md).
-Your source can stay with its existing provider during preparation. A manifest
+Your source can stay with its existing hosting provider during preparation. A manifest
 assessment or in-place upgrade elsewhere does not need a RimuHosting account.
 
 ## Register and arrange account review
@@ -16,14 +16,14 @@ assessment or in-place upgrade elsewhere does not need a RimuHosting account.
 3. Have the assistant [size and quote the proposed server](#size-and-quote-the-proposed-vm)
    from the source workload, performance needs and budget using the pricing API.
    Review the options and agree configuration, location, price and billing.
-   An account, API key or price quote does not establish review completion or
-   permission to incur charges. Assessment and pricing can continue while account
+   Before provisioning, obtain support's account-readiness confirmation and the
+   customer's approval to incur charges. Assessment and pricing can continue while account
    review is pending, once the required scoped API access is available.
 
 For example, send this yourself through the support ticket:
 
 > I have registered a new account and would like to use the RimuHosting API to
-> create a server for a migration from another provider. Please complete the
+> create a server for a migration from another hosting provider. Please complete the
 > required account review and confirm when I can create the VM.
 
 Support can explain the review requirements for your account. No review duration
@@ -108,8 +108,8 @@ current `pricing.py` shares these options with `mkvm.py`:
 | SSD / NVMe | `--features 'ssd'` / `--features 'nvme'` | Top-level space-separated `features` string |
 | Newer CPU host | Include `recentcpu` in `--features`, e.g. `'nvme recentcpu'` | Include `recentcpu` in `features` |
 
-`recentcpu` selects newer CPU hardware; it is not a core count or a performance
-guarantee. Check the installed revision rather than inventing extra flags.
+`recentcpu` selects newer CPU hardware. Specify core count separately and verify
+performance against the workload. Check the installed revision rather than inventing extra flags.
 JSON disk sizes are MB, whereas the CLI disk options convert GB to MB.
 CLI options override JSON values; `--extra_server_json` replaces matching
 top-level fields rather than merging nested objects.
@@ -155,7 +155,7 @@ Read quote warnings/errors as well as the amount. Record the candidate, exact
 query/tool revision, quote time, returned amount/currency and limitations in the
 private job. Report taxes, licences, transfer, backup and support costs only as
 confirmed; mark omissions and assumptions. Include temporary hosting overlap,
-ongoing charges and cleanup ownership. A quote does not guarantee host capacity.
+ongoing charges and cleanup ownership. Confirm host capacity separately before provisioning.
 
 Before approval, write the final effective options into `server.json` and quote
 that file again if any sizing, features or location changed. Do not lose CLI
@@ -177,11 +177,11 @@ addresses and SSH identity to the job and verify readiness before using the VM.
 For supported images, `--cloud_config FILE` can install the job's public SSH keys;
 prefer Ed25519 on a clean VM and add RSA only where compatibility requires it.
 Verify image support, the intended login account and each installed public key.
-Otherwise arrange authorized key installation through the provider's supported console/setup procedure.
+Otherwise arrange authorized key installation through the hosting provider's supported console/setup procedure.
 Never send a private key as cloud-config.
 
 API clone/image flags refer to RimuHosting VMs and images. They cannot clone an
-arbitrary server at another provider. Use a reviewed S2I restore to an isolated
+arbitrary server at another hosting provider. Use a reviewed S2I restore to an isolated
 prepared destination for a whole-system copy, or migrate selected applications
 and data onto the clean OS. A restore overwrites files; preserve the destination's
 required boot, networking and access settings using S2I's documented procedure.
@@ -191,7 +191,7 @@ before retrying a creation or reinstall. Record exact account/order/image IDs
 and authority before each later operation. Retire old or temporary VMs only after
 acceptance and the agreed recovery period. Shutdown and cancellation have different
 billing effects. Original-server image replacement or retained-disk attachment
-needs its own verified provider procedure and explicit overwrite/retention scope.
+needs its own verified hosting provider procedure and explicit overwrite/retention scope.
 
 Public registration, support and API-key links checked 27 October 2026. The
 new-account review prerequisite is RimuHosting's requirement supplied for this

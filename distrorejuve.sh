@@ -142,7 +142,7 @@ Website records include the primary configured URL and local certificate-file pr
 Missing names, indirect configuration and automatically managed certificates may remain unknown.
 Potential compromise indicators include suspicious process commands, kernel-thread name masquerading,
 temporary-path execution, suspicious scheduled commands and dot-prefixed listeners. Raw command bodies are not printed.
-These heuristics require manual review; missing indicators do not establish a clean server.
+Review these heuristic matches manually; checks cover selected patterns and paths, and a full security assessment requires separate investigation.
 
 Upgrade commands automatically retain private detailed logs in /root/distrorejuveinfo/runs.
 Use --verbose to show command output too, or --trace to write a separate Bash trace.
@@ -395,8 +395,9 @@ function apt_sources_process() {
     failed=1
   }
   # Update only distro-owned records. Vendor suites such as Webmin sarge stay intact.
-  function transform(uri, suite, components, p, base, suffix, archived, security) {
+  function transform(uri, suite, components, generated, p, base, suffix, archived, security) {
     newuri=uri; newsuite=suite; newcomponents=components; drop=0
+    if (mode == "ensure" && !generated) return
     p=provider(uri)
     if (p != family) return
     if (!(suite == from || index(suite, from "-") == 1 || index(suite, from "/") == 1)) return
@@ -417,9 +418,9 @@ function apt_sources_process() {
         newuri="http://archive.debian.org/" (security ? "debian-security" : "debian")
         if (suffix ~ /^-backports/ && contains("sarge etch lenny squeeze", to)) newuri="http://archive.debian.org/debian-backports"
       }
-      else if (uri ~ /archive.debian.org/ || mode == "upgrade")
+      else if (uri ~ /archive.debian.org/ || mode == "upgrade" || generated)
         newuri="http://deb.debian.org/" (security ? "debian-security" : "debian")
-      if (contains("bookworm trixie", to) && contains(components, "non-free") && !contains(components, "non-free-firmware"))
+      if (mode != "ensure" && contains("bookworm trixie", to) && contains(components, "non-free") && !contains(components, "non-free-firmware"))
         newcomponents=components " non-free-firmware"
     } else {
       if (archived) newuri="http://old-releases.ubuntu.com/ubuntu"
@@ -427,16 +428,18 @@ function apt_sources_process() {
         # Ports releases need an architecture-specific mirror after leaving the archive.
         newuri=(ports == "true" ? "http://ports.ubuntu.com/ubuntu-ports" : (security ? "http://security.ubuntu.com/ubuntu" : "http://archive.ubuntu.com/ubuntu"))
       }
+      else if (generated && security)
+        newuri=(ports == "true" ? "http://ports.ubuntu.com/ubuntu-ports" : "http://security.ubuntu.com/ubuntu")
     }
   }
   function extra_pockets(uri, suite, components, type, prefix, comment, deb822, i, suffixes,n) {
-    if (mode != "upgrade" || suite != from || provider(uri) != family) return
+    if ((mode != "upgrade" && mode != "ensure") || suite != from || provider(uri) != family) return
     n=0
     if (add_security == "true") suffixes[++n]=(family == "debian" ? "/updates" : "-security")
     if (add_updates == "true") suffixes[++n]="-updates"
     if (add_lts == "true") suffixes[++n]="-lts"
     for (i=1;i<=n;i++) {
-      transform(uri, from suffixes[i], components)
+      transform(uri, from suffixes[i], components, 1)
       if (suffixes[i] == "-lts") { transform(uri, from, components); newsuite=to "-lts"; drop=0 }
       if (deb822) { print ""; emit_stanza(newuri,newsuite,newcomponents,drop) }
       else print prefix newuri " " newsuite " " newcomponents (comment ? " " comment : "")
@@ -476,6 +479,8 @@ function apt_sources_process() {
       else {
         transform(uris[i], suites[j], values["components"])
         if (newuri != uris[i] || newsuite != suites[j] || newcomponents != values["components"] || drop) changed=1
+        if (mode == "ensure" && provider(uris[i]) == family && suites[j] == from &&
+            (add_security == "true" || add_updates == "true" || add_lts == "true")) changed=1
       }
     }
     if (mode == "list") return
@@ -615,7 +620,7 @@ function apt_configure_archive_authentication() {
     apt_archive_authentication_enabled=true
     APT_GET_INSTALL_OPTIONS="$APT_GET_INSTALL_OPTIONS -o APT::Get::AllowUnauthenticated=true"
     if ! $previous; then
-      echo 'dss:warn: Explicitly allowing unauthenticated packages from official archived repositories; package authenticity is not guaranteed.' >&2
+      echo 'dss:warn: Explicitly allowing unauthenticated packages from official archived repositories; unauthenticated packages may be installed. Verify their source and integrity before proceeding.' >&2
     fi
   else
     echo 'dss:trace: Archive authentication exception does not apply to live, vendor or unknown repositories; authentication remains required.' >&2
@@ -726,15 +731,35 @@ function distro_output_codename() {
 # An alias such as stable changes meaning when Debian publishes a release.
 # Pin the installed codename before package work so refreshing indexes cannot select a release jump.
 function apt_sources_prepare() {
-  local current family alias
+  local current family alias records provider type suite config base_found=false
   [ -f /etc/debian_version ] || return 0
+  config=$(apt-config dump) || return 1
+  apt_config_has_standard_paths "$config" || {
+    echo 'dss:error: Custom APT paths require review before preparing native repositories.' >&2; return 1;
+  }
   current=$(distro_output_codename) || { echo "dss:error: Cannot identify installed release; cannot pin APT aliases." >&2; return 1; }
   family=debian
   case " $ALL_UBUNTU " in *" $current "*) family=ubuntu;; esac
   for alias in stable oldstable oldoldstable; do
     apt_sources_rewrite pin "$family" "$alias" "$current" || return 1
   done
-  apt_sources_archive
+  records=$(apt_sources_list) || return 1
+  while IFS=$'\t' read -r _ _ provider type _ suite _ _; do
+    if [ "$provider" != "$family" ] || [ "$type" != deb ]; then continue; fi
+    if [ "$suite" = "$current" ] || { [ -n "${apt_sources_transition_target:-}" ] && [ "$suite" = "$apt_sources_transition_target" ]; }; then
+      base_found=true
+    fi
+  done <<< "$records"
+  if ! $base_found; then
+    echo 'dss:error: No recognized binary base source for the installed release or explicit transition target. Restore the native APT base repository before upgrading.' >&2
+    return 1
+  fi
+  apt_sources_archive || return 1
+  apt_sources_upgrade "$family" "$current" "$current" ensure || return 1
+  # An interrupted release hop may already have target sources while base-files is still old.
+  if [ -n "${apt_sources_transition_target:-}" ] && [ "$apt_sources_transition_target" != "$current" ]; then
+    apt_sources_upgrade "$family" "$apt_sources_transition_target" "$apt_sources_transition_target" ensure || return 1
+  fi
 }
 
 # Target availability as checked 2026-10-16: 0=supported, 1=unsupported, 2=needs vendor review.
@@ -752,7 +777,7 @@ function apt_repo_virtualmin_support() {
   return 2
 }
 function apt_repo_webmin_support() {
-  # Repository availability alone cannot validate an old-key/new-key migration.
+  # Validate the old-key/new-key migration against the supported release path as well as repository availability.
   # https://webmin.com/download/
   return 2
 }
@@ -1009,7 +1034,7 @@ function upgrade_panel_dispatch() {
   else
     if [ -n "${ELEVATE_BASE_URL:-}" ]; then echo 'dss:error: Clear ELEVATE_BASE_URL before the supported cPanel upgrade; vendor download endpoints must not be overridden.' >&2; return 1; fi
     if [ -e /var/cpanel/elevate-noc-recommendations ]; then
-      echo 'dss:error: cPanel provider instructions require manual review at /var/cpanel/elevate-noc-recommendations; use the vendor procedure directly.' >&2; return 1
+      echo 'dss:error: Hosting provider instructions for cPanel ELevate require manual review at /var/cpanel/elevate-noc-recommendations; use the vendor procedure directly.' >&2; return 1
     fi
     if [ -e /var/cpanel/elevate ]; then
       banner=$(upgrade_panel_run_tool "$tool" --status) || { echo "dss:error: Cannot read cPanel upgrade state; inspect elevate-cpanel --status before retrying." >&2; return 1; }
@@ -1138,7 +1163,7 @@ function apt_sources_check_releases_and_vendors() {
     case "$status" in 0) support=supported;; 1) support=unsupported;; esac
     echo "dss:info: $file:$line: $provider repository; target ${target:-$current} availability: $support."
     if [ -n "$target" ] || [ "$status" -ne 0 ]; then
-      echo "dss:warn: Review or disable $provider source at $file:$line before continuing. Vendor migrations require application/version checks; sources are unchanged." >&2
+      echo "dss:warn: Review or disable $provider source at $file:$line before continuing. Switching package repositories or publishers requires application/version checks; sources are unchanged." >&2
       ret=1
     fi
   done <<< "$records"
@@ -1150,11 +1175,11 @@ function apt_sources_check_releases_and_vendors() {
   return "$ret"
 }
 
-# Require security coverage for supported components and matching architecture filters.
-# Debian optional components have no guaranteed Security Team coverage; retain their source choices.
+# Require pocket coverage for base components and matching architecture filters.
+# Security Team coverage varies for Debian optional components; retain their source choices.
 # https://www.debian.org/security/faq.en.html#contrib
-function apt_sources_check_security_coverage() {
-  local records=$1 family=$2 current=$3 target=$4 provider type suite components architectures
+function apt_sources_check_pocket_coverage() {
+  local records=$1 family=$2 current=$3 target=$4 pocket=$5 provider type suite components architectures
   local secprovider sectype secsuite seccomponents secarchitectures component covered
   local -a basecomponents=()
   while IFS=$'\t' read -r _ _ provider type _ suite components architectures; do
@@ -1162,18 +1187,21 @@ function apt_sources_check_security_coverage() {
     [ "$suite" = "$current" ] || [ "$suite" = "$target" ] || continue
     read -r -a basecomponents <<< "$components"
     for component in "${basecomponents[@]}"; do
-      case "$family:$component" in
-        debian:contrib|debian:non-free|debian:non-free-firmware) continue;;
+      case "$family:$pocket:$component" in
+        debian:security:contrib|debian:security:non-free|debian:security:non-free-firmware) continue;;
       esac
       covered=false
       while IFS=$'\t' read -r _ _ secprovider sectype _ secsuite seccomponents secarchitectures; do
         if [ "$secprovider" != "$family" ] || [ "$sectype" != deb ]; then continue; fi
-        case "$secsuite" in "$current"/updates|"$current"-security|"$target"/updates|"$target"-security) :;; *) continue;; esac
+        case "$pocket:$secsuite" in
+          security:"$current"/updates|security:"$current"-security|security:"$target"/updates|security:"$target"-security|\
+          updates:"$current"-updates|updates:"$target"-updates) :;; *) continue;;
+        esac
         [ "$secarchitectures" = '*' ] || [ "$secarchitectures" = "$architectures" ] || continue
         case " $seccomponents " in *" $component "*) covered=true; break;; esac
       done <<< "$records"
       if ! $covered; then
-        echo "dss:error: Existing security sources do not cover base component $component with its architecture filter. Review APT sources before upgrading." >&2
+        echo "dss:error: Existing $pocket sources do not cover base component $component with its architecture filter. Review APT sources before upgrading." >&2
         return 1
       fi
     done
@@ -1181,9 +1209,10 @@ function apt_sources_check_security_coverage() {
 }
 
 function apt_sources_upgrade() {
-  local family=$1 current=$2 target=$3
-  local records provider type suite
+  local family=$1 current=$2 target=$3 mode=${4:-upgrade}
+  local records provider type suite base_found=false updates_required=true
   local apt_sources_add_security=true apt_sources_add_updates=true apt_sources_add_lts=false
+  case "$mode" in upgrade|ensure) :;; *) return 1;; esac
   case "$family" in
     debian) case " $ALL_DEBIAN " in *" $target "*) :;; *) return 1;; esac;;
     ubuntu) case " $ALL_UBUNTU " in *" $target "*) :;; *) return 1;; esac;;
@@ -1191,21 +1220,39 @@ function apt_sources_upgrade() {
   esac
   if [ "$family" = debian ]; then
     case " $DEBIAN_ARCHIVE " in *" $target "*)
-      case "$target" in buster|bullseye) :;; *) apt_sources_add_updates=false;; esac;;
+      case "$target" in buster|bullseye) :;; *) apt_sources_add_updates=false; updates_required=false;; esac;;
     esac
     [ "$target" = squeeze ] && apt_sources_add_lts=true
   fi
-  apt_sources_check_releases_and_vendors "$target" || return 1
+  # Same-release preparation retains vendor/backports policy; release hops keep their existing gate.
+  if [ "$mode" = upgrade ]; then apt_sources_check_releases_and_vendors "$target" || return 1; fi
   records=$(apt_sources_list) || return 1
   while IFS=$'\t' read -r _ _ provider type _ suite _ _; do
     if [ "$provider" != "$family" ] || [ "$type" != deb ]; then continue; fi
+    case "$suite" in "$current"|"$target") base_found=true;; esac
     case "$suite" in "$current"/updates|"$current"-security|"$target"/updates|"$target"-security) apt_sources_add_security=false;; esac
     case "$suite" in "$current"-updates|"$target"-updates) apt_sources_add_updates=false;; esac
+    case "$suite" in "$current"-lts|"$target"-lts) apt_sources_add_lts=false;; esac
   done <<< "$records"
+  # Preparation also visits the installed codename during a partially switched release hop.
+  if [ "$mode" = ensure ] && ! $base_found; then return 0; fi
   if ! $apt_sources_add_security; then
-    apt_sources_check_security_coverage "$records" "$family" "$current" "$target" || return 1
+    apt_sources_check_pocket_coverage "$records" "$family" "$current" "$target" security || return 1
   fi
-  apt_sources_rewrite upgrade "$family" "$current" "$target"
+  if $updates_required && ! $apt_sources_add_updates; then
+    apt_sources_check_pocket_coverage "$records" "$family" "$current" "$target" updates || return 1
+  fi
+  apt_sources_rewrite "$mode" "$family" "$current" "$target" || return 1
+  if [ "$mode" = upgrade ]; then
+    # A retry can begin with target-only sources; fill their pockets as well.
+    apt_sources_upgrade "$family" "$target" "$target" ensure
+  else
+    records=$(apt_sources_list) || return 1
+    apt_sources_check_pocket_coverage "$records" "$family" "$target" "$target" security || return 1
+    if $updates_required; then
+      apt_sources_check_pocket_coverage "$records" "$family" "$target" "$target" updates || return 1
+    fi
+  fi
 }
 
 # Require free space on each package/cache/state filesystem before changing packages.
@@ -1308,11 +1355,11 @@ function upgrade_configuration_review() {
       echo 'dss:warn: quotaon is missing; review target boot dependencies and existing limits before enabling or changing quota policy.' >&2
     fi
   done <<< "$findings"
-  echo 'dss:info: Review custom PHP pool accounts/socket permissions, monitoring executable paths/live checks, provider boot selection and duplicate logrotate entries before the release hop.' >&2
+  echo 'dss:info: Review custom PHP pool accounts/socket permissions, monitoring executable paths/live checks, hosting provider boot selection and duplicate logrotate entries before the release hop.' >&2
 }
 
-# This query returns fixed labels only, never authentication strings. A daemon
-# being active does not prove local root can maintain it or upgrade its tables.
+# This query returns fixed labels only, never authentication strings. Test local
+# root maintenance access separately from daemon activity; table upgrades need their own checks.
 function upgrade_database_verify() {
   local client result memory buffer target=${1:-}
   local -a auth_options=(--no-defaults --protocol=socket --user=root)
@@ -1606,7 +1653,7 @@ function upgrade_compatibility_rule_applies() {
       if [ "$rule" = dovecot-23 ]; then
         upgrade_compatibility_config_matches '^[[:space:]]*(ssl_protocols|ssl_parameters|director_doveadm_port|director_consistent_hashing|mdbox_purge_preserve_alt)[[:space:]]*=|^[[:space:]]*mail_plugins[[:space:]]*=[[:space:]]*([^#]*[[:space:]])?(stats|imap_stats)([[:space:]]|$)' "${paths[@]}"
       else
-        # Packaged director/replicator service templates alone do not enable the workload.
+        # Require workload configuration as well as packaged director/replicator service templates.
         upgrade_compatibility_config_matches '^[[:space:]]*((mail_replica|director_(mail_)?servers)[[:space:]]*=[[:space:]]*["\047]?[^[:space:]#"\047]|mail_plugins[[:space:]]*=[[:space:]]*([^#]*[[:space:]])?replication([[:space:]]|$)|executable[[:space:]]*=[[:space:]]*(imap|pop3|submission)-login[[:space:]]+director([[:space:]]|$)|auth_socket_path[[:space:]]*=[[:space:]]*([^#]*/)?director-userdb([[:space:]]|$))' "${paths[@]}"
       fi;;
     dovecot-armhf) [ "$arch" = armhf ];;
@@ -1724,7 +1771,7 @@ function upgrade_php_output_default_branch() {
     ')
     if [ -n "$branch" ]; then printf '%s\n' "$branch"; return 0; fi
   done
-  echo 'dss:error: Cannot establish the default PHP branch from target APT dependencies.' >&2
+  echo 'dss:error: No unique default PHP branch found in target APT dependencies.' >&2
   return 1
 }
 
@@ -1765,7 +1812,7 @@ function upgrade_php_apache_module_is_enabled() {
   return 1
 }
 
-# 0 Apache server present, 1 confirmed absent, 2 cannot safely establish its use.
+# 0 Apache server present, 1 confirmed absent, 2 Apache use unknown.
 function upgrade_php_has_apache_server() {
   local packages=$1 state processes status
   if printf '%s\n' "$packages" | awk -F '\t' '
@@ -1813,10 +1860,59 @@ function upgrade_php_output_new_apache_packages() {
   ' "$inventory" "$plan"
 }
 
+function apt_package_lock_warn() {
+    local locks file metadata device inode identity pid details parent elapsed name age warned_key
+    [ -r /proc/locks ] || return 0
+    # Snapshot actual kernel locks; file age and an open descriptor are not lock ownership.
+    locks=$(</proc/locks)
+    [ -n "$locks" ] || return 0
+    for file in /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
+        [ -e "$file" ] || continue
+        metadata=$(manifest_run_bounded 5 stat -Lc '%d %i' "$file" 2>/dev/null) || continue
+        read -r device inode <<EOF
+$metadata
+EOF
+        case "$device" in ''|*[!0-9]*) continue ;; esac
+        case "$inode" in ''|*[!0-9]*) continue ;; esac
+        # Linux dev_t packs the major in bits 8..19 and the minor in bits 0..7 and 20..31.
+        identity=$(printf '%02x:%02x:%s' "$(((device >> 8) & 4095))" "$(((device & 255) | ((device >> 12) & 1048320)))" "$inode")
+        # 12: POSIX ADVISORY WRITE 4242 08:01:12345 0 EOF -> owner 4242; skip -> waiters.
+        for pid in $(printf '%s\n' "$locks" | awk -v identity="$identity" '
+            $2 == "POSIX" && $4 == "WRITE" && $5 ~ /^[0-9]+$/ && $5 > 1 && $6 == identity {print $5}
+        '); do
+            warned_key="|$file:$pid|"
+            case "${apt_package_lock_warned:-}" in *"$warned_key"*) continue ;; esac
+            details=$(LC_ALL=C manifest_run_bounded 5 ps -p "$pid" -o ppid= -o etime= -o comm= 2>/dev/null) || continue
+            read -r parent elapsed name <<EOF
+$details
+EOF
+            case "$parent" in ''|*[!0-9]*) continue ;; esac
+            age=$(printf '%s\n' "$elapsed" | awk '
+                # ps etime: 35-02:03:04 -> 3031384 seconds; 05:00 -> 300 seconds.
+                /^[0-9]+(-[0-9]+)?:[0-9][0-9](:[0-9][0-9])?$/ {
+                    days=0; value=$0
+                    if (index(value,"-")) {split(value,d,"-"); days=d[1]; value=d[2]}
+                    count=split(value,t,":")
+                    seconds=days*86400+t[count]+t[count-1]*60
+                    if (count==3) seconds+=t[1]*3600
+                    if (seconds>=3600) printf "%.0f",seconds
+                }
+            ')
+            [ -n "$age" ] || continue
+            name=$(printf '%s' "$name" | LC_ALL=C tr -c '[:print:]' '?')
+            apt_package_lock_warned="${apt_package_lock_warned:-}$warned_key"
+            printf 'dss:warn: Package lock %s is held by PID %s (%s, parent %s), running for %s (warning threshold: 1 hour). Lock acquisition time is unavailable. Check its progress before stopping it.\n' "$file" "$pid" "$name" "$parent" "$elapsed" >&2
+            printf 'dss:warn: Recheck the owner: ps -p %s -o pid,ppid,etime,stat,comm; lslocks. If confirmed stuck and still holding the lock, stop it with: kill -TERM %s. Interrupting package installation/configuration can leave packages unfinished. No process was stopped and no lock file was removed.\n' "$pid" "$pid" >&2
+        done
+    done
+    return 0
+}
+
 # Retain the machine's web-server role before every ordinary APT mutation.
 function apt_get_apply() {
 (
   local directory additions status package_umask attempt
+  apt_package_lock_warn
   local -a pipeline_status=()
   # Recheck sources even if the caller expanded options before they changed.
   if "${DR_ALLOW_UNAUTHENTICATED_ARCHIVES:-false}"; then
@@ -2153,8 +2249,8 @@ function upgrade_php_is_obsolete_extension_meta() {
   upgrade_cleanup_payload_is_documentation "$package" "$files"
 }
 
-# PHP extensions are tied to a runtime branch; installing a newer CLI alone
-# does not replace old FPM workers, Apache modules or their extensions. Preserve the role mapping
+# PHP extensions are tied to a runtime branch. Upgrade FPM workers, Apache modules
+# and their extensions alongside CLI packages. Preserve the role mapping
 # across retries so an interrupted migration cannot silently choose a different target.
 function upgrade_migrate_php_packages() {
 (
@@ -2252,7 +2348,7 @@ function upgrade_migrate_php_packages() {
       fi
     else
       status=$?
-      [ "$status" -eq 1 ] || { echo 'dss:error: Cannot establish whether Apache is in use. PHP package changes stopped.' >&2; return 1; }
+      [ "$status" -eq 1 ] || { echo 'dss:error: Apache use is unknown. PHP package changes stopped.' >&2; return 1; }
       if [ -f "$directory/apache.state" ] || [ -f "$directory/apache.legacy" ] || [ -f "$directory/apache.mask-owned" ]; then
         echo "dss:error: Apache handoff state already exists. Review $directory before removing unused modules." >&2
         return 1
@@ -2485,7 +2581,7 @@ function upgrade_migrate_php_packages() {
 
 # shellcheck shell=bash
 # Runtime checks read status/configuration only; they never start or reconfigure services.
-# 0 active, 1 stopped/failed, 2 cannot establish state. Enabled is not the same as active.
+# 0 active, 1 stopped/failed, 2 unknown state. Check runtime activity separately from boot enablement.
 # systemctl ActiveState=active -> running; initctl "nginx stop/waiting" -> stopped.
 function upgrade_php_runtime_service_is_active() {
   local name=$1 state status
@@ -2562,7 +2658,7 @@ function upgrade_php_runtime_snapshot() {
       status=$?; state=inactive
       if [ "$status" -ne 1 ]; then
         state=unknown
-        echo "dss:warn: Cannot establish pre-upgrade activity of $service; its runtime verification is incomplete." >&2
+        echo "dss:warn: Pre-upgrade $service activity is unknown; runtime verification is incomplete." >&2
       fi
     fi
     printf '%s\t%s\t%s\n' "$kind" "$service" "$state" >> "$file" || return 1
@@ -2782,7 +2878,7 @@ function upgrade_php_runtime_collect_socket_findings() {
       upgrade_php_runtime_finding error "$kind:socket:${#identity}:$identity:$value" "$kind configuration $file references missing Unix socket $value; review the PHP-FPM/upstream configuration." || return 1; failure=true
     else echo "dss:trace: $kind Unix socket exists: $value (listener/reachability not probed)." >&2; fi
   done <<< "$records"
-  if [ "$kind" = fpm ] && [ "$endpoints" -eq 0 ]; then upgrade_php_runtime_finding unknown fpm:no-listener 'No literal PHP-FPM listener established; verification incomplete.' || return 1; fi
+  if [ "$kind" = fpm ] && [ "$endpoints" -eq 0 ]; then upgrade_php_runtime_finding unknown fpm:no-listener 'No literal PHP-FPM listener found in the inspected configuration; verification incomplete.' || return 1; fi
   if $failure && [ "$kind" = nginx ]; then
     echo 'dss:warn: Compare NGINX fastcgi_pass with the installed PHP-FPM listen setting. Review old/new pool users, groups and socket permissions before restarting services.' >&2
   fi
@@ -2796,7 +2892,7 @@ function upgrade_php_runtime_collect_findings() {
   [ -f "$directory/services.before" ] && [ -r "$directory/services.before" ] || return 1
   roles=$(upgrade_php_runtime_output_roles) || return 1
   while IFS=$'\t' read -r kind service state; do
-    case "$kind:$state" in fpm:active) expected_fpm=true; continue;; nginx:active) nginx=true;; apache:active) :;; *:inactive) continue;; *:unknown) upgrade_php_runtime_finding unknown "baseline:$kind:$service" "Original $service activity was not established; verification incomplete." || return 1; continue;; *) return 1;; esac
+    case "$kind:$state" in fpm:active) expected_fpm=true; continue;; nginx:active) nginx=true;; apache:active) :;; *:inactive) continue;; *:unknown) upgrade_php_runtime_finding unknown "baseline:$kind:$service" "Original $service activity is unknown; verification incomplete." || return 1; continue;; *) return 1;; esac
     if ! printf '%s\n' "$roles" | grep -qxF "$kind"$'\t'"$service"; then
       upgrade_php_runtime_finding error "service:$service" "Previously active $service no longer has a configured/installed web-server role." || return 1
       continue
@@ -2837,7 +2933,7 @@ function upgrade_php_runtime_collect_findings() {
   if ! $nginx && upgrade_php_runtime_service_is_active nginx; then nginx=true; fi
   if $nginx; then
     # shortcut: inspect Debian/Ubuntu default main config; custom -c/-p invocation needs a separate audit.
-    echo 'dss:trace: Checking on-disk /etc/nginx/nginx.conf; custom invocation paths/loaded configuration are not established.' >&2
+    echo 'dss:trace: Checking on-disk /etc/nginx/nginx.conf; inspect custom invocation paths and live loaded configuration separately.' >&2
     upgrade_php_runtime_collect_socket_findings nginx /etc/nginx/nginx.conf || return 1
   fi
   return 0
@@ -3009,14 +3105,14 @@ function upgrade_services_snapshot() {
       else instances=''; fi
     fi
     if [ -z "$instances" ]; then
-      echo "dss:warn: Cannot establish pre-upgrade $family instance activity; verification will be incomplete." >&2
+      echo "dss:warn: Pre-upgrade $family instance activity is unknown; verification will be incomplete." >&2
       printf '%s\t%s\t%s\tunknown\n' "$family" "$selector" "$package" >> "$directory/services.before.new" || return 1
       continue
     fi
     while IFS= read -r selector; do
       if upgrade_services_is_active "$family" "$selector"; then state=active
       else status=$?; state=unknown; [ "$status" -ne 1 ] || state=inactive; fi
-      [ "$state" != unknown ] || echo "dss:warn: Cannot establish pre-upgrade $family activity; verification will be incomplete." >&2
+      [ "$state" != unknown ] || echo "dss:warn: Pre-upgrade $family activity is unknown; verification will be incomplete." >&2
       printf '%s\t%s\t%s\t%s\n' "$family" "$selector" "$package" "$state" >> "$directory/services.before.new" || return 1
     done <<< "$instances"
   done <<< "$roles"
@@ -3034,7 +3130,7 @@ function upgrade_services_package_was_purged() {
   return 1
 }
 
-# Missing packages alone are not an exemption; confirmed baseline purge records are.
+# Exempt missing packages only when baseline records confirm their purge.
 function upgrade_services_check_legacy() {
   local baseline=$1 roles selector=postfix status
   [ -f "$baseline" ] && [ -r "$baseline" ] || return 2
@@ -3319,7 +3415,7 @@ function upgrade_prepare_nss_lookup() {
 }
 
 # A crossgrade replaces 32-bit userspace packages with 64-bit equivalents.
-# A running x86_64 kernel is required, but does not prove that the shell or package tools are 64-bit.
+# Require an x86_64 kernel and check shell and package-tool bit width separately.
 # Native means the dpkg default architecture; foreign means an additional package architecture.
 # Automatic crossgrade planning.
 # A completed crossgrade permits only amd64 and architecture-independent packages.
@@ -3543,8 +3639,8 @@ function upgrade_output_crossgrade_release() {
   case " $releases " in *" $target "*) :;; *) echo "dss:error: Unknown $family target release: $target" >&2; return 1;; esac
   native=$(dpkg --print-architecture) || return 1
   bits=$(getconf LONG_BIT) || return 1
-  [ -n "$native" ] || { echo 'dss:error: Cannot establish native package architecture.' >&2; return 1; }
-  case "$bits" in 32|64) :;; *) echo "dss:error: Cannot establish userspace bit width: $bits" >&2; return 1;; esac
+  [ -n "$native" ] || { echo 'dss:error: Native package architecture probe returned no value.' >&2; return 1; }
+  case "$bits" in 32|64) :;; *) echo "dss:error: Userspace bit-width probe returned $bits; expected 32 or 64." >&2; return 1;; esac
   if [ "$family" = debian ] && [ "$current" = bookworm ]; then
     if pending_directory=$(crossgrade_bookworm_output_pending_directory); then pending=true
     else state=$?; [ "$state" -eq 1 ] || return 1; fi
@@ -3674,7 +3770,7 @@ function upgrade_crossgrade_before_release() {
   native=$(dpkg --print-architecture) || return 1
   bits=$(getconf LONG_BIT) || return 1
   if [ "$native:$bits" != amd64:64 ]; then
-    echo "dss:error: Crossgrade did not establish native amd64 and 64-bit userspace ($native/$bits). Release upgrade stopped." >&2
+    echo "dss:error: Crossgrade architecture checks returned $native/$bits; expected amd64/64. Release upgrade stopped." >&2
     return 1
   fi
   upgrade_check_crossgrade_checkpoint "$family" "$checkpoint" || return 1
@@ -3814,6 +3910,7 @@ function upgrade_check_path() {
 }
 
 function upgrade_preflight_action() {
+  apt_package_lock_warn
   local action=$1 version=${2:-} family current target next remaining=1000
   if [ -f /etc/redhat-release ]; then
     echo 'dss:error: RPM major-release upgrades use a reviewed ELevate/reinstall procedure. For eligible same-major CentOS conversion, set DR_RPM_MIGRATION_TARGET and use --upgrade.' >&2
@@ -4107,7 +4204,7 @@ return $ret
 
   
 # Both package tools may be installed, for example to inspect another distro
-# image. Tool availability alone does not identify the database that describes this server.
+# image. Select this server's package database from distro and database evidence.
 # Read-only package queries. Distro/database evidence takes precedence over utility availability.
 function packages_output_backend() {
   local root=${1:-} identity=''
@@ -4164,7 +4261,7 @@ function packages_output_file_owner() {
   case "$status" in *' ok installed') printf '%s\n' "$owner";; *) return 2;; esac
 }
 
-# Package ownership does not imply unchanged content. Compare stored digests
+# Check packaged-file content against stored digests
 # before suppressing packaged migration paths; retain local edits and unverifiable files for review.
 # Only verified unchanged package content may be omitted; owner/mode are not compared.
 function packages_output_file_origin() {
@@ -4368,7 +4465,7 @@ function check_usrmerge() {
     apt_get_update || return $?
     apt_get_install usrmerge || return $?
   fi
-  usrmerge_is_complete || { echo 'dss:error: usrmerge did not establish canonical /bin, /sbin and /lib links; stop and inspect before package work.' >&2; return 1; }
+  usrmerge_is_complete || { echo 'dss:error: Usrmerge link check failed for the expected /usr layout; inspect /bin, /sbin and /lib* before package work.' >&2; return 1; }
   echo 'dss:trace:check_usrmerge completed.' >&2
 }
 
@@ -4719,6 +4816,7 @@ function apt_get_f_install() {
 
 function dpkg_install() {
   [  -z "$1" ] && return 0
+  apt_package_lock_warn
   local tmplog
   apt_state_invalidate_packages
   tmplog=$(mktemp "tmplog.dpkginstall.log.XXXXXX") || return 1
@@ -4950,7 +5048,7 @@ function crossgrade_bookworm_download() {
       if LC_ALL=C apt-get check > "$directory/$phase.installed-check.log" 2>&1; then :
       else
         status=$?
-        echo "dss:error: Current installed package dependency check failed (status $status); inspect $directory/$phase.installed-check.log. This does not establish when the package problem began." >&2
+        echo "dss:error: Current installed package dependency check failed (status $status); inspect $directory/$phase.installed-check.log. Compare earlier package checks to determine when the problem began." >&2
       fi
       return 1
     fi
@@ -5505,6 +5603,7 @@ function crossgrade_debian_bookworm() {
   fi
   crossgrade_check_apt_architecture_config || return 1
   check_systemd_install_matches_init || return 1
+  apt_sources_prepare || return 1
   apt_sources_check_releases_and_vendors bookworm || return 1
   crossgrade_check_source_architectures || return 1
   upgrade_check_crossgrade_package_blockers || return 1
@@ -5726,6 +5825,7 @@ function crossgrade_debian() {
     echo 'dss:error: Running and selected init must be verified and agree before crossgrading; review the diagnostic above.' >&2
     return 1
   fi
+  apt_sources_prepare || return 1
 
   local bittedness=$(getconf LONG_BIT)
   if echo $bittedness | grep -qai 64; then
@@ -7022,7 +7122,7 @@ function tweak_broken_configs() {
     # not debian-ish
     if ! command -v dpkg >/dev/null 2>&1; then break; fi
 
-    # Core binaries alone do not provide the server service or its upgrade scripts.
+    # Install the server package for its service and upgrade scripts as well as core binaries.
     if dpkg -l | egrep -qai '^ii[[:space:]]+(mysql|mariadb)-server(-[0-9]+([.][0-9]+)*)?(:[a-z0-9-]+)?[[:space:]]'; then break; fi
 
     # skip if they never had a mysql server installed.  don't skip if they had an rc=removed,configured
@@ -7112,7 +7212,7 @@ exit 0' > "$i" || return 1
   return 0
 }
 
-# Release metadata can change before dpkg finishes; checking the codename alone is insufficient.
+# Check package completion as well as the codename; release metadata can change before dpkg finishes.
 function debian_check_release_completion() {
   local target=$1 current audit plan apt_sources_transition_target=''
   current=$(distro_output_codename) || return 1
@@ -7177,8 +7277,8 @@ function upgrade_prepare_php_source_retry() {
   upgrade_migrate_php_packages "$target"
 }
 
-# Complete each release hop before advancing sources again. A changed release
-# label alone is insufficient: base-files can update before the remaining packages finish configuring.
+# Complete each release hop before advancing sources again. Check the remaining
+# package configuration after base-files updates the release label.
 function dist_upgrade_x_to_y() {
 pause_check
 [ ! -f /etc/debian_version ] && return 0
@@ -7557,6 +7657,7 @@ function record_config_state() {
 }
 
 function apt_get_update() {
+apt_package_lock_warn
 pause_check
 apt_configure_archive_authentication || return 1
 local tmplog signature completed inputs current_inputs warning_status phase=indexes
@@ -8248,9 +8349,13 @@ function rpm_migration_run() {
   records=$(rpm_distro_output_identity "") || return 1
   IFS=$'\t' read -r id version variant <<< "$records"
   if [ "$id" != "$expected" ] || [ "${version%%.*}" != "$before_major" ]; then
-    echo 'dss:error: Vendor tool did not establish the requested distribution and same major version. Stop and review; no automatic rollback or reboot was attempted.' >&2
+    echo 'dss:error: Post-conversion distribution or major version differs from the requested target. Stop and review; no automatic rollback or reboot was attempted.' >&2
     return 1
   fi
+  local manager
+  manager=$(rpm_packages_output_manager) || return 1
+  rpm_sources_check_required "$manager" "$id" "$version" || return 1
+  rpm_packages_run "$manager" makecache || return $?
   rm -- "$marker" || return 1
 }
 
@@ -8273,6 +8378,49 @@ function rpm_packages_run() {
     yum) yum -y --setopt=gpgcheck=1 --setopt='*.gpgcheck=1' --setopt=sslverify=1 --setopt='*.sslverify=1' --setopt=metadata_expire=0 --setopt='*.metadata_expire=0' --setopt='*.skip_if_unavailable=0' "$@";;
     *) return 1;;
   esac
+}
+
+# EL updates/security fixes share the base repositories; Fedora has a separate updates repository.
+# Validate known native IDs without changing subscription channels or custom mirrors.
+function rpm_sources_check_required() {
+  local manager=$1 id=$2 version=$3 records
+  records=$(rpm_packages_run "$manager" -v repolist enabled) || return $?
+  if ! awk -v id="$id" -v major="${version%%.*}" '
+    /^[[:space:]]*Repo-id[[:space:]]*:/ {
+      repo=tolower($0); sub(/^[^:]*:[[:space:]]*/,"",repo); sub(/[[:space:]\/].*$/,"",repo)
+      repos[repo]=1
+    }
+    END {
+      if (id == "centos" && major >= 4 && major <= 7)
+        ok=(repos["base"] && (repos["updates"] || repos["update"]))
+      else if ((id == "centos" || id == "almalinux" || id == "rocky") && major >= 8 && major <= 10)
+        ok=(repos["baseos"] && repos["appstream"])
+      else if (id == "fedora" && major >= 7)
+        ok=(repos["fedora"] && repos["updates"])
+      else if (id == "ol" && major >= 6 && major <= 10) {
+        for (repo in repos) {
+          prefix="^ol" major "(_[a-z0-9_]+)?_"
+          if (major < 8 && repo ~ (prefix "latest$")) ok=1
+          if (major >= 8 && repo ~ (prefix "baseos_latest$")) {
+            app=repo; sub(/_baseos_latest$/,"_appstream",app)
+            if (repos[app]) ok=1
+          }
+        }
+      } else if (id == "rhel" && major >= 6 && major <= 10) {
+        for (repo in repos) {
+          if (major < 8 && repo ~ ("^(rhui-)?rhel-" major "-(server|client|workstation)(-(eus|e4s|aus))?(-rhui)?-rpms$")) ok=1
+          if (major >= 8 && repo ~ ("^(rhui-)?rhel-" major "-for-[a-z0-9_]+-baseos(-(eus|e4s|aus))?(-rhui)?-rpms$")) {
+            app=repo; sub(/-baseos/,"-appstream",app)
+            if (repos[app]) ok=1
+          }
+        }
+      }
+      exit !ok
+    }
+  ' <<< "$records"; then
+    echo "dss:error: Enabled RPM repositories do not establish base/update coverage for $id $version. Restore the native base and update repositories (BaseOS and AppStream on EL 8+; fedora and updates on Fedora), or review custom/subscription repository IDs manually. No repository was enabled automatically." >&2
+    return 1
+  fi
 }
 
 function rpm_packages_upgrade() {
@@ -8313,18 +8461,14 @@ function rpm_packages_upgrade() {
   packages_output_inventory rpm > "$directory/packages.before.tsv" || { echo 'dss:error: RPM database query failed; no automatic database rebuild was attempted.' >&2; return 1; }
   if ! manifest_capture "$directory/before"; then echo 'dss:warn: Original manifest incomplete; package updates still require manual application checks.' >&2; fi
   [ -z "$base" ] || rpm_sources_prepare "$manager" "$directory" "$base" "${version%%.*}" || return 1
+  rpm_sources_check_required "$manager" "$id" "$version" || return 1
   rpm_packages_run "$manager" makecache || return $?
-  records=$(rpm_packages_run "$manager" -v repolist enabled) || return $?
-  if ! grep -qE '^[[:space:]]*Repo-id[[:space:]]*:' <<< "$records"; then
-    echo 'dss:error: No enabled RPM repository could be established; check repository/subscription configuration.' >&2
-    return 1
-  fi
   echo "dss:stage: Updating packages with $manager on $id $version." >&2
   rpm_packages_run "$manager" upgrade || return $?
   if [ "$id" = centos ] && { [ "$target" = alma ] || [ "$target" = rocky ]; }; then
     rpm_migration_run "$target" "$directory" "${version%%.*}" "$variant" || return $?
     manager=$(rpm_packages_output_manager) || return 1
-    rpm_packages_run "$manager" makecache && rpm_packages_run "$manager" upgrade || return $?
+    rpm_packages_run "$manager" upgrade || return $?
   fi
   # check-update uses 100 for updates remaining; it must not become a successful all-current claim.
   if rpm_packages_run "$manager" check-update; then :
@@ -8339,8 +8483,8 @@ function rpm_packages_upgrade() {
   return 0
 }
 
-# Replacing files on disk does not replace code already loaded by a process.
-# RPM transaction success alone cannot establish that PHP-FPM, Apache or another runtime is using the updated libraries.
+# Processes retain loaded code after files on disk are replaced. Verify PHP-FPM,
+# Apache and other runtimes after restarting affected services or a planned reboot.
 function rpm_packages_finish_run() {
   local status=$1 logfile=$2 directory=${DR_RUN_DIRECTORY:-}
   if [ -n "$directory" ]; then
@@ -8350,7 +8494,7 @@ function rpm_packages_finish_run() {
     fi
   fi
   echo "dss:stage: RPM outcome: action status $status; service/application health not verified. Detailed run log: $logfile" >&2
-  echo 'dss:warn: A successful package transaction does not establish that PHP is patched or that processes have loaded the new libraries. No automatic reboot was performed.' >&2
+  echo 'dss:warn: Verify installed PHP package versions, PHP patch status and loaded libraries in each runtime after restarting affected services or a planned reboot. No automatic reboot was performed.' >&2
   return "$status"
 }
 
@@ -8614,7 +8758,7 @@ function manifest_listeners() {
     manifest_emit listener service "$protocol" address "$address" port "$port" program "$program" application "$application" binding "$scope" reachability unknown
     # program=.example -> dot_prefixed_listener; program=nginx -> no name-based indicator.
     case "$program" in .*)
-      manifest_emit security_indicator indicator dot_prefixed_listener program "$program" address "$address" port "$port" assessment requires_review reason 'Dot-prefixed listening process name; inspect its owner and executable. A name alone does not establish compromise.';;
+      manifest_emit security_indicator indicator dot_prefixed_listener program "$program" address "$address" port "$port" assessment requires_review reason 'Dot-prefixed listening process name; inspect its owner and executable to distinguish expected activity from a possible compromise.';;
     esac
   done <<< "$parsed"
 }
@@ -8704,7 +8848,7 @@ function manifest_process_indicators() {
       encoded_shell_pipeline) reason='Command decodes Base64 and pipes to a shell; review its origin without executing the payload.';;
       mining_command_arguments) reason='Command contains a mining protocol or correlated algorithm, pool and user options; verify whether mining is authorized.';;
       download_shell_pipeline) reason='Command references a download tool and a shell pipeline; verify its origin and authorization.';;
-      panel_worker_concentration) reason='At least 20 Webmin workers share a parent and UID; review sessions, logs and expected concurrency. High concurrency alone does not establish compromise.';;
+      panel_worker_concentration) reason='At least 20 Webmin workers share a parent and UID; compare sessions and logs with expected concurrency to identify the source of the activity.';;
       userspace_kernel_name) reason='Kernel-thread-style command name has a nonzero UID or userspace memory; investigate possible masquerading.';;
       temporary_executable|temporary_script) reason='Executable or interpreter script starts from a temporary directory; legitimate installers can also do this.';;
       *) continue;;
@@ -8781,7 +8925,7 @@ function manifest_web_indicators() {
     # stat mode 777 or 1777 -> world_writable_web_directory; 755 does not match.
     case "$mode" in *[2367])
       manifest_web_findings=$((manifest_web_findings+1))
-      manifest_emit security_indicator indicator world_writable_web_directory path "${directory#"$manifest_root"}" assessment requires_review reason 'Directory permits writes by any local user; check ownership and intended access. Permissions alone do not establish compromise.';;
+      manifest_emit security_indicator indicator world_writable_web_directory path "${directory#"$manifest_root"}" assessment requires_review reason 'Directory permits writes by any local user; check ownership and intended access, and review unexpected file changes for possible compromise.';;
     esac
     depth=3; [ "$directory" != "$resolved" ] || depth=1
     # Prune control-character names before using newline-delimited paths. Root-level
@@ -8966,7 +9110,7 @@ function manifest_service() {
       if [ "$result" -eq 1 ] && { $systemd || [ "$name" = postfix ]; }; then running=no; running_source=service_status; fi
     fi
   fi
-  # Exact command names are positive evidence only; no TCP listener does not mean a service is stopped.
+  # Match exact command names for observed processes; services may run without a TCP listener.
   if [ "$running" = unknown ]; then
     processes=$manifest_processes
     case "$name" in
@@ -9065,7 +9209,7 @@ function manifest_read_metadata() {
 }
 
 # These conventional paths give migration hints, not complete server configuration.
-# Custom include trees or startup flags can select other files; missing findings do not prove a service is absent.
+# Check custom include trees and startup flags when conventional configuration paths yield no findings.
 function manifest_config_files() {
   local kind="$1" file count=0
   local -a files=()
@@ -9157,7 +9301,7 @@ function manifest_has_php_document_root() {
   case "$root" in /*) :;; *) return 1;; esac
   case "$root" in /|*'$'*|*'%'*|*'{'*|*'}'*) return 1;; esac
   command -v timeout >/dev/null 2>&1 || command -v perl >/dev/null 2>&1 || return 1
-  # Inspect immediate app children only; backup trees do not establish a site's PHP runtime.
+  # Inspect immediate app children to identify the site's PHP runtime; skip backup trees.
   found=$(manifest_run_bounded 2 find -H "$manifest_root$root" -mindepth 1 -maxdepth 2 \
     \( -type d \( -name '.*' -o -name '*.bak' -o -name '*.backup' -o -name '*.old' -o -name '*~' -o -name backup -o -name backups \) -prune \) -o \
     \( -xtype f -name '*.php' -print -quit \) 2>/dev/null) || return 1
@@ -9587,7 +9731,7 @@ function manifest_mail_path_is_narrow() {
 }
 
 # Mail stores can contain millions of files. Bound scans by time and path
-# instead of recursively measuring arbitrary configured directories; unknown size does not mean an empty mailbox.
+# instead of recursively measuring arbitrary configured directories; retain unknown size when measurement is incomplete.
 function manifest_mail_root() {
   local path="$1" source="$2" size=unknown count=unknown reason=not_scanned count_reason=ambiguous_layout actual output inode resolved
   case "$path" in /*) ;; *) return ;; esac
@@ -9896,7 +10040,7 @@ function manifest_probe() {
   "$@"
   status=$?
   # Some legacy collectors return a predicate's status for an absent optional
-  # path. Preserve that status as unknown; it is not a proven collector failure.
+  # path. Preserve that status as unknown until the collector's result can be checked.
   if [ "$status" -ne 0 ]; then state=unknown
   elif [ "${manifest_warning_count:-0}" -gt "$before" ]; then state=partial; fi
   manifest_emit probe_status probe "$name" result "$state" command_status "$status" coverage requires_review
@@ -9957,7 +10101,7 @@ function manifest_output() (
   manifest_probe migration manifest_migration
   if $manifest_collection_failed; then manifest_emit warning area collection reason 'One or more collectors failed; missing inventory sections are unknown.'; fi
   manifest_emit warning area interpretation reason 'Reads common configuration files; custom settings may be missed. Websites and applications are not tested. Certificate files are listed, but HTTPS and certificate validity are not checked.'
-  manifest_emit warning area security_review reason 'Potential compromise indicators require manual review; missing findings do not establish a clean system.'
+  manifest_emit warning area security_review reason 'Review potential compromise indicators manually; checks cover selected patterns and paths, and a full security assessment requires separate investigation.'
   manifest_emit collection_status core_collectors_failed "$manifest_collection_failed" warning_count "$manifest_warning_count" completeness requires_review
   [ "$manifest_format" != json ] || printf ']}\n' || return 1
   # Ordinary inventories retain partial findings; comparisons require their core collectors to succeed.
@@ -10049,7 +10193,7 @@ function manifest_compare_baseline() {
   case "$result" in
     0) printf 'dss:stage: Manifest comparison: unchanged observed setup. Inventory: %s/current/manifest.json\n' "$directory" >&2;;
     1)
-      printf 'dss:stage: Manifest comparison: changes observed; review %s/changes.diff. Changes alone are not failures.\n' "$directory" >&2
+      printf 'dss:stage: Manifest comparison: changes observed; review %s/changes.diff against expected upgrade changes and service checks.\n' "$directory" >&2
       cat -- "$directory/changes.diff" || return 2;;
     *) printf 'dss:warn: Manifest comparison failed; review %s.\n' "$directory" >&2; return 2;;
   esac
@@ -10148,7 +10292,7 @@ function upgrade_print_report() {
   if records=$(dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\t${Status}\n'); then
     printf '%s\n' "$records" | awk -F '\t' '$4 !~ / (not-installed|config-files)$/ {print}' || status=1
   else printf '%s\n' 'Unknown: package inventory failed.'; status=1; fi
-  printf '\n%s\n' 'Active APT sources: file, line, provider, type, URL, suite, components, architecture filters:'
+  printf '\n%s\n' 'Active APT sources: file, line, package publisher, type, URL, suite, components, architecture filters:'
   if records=$(apt_sources_list); then
     # Keep origin/path for review, without URL credentials, query strings or fragments.
     printf '%s\n' "$records" | awk -F '\t' 'BEGIN {OFS="\t"} NF {
@@ -10347,7 +10491,7 @@ function support_print_report() {
         if (line ~ /^dss:error: current installed package dependency check failed /) errors["installed_dependencies"]=1
         if (line ~ /hash sum mismatch/) errors["download_checksum"]=1
         if (line ~ /^dss:error: apache\/php (preparation|completion) failed/) errors["php_apache_handoff"]=1
-        if (line ~ /^dss:error: (cannot establish whether apache is in use|apache use changed)/) { errors["php_apache_usage"]=1; stage="php_migration" }
+        if (line ~ /^dss:error: (cannot establish whether apache is in use|apache use is unknown|apache use changed)/) { errors["php_apache_usage"]=1; stage="php_migration" }
         if (line ~ /^dss:error: apache\/php removal plan (was rejected|rejected [(])/) {
           errors["php_migration_plan"]=1
           count=split("purge unapproved_removal unexpected_install unverified_install early_runtime_change unapproved_upgrade version_check_failed", php_reasons, " ")
@@ -10591,6 +10735,7 @@ fi
 [ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json ] || [ "${DR_ACTION:-$1}" = --upgrade-report ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
 case "${DR_ACTION:-${1:-}}" in
   --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages)
+    apt_package_lock_warn
     upgrade_panel_dispatch "$@" || return $?
     if $upgrade_panel_handled; then return 0; fi;;
 esac

@@ -42,7 +42,7 @@ The standalone tool symbol is transparent and contains no embedded fonts or imag
 Keep the symbol's proportions and clear space. Prefer at least 48 pixels for
 the standalone logo. Use the banner when the name and tagline are needed.
 Use `logo.svg` or `logo.png` on light surfaces and the `logo-dark` variant on dark surfaces.
-Describe supported operations and their limits; the artwork does not guarantee a successful result.
+Describe supported operations, required checks and recovery limits alongside the artwork.
 
 ## Editing and export
 

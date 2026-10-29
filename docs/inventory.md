@@ -22,7 +22,7 @@ CentOS, RHEL, Rocky and AlmaLinux. It preserves distribution package versions,
 including RPM epochs/releases and architecture. PHP CLI, FPM, Apache module and
 extension packages are listed separately. Common RPM Apache, Remi and SCL PHP
 configuration paths are included. Runtime associations are inferred from package
-ownership and configuration; they do not establish which code a live process has loaded.
+ownership and configuration. Check live processes separately to identify their loaded code.
 
 Mail-storage discovery covers these standard layouts:
 
@@ -53,7 +53,7 @@ and 20 account mail directories.
 Empty conventional roots are omitted and aliases to the same directory are deduplicated.
 Both the literal path and resolved symlink target must be recognised narrow mail
 locations before measuring. Custom paths can therefore be reported with unknown
-size; missing results and incomplete coverage are not evidence of empty mailboxes.
+size. Keep mailbox size unknown until the missing measurements are completed.
 
 Potential compromise indicators appear as `security_indicator` records in text and JSON.
 The process check flags shell redirection or `tee` targeting sudoers, Base64 decoding
@@ -71,7 +71,7 @@ are omitted because package updates commonly replace them. The probe is limited 
 five seconds and 20000 links; permissions or process exits can leave gaps.
 See the [Linux executable-link documentation](https://man7.org/linux/man-pages/man5/proc_pid_exe.5.html).
 Groups of at least 20 Webmin workers sharing a parent and UID get a concurrency
-review hint. This does not establish unauthorized sessions or exploitation.
+review hint. Compare sessions and logs with expected activity to determine the cause.
 
 Website files and scheduled jobs are checked for possible signs of compromise.
 Website sampling includes WordPress plugin directories within the shared file and
@@ -81,7 +81,8 @@ Checks are read-only, and reports omit file contents and raw commands.
 
 Findings need review because legitimate activity can trigger them and some problems
 may be missed. Warnings indicate incomplete coverage. A report without findings
-does not establish a clean server. These observations are excluded from before/after
+means the selected checks found no matches in their scanned scope; assess remaining
+security risks separately. These observations are excluded from before/after
 configuration comparisons.
 
 Migration hints include local program and service paths, cron files and custom timer

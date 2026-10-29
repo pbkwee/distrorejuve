@@ -41,7 +41,7 @@ Cover these questions in this order, combining sections for simple cases:
    and the uncertainty left afterward. Link the technical evidence in the appendix.
    For example, if an old site requires a removed PHP feature, explain that the
    site may fail under the new PHP version and needs compatibility work and tests.
-   Do not claim that a detected PHP version proves such a dependency exists.
+   Identify the application feature or code dependency before describing it as a blocker.
    Separate demonstrated blockers, plausible untested compatibility risks and
    missing evidence. Avoid invented probabilities or generic high/medium labels
    without an explanation. Mention data loss, boot/remote-access failure or mail
@@ -71,7 +71,7 @@ application/database changes, or important behaviour that needs testing before
 production changes. Multiple release hops can add risk but do not mandate a copy.
 Explain what this route helps test and what it does not solve. Account for copied
 production effects, extra hosting, consistent data refresh, final outage and cutover.
-A copy alone does not establish reliable backups or lossless rollback.
+Verify backup coverage and restore readiness, and plan how to preserve writes accepted after cutover.
 Explain that isolated preparation can leave the live server serving customers,
 but the final writer pause, resync and traffic/image switch affect production.
 Do not describe the whole service as non-destructive. Public descriptions of

@@ -2,6 +2,7 @@
 
 - [Download errors on old servers](#download-errors-on-old-servers)
 - [SSH connection errors](#ssh-connection-errors)
+- [Long-running package lock owners](#long-running-package-lock-owners)
 - [Reporting upgrade problems](#reporting-upgrade-problems)
 
 ## Download errors on old servers
@@ -141,32 +142,33 @@ If a collector fails, the report marks the missing fields and returns a nonzero 
 
 The report contains script checksums, the upgrade action and exit status when recorded,
 the crossgrade/target choice, recorded release/package/service checks and the release codenames those checks covered.
-A verified intermediate release does not mean that the final requested release was reached.
+Compare the last verified release with the requested target to identify any remaining release hops.
 Available APT update failure phase/status and missing web-socket failures are included as fixed labels.
 The support report records whether the latest web checks require review or remain incomplete, without copying paths or file contents.
 It also contains current distribution/release, architecture, kernel series, Bash/APT/dpkg versions,
 package-state counts, free space and exit statuses from read-only APT policy and upgrade simulations.
 The plan counts installation (including upgrades), removal, purge and configuration operations.
-Simulation counts describe the currently configured indexes; zero planned changes does not prove the requested upgrade completed.
-A current release label or clean package database does not establish successful release, package and service verification.
+Simulation counts describe the currently configured indexes; zero planned changes means that simulation found no changes.
+Verify the requested release, package completion and service health from their recorded checks.
 Current system facts describe collection time; they are not the original pre-upgrade baseline.
 Known stage/error messages become fixed category labels. The report does not copy log excerpts.
 Bookworm crossgrades distinguish inventory, replacement checks and bootstrap,
 remaining-package and cleanup planning. Failed simulations report the phase and
 APT exit status separately from current-system probes. Older failures can identify
 the phase while leaving the original exit status unknown.
-An observed error category can refer to an earlier failed attempt within the run; it does not prove a current fault.
+An observed error category can refer to an earlier failed attempt within the run; use the latest matching check to determine the current state.
 
 For a failed crossgrade plan, retain the matching `bootstrap.plan`, `remaining.plan`
 or `cleanup.plan` and its `.arguments.new` file from the inventory directory printed
 in the log. These files describe that simulation, including the arguments used.
-A different phase's plan does not explain the failure. Proposed removals in a
-simulation do not establish that those removals were executed. Keep these files
+Use the failed phase's plan to explain that failure. Simulation removals are
+proposals; check transaction records for executed removals. Keep these files
 private and review them before sharing with a maintainer.
 If remaining-package planning cannot select another safe native dependency,
 a read-only `apt-get check` saves current installed-package diagnostics in
 `remaining.installed-check.log` beside that plan. A failed check identifies a
-current package-state problem; it does not establish when it began. No automatic
+current package-state problem; compare earlier package checks to determine when
+it began. No automatic
 dependency repair or mail-package removal is attempted.
 
 The report omits hostnames, IP/email addresses, repository URLs, usernames, installed package lists,
@@ -177,3 +179,18 @@ Software versions and system-state counts are still information about your syste
 **Do not attach detailed logs, Bash traces, manifests, configuration comparisons or backup archives to a public issue.**
 Those private files can contain credentials, domains, customer information and application data.
 The minimal report supports initial diagnosis; a maintainer may need additional carefully reviewed information.
+
+## Long-running package lock owners
+
+Before package-changing actions (including panel updaters and pending recovery),
+release-upgrade preflight, index refreshes, ordinary APT transactions and wrapped
+dpkg installs, distrorejuve checks kernel write locks on the four standard
+APT/dpkg lock paths. An owner running for at least one hour triggers a warning
+with its PID, parent PID, process name and runtime. Process arguments are omitted.
+Runtime starts when the process starts; lock acquisition time is unavailable.
+
+Check the named process's progress and current lock ownership before using the
+suggested `kill -TERM PID` command. Interrupting installation/configuration can
+leave packages unfinished. The script never stops the owner or removes a lock
+file. Warnings leave operation status unchanged, and APT/dpkg still enforce their
+locks. Missing/unreadable lock or process metadata yields no age warning.

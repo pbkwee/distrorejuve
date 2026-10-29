@@ -34,8 +34,8 @@ values or bypass options are provided.
 
 A panel update and a major OS upgrade are different operations. HestiaCP and KeyHelp
 provide OS-specific procedures; ISPConfig documents particular distribution upgrades.
-The migration links describe moving to a prepared destination; they do not establish
-support for a generic in-place OS upgrade. Select guidance for the actual panel and OS versions.
+The migration links describe moving to a prepared destination. For an in-place OS
+upgrade, select vendor guidance covering the actual panel and OS versions.
 
 The additional panels are reported with version `unknown`; their executables and configuration
 are not run or sourced. Custom installation paths can be missed, and files left by an old
@@ -78,8 +78,8 @@ It does not silently stop at an earlier panel-supported release.
 Run upgrade commands as root. Update the panel on its current OS as required by the vendor. Make a complete recoverable backup and arrange console access.
 The configuration/manifest baseline saved by distrorejuve is not a full backup.
 Plesk's documented resource requirements include 5 GB free space and 2 GB RAM.
-A passing minimum-version or disk check does not establish that every vendor prerequisite is met.
-The vendor checks do not prove application compatibility.
+Check the vendor's full prerequisite list in addition to minimum version and disk space.
+Test application compatibility separately from the vendor's upgrade checks.
 
 For Plesk, download and review the executable linked in [Plesk's vendor procedure](https://support.plesk.com/hc/en-us/articles/12377714344983-How-to-perform-dist-upgrade-procedure-on-Linux-server-with-Plesk)
 for the exact source and target OS versions. That page provides the download and extraction commands.
@@ -108,7 +108,7 @@ DR_PANEL_UPGRADE=cpanel bash distrorejuve.sh --to-next-ubuntu
 Distrorejuve does not download or self-update these tools automatically.
 An unsupported path, missing tool, insufficient panel version or failed prerequisite check stops the upgrade.
 Clear any `ELEVATE_BASE_URL` override before using the cPanel integration.
-Provider instructions in `/var/cpanel/elevate-noc-recommendations` require manual review through the vendor procedure.
+Hosting provider instructions in `/var/cpanel/elevate-noc-recommendations` require manual review through the vendor procedure.
 
 ## Execution and recovery
 
@@ -136,4 +136,4 @@ Follow the vendor recovery procedure after an interruption; do not start a compe
 
 After vendor completion and the required reboots, review panel notifications, services and the saved manifest/configuration changes.
 Use the panel's validation tools and check hosted applications separately.
-A vendor success status alone does not prove that every website, mailbox or extension works.
+Record website, mailbox and extension test results alongside the vendor completion status.

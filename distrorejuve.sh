@@ -137,6 +137,8 @@ Non-root users automatically use reduced collection; --unprivileged or DR_UNPRIV
 Reduced collection skips service status scripts, listener process ownership and mail size scans.
 It reports incomplete visibility and never invokes sudo. Run bash directly when already root.
 Commands that change the system, including --show-changes and --list-leftover-packages, require root outside reduced mode.
+Add --redact to --manifest or --manifest-json to replace server/website identifiers with [redacted].
+Software versions, service state and website records remain visible; review before posting.
 DNS checks are enabled by default; DR_MANIFEST_DNS=false skips them.
 DR_MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
 Website records include the primary configured URL and local certificate-file presence.
@@ -8682,10 +8684,43 @@ function manifest_output_review_record() {
 }
 
 function manifest_emit() {
+  local record_type="$1" key value
+  if "${manifest_redact:-false}"; then
+    local -a public_record=("$record_type")
+    shift
+    while [ "$#" -ge 2 ]; do
+      key=$1; value=$2; shift 2
+      # Only reviewed general facts pass through; new fields default to redacted.
+      # website:name=shop.example.invalid -> [redacted]; website:port=443 -> 443.
+      case "$record_type:$key" in
+        system:package_backend|listener:service|listener:port|listener:application|listener:binding|listener:reachability|\
+        service:name|service:package|service:version|service:running|service:enabled|service:status_source|service:enabled_source|\
+        package:name|package:version|package:architecture|package:package_backend|\
+        runtime:kind|runtime:version|runtime:package|runtime:package_version|runtime:version_source|runtime:conditional|\
+        application:application|application:version|application:language|application:language_version|application:language_version_source|\
+        website:server|website:port|website:tls|website:certificate_file_present|website:runtime_version|\
+        website:runtime_version_source|website:runtime_package|website:dns|website:dns_reason|website:proxy_basis|\
+        mail_storage:size_mib|mail_storage:mailbox_count|mail_storage:size_basis|mail_storage:count_reason|mail_storage:reason|\
+        migration_path:kind|migration_path:ownership|migration_path:package|migration_path:verification|\
+        migration_mount:filesystem|migration_mount:mounted|hosting_panel:name|hosting_panel:version|\
+        panel_remnant:name|panel_remnant:installed|panel_remnant:running|panel_remnant:reason|\
+        security_indicator:indicator|security_indicator:process_count|security_indicator:location|security_indicator:evidence|\
+        security_indicator:assessment|security_indicator:reason|security_indicator:line|\
+        warning:area|warning:reason|warning:unverified_paths|\
+        probe_status:probe|probe_status:result|probe_status:command_status|probe_status:coverage|\
+        collection_status:core_collectors_failed|collection_status:warning_count|collection_status:completeness) :;;
+        website:runtime)
+          # An unmatched handler can contain a customer socket path or upstream name.
+          case "$value" in unknown|php-fpm|php_disabled|apache-mod-php|fastcgi_handler_version_unknown|php_handler_version_unknown) :;; *) value='[redacted]';; esac;;
+        *) case "$value" in ''|unknown) :;; *) value='[redacted]';; esac;;
+      esac
+      public_record+=("$key" "$value")
+    done
+    set -- "${public_record[@]}"
+  fi
   if [ -n "${manifest_review_file:-}" ]; then
     manifest_output_review_record "$@" >> "$manifest_review_file" || manifest_collection_failed=true
   fi
-  local record_type="$1" key value
   if [ "$record_type" = warning ]; then manifest_warning_count=$(( ${manifest_warning_count:-0} + 1 )); fi
   shift
   if [ "$manifest_format" = json ]; then
@@ -10073,8 +10108,8 @@ function manifest_probe() {
 
 function manifest_output() (
   local manifest_format="${1:-text}" manifest_dns_enabled="${2:-${DR_MANIFEST_DNS:-true}}" manifest_root="${3:-/}"
-  local manifest_unprivileged=${DR_UNPRIVILEGED:-false}
-  case "$manifest_unprivileged" in true|false) :;; *) return 1;; esac
+  local manifest_unprivileged=${DR_UNPRIVILEGED:-false} manifest_redact=${MANIFEST_REDACT:-false}
+  case "$manifest_unprivileged:$manifest_redact" in true:true|true:false|false:true|false:false) :;; *) return 1;; esac
   [ "$(id -u)" = 0 ] || manifest_unprivileged=true
   local manifest_processes='' manifest_package_backend=unknown
   local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
@@ -10104,6 +10139,9 @@ function manifest_output() (
   [ "$manifest_format" != json ] || printf '{"schema_version":1,"records":['
   manifest_package_backend=$(packages_output_backend "$manifest_root") || manifest_package_backend=unknown
   manifest_emit system package_backend "$manifest_package_backend" hostname "$(hostname 2>/dev/null || printf unknown)" generated_utc "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" local_addresses "${manifest_local_addresses:-unknown}"
+  if $manifest_redact; then
+    manifest_emit warning area privacy reason 'Server and website identifiers are redacted. Software versions, counts and general configuration remain visible; review before posting.'
+  fi
   if $manifest_unprivileged; then
     manifest_emit warning area privileges reason 'Unprivileged collection: service status scripts, listener process ownership and mail size scans are skipped. Unreadable configuration, application files, private cron jobs and mail stores may be omitted; missing results are unknown.'
   fi
@@ -10136,7 +10174,7 @@ function manifest_output() (
 function manifest_capture() {
 (
   umask 077
-  local directory=$1 file
+  local directory=$1 file MANIFEST_REDACT=false
   mkdir -m 700 -- "$directory" && chmod 700 -- "$directory" || return 1
   # A parent's default ACL can override umask; secure files before writing private records.
   for file in records.tmp manifest.json.tmp manifest.review.tmp; do
@@ -10906,12 +10944,13 @@ fi
 }
 
 function distrorejuve_run() {
-  local argument action LOG_VERBOSE=false LOG_TRACE=false UPGRADE_CROSSGRADE=false
+  local argument action LOG_VERBOSE=false LOG_TRACE=false UPGRADE_CROSSGRADE=false MANIFEST_REDACT=false
   local DR_UNPRIVILEGED=${DR_UNPRIVILEGED:-false}
   local -a arguments=()
   local -a upgrade_retry_command=(bash "$0" "$@")
   for argument in "$@"; do
     case "$argument" in
+      --redact) MANIFEST_REDACT=true;;
       --unprivileged) DR_UNPRIVILEGED=true;;
       --verbose) LOG_VERBOSE=true;;
       --trace) LOG_TRACE=true;;
@@ -10919,6 +10958,14 @@ function distrorejuve_run() {
       *) arguments+=("$argument");;
     esac
   done
+  action=${DR_ACTION:-${arguments[0]:-}}
+  case "${arguments[0]:-}" in --support-report|--check-upgrade) action=${arguments[0]};; esac
+  if $MANIFEST_REDACT; then
+    case "$action" in
+      --manifest|--manifest-json) :;;
+      *) echo 'dss:error: --redact requires --manifest or --manifest-json.' >&2; return 1;;
+    esac
+  fi
   # An explicit public-report command must not enter an inherited upgrade DR_ACTION.
   if [ "${arguments[0]:-}" = --support-report ]; then
     local DR_ACTION=--support-report
@@ -10929,7 +10976,6 @@ function distrorejuve_run() {
   if [ "${arguments[0]:-}" = --check-upgrade ]; then local DR_ACTION=--check-upgrade; fi
   environment_validate_settings || return 1
   [ "$(id -u)" = 0 ] || DR_UNPRIVILEGED=true
-  action=${DR_ACTION:-${arguments[0]:-}}
   if $DR_UNPRIVILEGED; then
     case "$action" in
       --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages|--show-changes|--list-leftover-packages|--pause|--resume)

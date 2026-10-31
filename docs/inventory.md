@@ -7,6 +7,28 @@ bash distrorejuve.sh --manifest
 bash distrorejuve.sh --manifest-json > manifest.json
 ```
 
+To prepare a manifest for public discussion, add `--redact`:
+
+```sh
+bash distrorejuve.sh --manifest --redact > manifest-public.txt
+bash distrorejuve.sh --manifest-json --redact > manifest-public.json
+```
+
+This replaces hostnames, IP addresses, website names and URLs, paths, account names,
+FPM pool/socket names, process names and proxy destinations with `[redacted]`.
+Website and application records remain, including software versions, service state,
+ports, TLS/certificate-file status, DNS results, counts and collection warnings.
+Unknown or empty identifier values remain unknown or empty. New fields are redacted
+unless explicitly approved as general information. Unmatched website handlers are
+redacted because they may contain a path or a customer-defined name.
+The same replacement marker is used throughout; it does not identify or link sites.
+
+Review the result before posting. Versions, counts and combinations of configuration
+facts can still distinguish a system. Redaction changes output only: it does not
+reduce what the collector reads, disable DNS queries, sanitize existing files or
+upload anything. Keep normal manifests, upgrade reports and logs private.
+Upgrade comparison snapshots retain their full detail.
+
 The manifest can run as a non-privileged user. See [manifest privileges](manifest.md)
 for the differences in service checks, listener details, mail measurements and file access.
 
@@ -110,7 +132,7 @@ and mount options are omitted. Literal proxy destinations contain only the autho
 credentials, paths, query strings and fragments are discarded. Named or dynamic
 upstreams may still require manual resolution.
 
-Keep the output private. It is a planning inventory: websites, database contents,
+Keep normal output private; review redacted output before sharing. It is a planning inventory: websites, database contents,
 mail accounts/aliases, backups, certificate validity, remote mounts and application
 compatibility still need separate checks. Custom includes, containers and uncommon
 layouts can be missed. RPM support here applies to `--manifest` and `--manifest-json`;

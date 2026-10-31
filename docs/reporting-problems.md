@@ -176,7 +176,11 @@ application inventories, environment values, arbitrary paths and configuration c
 It performs no network requests, package changes or service changes.
 Software versions and system-state counts are still information about your system, so review them before publication.
 
-**Do not attach detailed logs, Bash traces, manifests, configuration comparisons or backup archives to a public issue.**
+For application inventory questions, `--manifest --redact` or `--manifest-json --redact`
+creates an inventory with server and website identifiers replaced. Review it before
+sharing; see [inventory privacy](inventory.md). General configuration facts remain visible.
+
+**Do not attach detailed logs, Bash traces, unredacted manifests, upgrade reports, configuration comparisons or backup archives to a public issue.**
 Those private files can contain credentials, domains, customer information and application data.
 The minimal report supports initial diagnosis; a maintainer may need additional carefully reviewed information.
 

@@ -54,6 +54,7 @@ sudo env DR_MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --to-latest
 | `DR_LOG_DIRECTORY` | `/root/distrorejuveinfo/runs`; parent directory for private run logs. |
 | `DR_MANIFEST_DNS` | `true`; set to `false` to skip DNS lookups in manifests and upgrade reports. |
 | `DR_MANIFEST_MAIL_METRICS` | `true`; set to `false` to skip mail size scans and spool counts. |
+| `DR_UPGRADE_MANIFEST` | `true`; set to `false` to skip optional automatic application inventory capture and comparison during upgrades. Required service/runtime configuration checks remain enabled. Explicit manifest and upgrade-report actions are unchanged. |
 | `DR_MIN_FREE_DISK_MIB` | `2048`; minimum available MiB on each checked filesystem. Use a positive integer. |
 | `DR_SKIP_DISK_SPACE_CHECK` | `false`; set to `true` to bypass disk-space checks after review. |
 | `DR_ALLOW_CROSSGRADE_BLOCKERS` | `false`; permit starting despite predicted package blockers during a crossgrade. Final native 64-bit verification remains required. |

@@ -182,6 +182,15 @@ evidence, console/rescue access, retention and compatible startup order.
 Include expanded data size, dumps, extraction caches, inodes and transfer time
 in capacity planning. Never test a restore over the live source.
 
+For routine provider snapshots, keep services running by default. Explain that
+the recovery point may be crash-consistent rather than application-consistent.
+A customer may optionally provide service pauses, database-native coordination
+or quiescing hooks. Do not require a pause choice or offer for every snapshot.
+Use additional consistency measures when the actual workload requires them;
+agree affected writers and downtime, and record the chosen method and limits.
+An existing approved pause plan still applies to that job. Verify resumption of
+the original services after a pause, including when backup creation fails.
+
 Capture application baselines before changes: representative pages at wide and
 narrow widths, browser errors, login and business transactions, database access,
 mail and jobs as relevant. Inspect screenshots rather than relying on HTTP 200.

@@ -6,7 +6,7 @@
 function environment_validate_settings() {
   local name value
   for name in DR_ALLOW_BACKPORTS DR_ALLOW_CROSSGRADE_BLOCKERS DR_ALLOW_UNAUTHENTICATED_ARCHIVES \
-      DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_MAIL_METRICS DR_PREFER_PACKAGED_USRMERGE_FILES \
+      DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_MAIL_METRICS DR_UPGRADE_MANIFEST DR_PREFER_PACKAGED_USRMERGE_FILES \
       DR_PURGE_INCOMPATIBLE_PACKAGES DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES DR_REMOVE_X11_PACKAGES \
       DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK DR_SKIP_DISK_SPACE_CHECK DR_SKIP_DOVECOT_MIGRATION_CHECK \
       DR_SKIP_KERNEL_CHECK DR_SKIP_OLD_PACKAGE_CHECK DR_SKIP_X11_CHECK DR_UNPRIVILEGED; do
@@ -139,6 +139,8 @@ It reports incomplete visibility and never invokes sudo. Run bash directly when 
 Commands that change the system, including --show-changes and --list-leftover-packages, require root outside reduced mode.
 DNS checks are enabled by default; DR_MANIFEST_DNS=false skips them.
 DR_MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
+DR_UPGRADE_MANIFEST=false skips optional automatic application inventories and comparisons during upgrades.
+Required service/runtime checks still read configuration; explicit manifest/report actions are unchanged.
 Website records include the primary configured URL and local certificate-file presence.
 Missing names, indirect configuration and automatically managed certificates may remain unknown.
 Potential compromise indicators include suspicious process commands, kernel-thread name masquerading,
@@ -1476,6 +1478,87 @@ function upgrade_precondition_checks() {
 
 # Archive-keyring packages maintain distro trust; never import unrelated keyserver keys.
 # https://www.debian.org/doc/manuals/debian-handbook/sect.package-authentication.en.html
+function apt_debian_archive_key_install() {
+(
+  local name=$1 fingerprint=$2 destination=$3 temporary exported stage='' gpg_command
+  case "$name" in archive-key-10|archive-key-10-security|archive-key-11|archive-key-11-security|archive-key-12|archive-key-12-security|archive-key-13|archive-key-13-security) :;; *) return 1;; esac
+  case "$fingerprint" in *[!0-9A-F]*|'') return 1;; esac
+  [ "${#fingerprint}" -eq 40 ] && [ "${destination#/}" != "$destination" ] && [ ! -L "$destination" ] || return 1
+  if command -v gpg >/dev/null 2>&1; then gpg_command=gpg
+  elif command -v gpg2 >/dev/null 2>&1; then gpg_command=gpg2
+  else echo 'dss:error: GnuPG is required to verify missing Debian archive keys; authentication was not weakened.' >&2; return 1; fi
+  temporary=$(mktemp -d "${TMPDIR:-/tmp}/distrorejuve-key.XXXXXXXX") || return 1
+  trap 'if command -v gpgconf >/dev/null 2>&1; then gpgconf --homedir "$temporary" --kill gpg-agent >/dev/null 2>&1 || :; fi; [ -z "$stage" ] || rm -f -- "$stage"; rm -rf -- "$temporary"' EXIT
+  chmod u=rwx,go= -- "$temporary" || return 1
+  # HTTPS authenticates the publisher; the full primary fingerprint pins the key.
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --silent --show-error --connect-timeout 15 --max-time 45 \
+      --output "$temporary/key.asc" "https://ftp-master.debian.org/keys/$name.asc" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    wget --quiet --timeout=45 --tries=1 --max-redirect=0 --output-document="$temporary/key.asc" \
+      "https://ftp-master.debian.org/keys/$name.asc" || return 1
+  else echo 'dss:error: curl or wget with working HTTPS is required to repair Debian archive keys.' >&2; return 1; fi
+  [ -s "$temporary/key.asc" ] && [ "$(wc -c < "$temporary/key.asc")" -le 1048576 ] || return 1
+  "$gpg_command" --no-options --homedir "$temporary" --batch --import "$temporary/key.asc" > "$temporary/import.log" 2>&1 || return 1
+  exported=$("$gpg_command" --no-options --homedir "$temporary" --batch --with-colons --fingerprint --list-keys "$fingerprint" 2>/dev/null) || return 1
+  # GnuPG colon records: "pub:..." then
+  # "fpr:::::::::80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE:" -> that primary fingerprint.
+  # Require one primary key with the pinned fingerprint, not a signing subkey.
+  printf '%s\n' "$exported" | awk -F: -v expected="$fingerprint" '
+    $1 == "pub" { primary++; next_fingerprint=1; if ($2 == "r" || $2 == "e") bad=1 }
+    $1 == "sub" { next_fingerprint=0 }
+    $1 == "fpr" && next_fingerprint { if ($10 != expected) bad=1; found++; next_fingerprint=0 }
+    END { exit (bad || primary != 1 || found != 1) }
+  ' || { echo 'dss:error: Downloaded Debian key is expired, revoked or does not match its pinned primary fingerprint.' >&2; return 1; }
+  # Export only the pinned primary and its verified subkeys; never trust extra keys in a download.
+  "$gpg_command" --no-options --homedir "$temporary" --batch --export "$fingerprint" > "$temporary/key.gpg" || return 1
+  [ -s "$temporary/key.gpg" ] || return 1
+  mkdir -p -m u=rwx,go=rx -- "${destination%/*}" || return 1
+  stage=$(mktemp "$destination.tmp.XXXXXXXX") || return 1
+  install -m u=rw,go=r -- "$temporary/key.gpg" "$stage" && mv -f -- "$stage" "$destination" || return 1
+  stage=''
+  printf 'dss:info: Installed verified Debian archive key %s (%s).\n' "$name" "$fingerprint" >&2
+)
+}
+
+# Repair known missing official signers, including newer signatures on old archives.
+# Unknown/vendor keys and genuinely expired-only signatures keep their existing failure.
+function apt_repair_debian_signing_keys() {
+  local logfile=$1 missing config records official=false provider type name fingerprint ids key selected found=false _
+  [ -f /etc/debian_version ] || return 0
+  # APT/GPG output "NO_PUBKEY 112695A0E562B32A" -> that public signing ID only.
+  missing=$(LC_ALL=C awk '{ for (i=1;i<NF;i++) if ($i == "NO_PUBKEY" && $(i+1) ~ /^[0-9A-Fa-f]+$/ && length($(i+1)) == 16) print toupper($(i+1)) }' "$logfile" | LC_ALL=C sort -u) || return 1
+  [ -n "$missing" ] || return 0
+  records=$(apt_sources_list) || return 1
+  while IFS=$'\t' read -r _ _ provider type _ _ _ _; do
+    [ "$provider:$type" != debian:deb ] || official=true
+  done <<< "$records"
+  $official || return 0
+  [ -z "${APT_CONFIG:-}${DPKG_ADMINDIR:-}${DPKG_ROOT:-}" ] || return 1
+  config=$(apt-config dump) || return 1
+  apt_config_has_standard_paths "$config" || return 1
+  # Public primary and signing-subkey IDs from Debian's published keys; full fingerprints
+  # are pinned independently of any key IDs supplied by an untrusted repository error.
+  while IFS='|' read -r name fingerprint ids; do
+    selected=false
+    for key in $missing; do case " $ids " in *" $key "*) selected=true;; esac; done
+    $selected || continue
+    found=true
+    apt_debian_archive_key_install "$name" "$fingerprint" "/etc/apt/trusted.gpg.d/distrorejuve-$name.gpg" || return 1
+  done <<'DEBIAN_KEYS'
+archive-key-10|80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE|DC30D7C23CBBABEE 648ACFD622F3D138
+archive-key-10-security|5E61B217265DA9807A23C5FF4DFAB270CAA96DFA|4DFAB270CAA96DFA 112695A0E562B32A
+archive-key-11|1F89983E0081FDE018F3CC9673A4F27B8DD47936|73A4F27B8DD47936 0E98404D386FA1D9
+archive-key-11-security|AC530D520F2F3269F5E98313A48449044AAD5C5D|A48449044AAD5C5D 54404762BBB6E853
+archive-key-12|B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8|B7C5D7D6350947F8 6ED0E7B82643E131
+archive-key-12-security|05AB90340C0C5E797F44A8C8254CF3B5AEC0A8F0|254CF3B5AEC0A8F0 BDE6D2B9216EC7A8
+archive-key-13|04B54C3CDCA79751B16BC6B5225629DF75B188BD|225629DF75B188BD 78DBA3BC47EF2265
+archive-key-13-security|5E04A1E3223A19A20706E20F9904613D4CCE68C6|9904613D4CCE68C6 8E9F831205B4BA95
+DEBIAN_KEYS
+  if $found; then echo 'dss:info: Missing Debian archive signers repaired; retrying authenticated index refresh.' >&2; fi
+  return 0
+}
+
 function apt_ensure_archive_keyring() {
   local package=$1 info status
   if info=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null); then
@@ -7701,10 +7784,19 @@ tmplog=$(mktemp "tmplog.aptgetupdate.log.XXXXXX") || return 1
 apt-get $APT_GET_INSTALL_OPTIONS update 2>&1 | tee "$tmplog"
 update_status=("${PIPESTATUS[@]}")
 ret=${update_status[0]}
+# Old APT can exit zero after rejecting an index and retaining stale lists.
+# "W: ... NO_PUBKEY 112695A0E562B32A" is a failed authenticated refresh,
+# even without an exit-100 error; never advance using its unauthenticated packages.
+if grep -Eq '(^|[[:space:]])(NO_PUBKEY|EXPKEYSIG|REVKEYSIG|BADSIG|KEYEXPIRED)([[:space:]]|$)' "$tmplog"; then ret=100; fi
 
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
 if [ "$ret" -ne 0 ]; then
   local -a release_options=()
+  if ! apt_repair_debian_signing_keys "$tmplog"; then
+    echo 'dss:error: Automatic Debian signing-key repair failed; package authentication remains required.' >&2
+    rm -f -- "$tmplog"
+    return 1
+  fi
   # E: Repository 'URI suite InRelease' changed its 'Suite' value from 'stable' to 'oldstable'
   # Quoted fields 6/8 must age together in EVERY repository, preserving pocket suffixes.
   # https://manpages.debian.org/trixie/apt/apt-get.8.en.html#allow-releaseinfo-change
@@ -7719,9 +7811,12 @@ if [ "$ret" -ne 0 ]; then
     release_options=(-o Acquire::AllowReleaseInfoChange::Suite=true)
   fi
   echo "dss:stage: Retrying index refresh over IPv4 after APT update failed (status $ret)" >&2
-  apt-get $APT_GET_INSTALL_OPTIONS -o Acquire::ForceIPv4=true "${release_options[@]}" update 2>&1 | tee -a "$tmplog"
+  # The outer run log retains both attempts. Inspect only the final refresh for
+  # remaining signature failures and cacheability after a successful key repair.
+  apt-get $APT_GET_INSTALL_OPTIONS -o Acquire::ForceIPv4=true "${release_options[@]}" update 2>&1 | tee "$tmplog"
   update_status=("${PIPESTATUS[@]}")
   ret=${update_status[0]}
+  if grep -Eq '(^|[[:space:]])(NO_PUBKEY|EXPKEYSIG|REVKEYSIG|BADSIG|KEYEXPIRED)([[:space:]]|$)' "$tmplog"; then ret=100; fi
 fi
 if [ "$ret" -eq 0 ] && [ "${update_status[1]}" -ne 0 ]; then
   ret=${update_status[1]}; phase=index_log_capture
@@ -10135,6 +10230,13 @@ function manifest_output() (
 # Publish a paired JSON inventory and sorted review file only after collection succeeds.
 function manifest_capture() {
 (
+  case "${DR_UPGRADE_MANIFEST:-true}" in
+    true) :;;
+    false)
+      echo 'dss:warn: Automatic application inventory disabled by DR_UPGRADE_MANIFEST=false; supply scoped application baselines and checks separately.' >&2
+      return 2;;
+    *) echo 'dss:error: DR_UPGRADE_MANIFEST must be true or false.' >&2; return 1;;
+  esac
   umask 077
   local directory=$1 file
   mkdir -m 700 -- "$directory" && chmod 700 -- "$directory" || return 1
@@ -10180,6 +10282,14 @@ function manifest_print_key_changes() {
 # Status: 0 unchanged, 1 observations changed, 2 comparison unavailable. Never test application behaviour.
 function manifest_compare_baseline() {
 (
+  # Apply the current collection scope even when an older full inventory exists.
+  case "${DR_UPGRADE_MANIFEST:-true}" in
+    true) :;;
+    false)
+      echo 'dss:warn: Automatic application comparison disabled by DR_UPGRADE_MANIFEST=false; application behavior remains unverified by inventory.' >&2
+      return 2;;
+    *) echo 'dss:error: DR_UPGRADE_MANIFEST must be true or false.' >&2; return 1;;
+  esac
   umask 077
   local baseline=$1 original="$1.applications" directory result file
   if [ -z "$baseline" ] || [ -L "$original" ] || [ ! -f "$original/manifest.json" ] ||

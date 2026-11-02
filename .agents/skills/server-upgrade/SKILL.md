@@ -124,6 +124,13 @@ approval of costs or production changes. Defer API credentials until authenticat
 work is needed; an external source is not a RimuHosting clone/snapshot source.
 Other providers use their own verified provisioning and recovery procedure.
 
+Keep services running for routine provider snapshots by default. Do not make a
+service-pause offer or approval a routine prerequisite. Explain crash-consistency
+limits and accept an optional customer-provided pause or quiescing procedure.
+If the workload needs additional consistency measures, identify the concrete
+requirement and agree the method and downtime. Honour an explicitly approved
+job-specific pause plan; record which services actually paused and resumed.
+
 On interruption or an ambiguous outcome, establish actual state before retrying.
 Do not repeat destructive operations or reboot after partial failure blindly.
 Use approved recovery, stop on unresolved unsafe conditions and preserve a

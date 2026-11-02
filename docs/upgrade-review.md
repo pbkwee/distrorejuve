@@ -72,6 +72,29 @@ Virtualmin and ISPConfig use normal distro upgrade checks, including when Virtua
 configuration remnants or a custom command survive. Review panel configuration and
 complete the [panel follow-up](hosting-panels.md#panels-using-distro-packages).
 
+Set `DR_UPGRADE_MANIFEST=false` when the agreed upgrade scope excludes the
+optional full application inventory. This prevents automatic captures and
+comparisons, including comparison against an existing inventory. Supply scoped
+application baselines and acceptance checks separately. Required package,
+service and web-runtime checks remain enabled and still need permission for
+their configuration inputs. This setting does not restrict explicit manifest
+or upgrade-report actions, or replace the data-access review for other steps.
+
+APT refreshes automatically repair recognized missing Debian archive signers for
+releases 10–13, including newer signatures on older archived releases. Keys come
+from Debian's HTTPS publisher endpoint and must match pinned full primary
+fingerprints before activation. Only the selected key is exported into an
+APT-compatible keyring. Unknown/vendor keys, custom APT paths, expired or revoked
+downloaded keys and failed verification stop the repair without weakening trust.
+Existing source-specific `Signed-By` restrictions are preserved.
+
+Old APT can return zero after rejecting signed indexes and retaining old lists.
+Signature failures therefore trigger repair and one authenticated retry even
+with that exit status. Remaining signature failures are errors. An archive
+signed only by expired keys still requires separate review; automatic repair
+does not enable `DR_ALLOW_UNAUTHENTICATED_ARCHIVES`. Maintain the pinned key
+table when Debian publishes another release's signing keys.
+
 Offline regression checks (no production operations):
 
 ```sh

@@ -262,6 +262,21 @@ choosing reverse migration or repair; an old backup may lose orders, uploads or 
 
 ## Verify, hand over and retire
 
+Complete the [before/after review](upgrade-review.md#beforeafter-review) using
+the original job evidence and final state, including the post-reboot state.
+Verify the identity/date of the baseline selected by `--show-changes`, keep raw
+output private and extract only approved non-secret findings. Account for
+preparation changes before that baseline. Review package removals/replacements,
+retained unavailable packages, services/listeners, configuration replacement and
+boot/network differences. Separate expected changes and existing faults from
+regressions and unknowns. Add material customer impacts to the owner handoff and
+technical evidence, acceptance checks and owners to the sysadmin handoff. Missing
+original configuration evidence limits what can be claimed as an upgrade change.
+Use the [handoff command reference](handoff-reports.md) for evidence collection
+after changes and reboot. Complete or explicitly defer
+[package cleanup](upgrade-review.md#package-cleanup-at-completion) with a reason
+and owner before closing the technical report.
+
 Check real application functions, errors, mail, jobs, resources, boot/SSH,
 monitoring and a usable destination backup. Record customer acceptance, remaining
 work, owners and recovery/retention limits. Test representative application

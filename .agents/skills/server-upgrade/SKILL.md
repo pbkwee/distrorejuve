@@ -117,6 +117,18 @@ before acting. Follow only the relevant procedure sections:
 - [Handoff and retirement](../../../docs/upgrade-and-migration.md#verify-hand-over-and-retire)
   for acceptance, backup readiness, remaining work, retention and access/billing cleanup.
 
+Before handoff, complete the [before/after review](../../../docs/upgrade-review.md#beforeafter-review)
+against the verified original job baseline and post-reboot evidence. Use
+`--show-changes` as private evidence under the approved data scope, with a
+controlled environment and only approved non-secret facts returned to AI.
+Separate current-package differences and historical sidecars from proven job
+changes. Report material effects, remaining checks and owners in the owner and
+sysadmin handoffs; a successful report is not application acceptance.
+Use the [handoff evidence commands and report guidance](../../../docs/handoff-reports.md)
+after changes, cleanup and reboot. It distinguishes owner-facing effects from
+sysadmin evidence and specifies which reports to refresh without exposing raw
+configuration to AI. Record deferred package cleanup and its application owner.
+
 If the customer chooses RimuHosting, load the optional
 [account and API guide](../../../docs/rimuhosting.md). New accounts must contact
 support and complete review before VM creation. Account approval is separate from

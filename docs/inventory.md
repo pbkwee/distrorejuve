@@ -15,7 +15,38 @@ and `--list-leftover-packages` (which can install a helper) require root outside
 `--check-upgrade` works in reduced mode. It ignores repair and skip overrides, reports blockers, and never changes packages or configuration.
 `--upgrade-report` also permits reduced collection, within its existing APT/dpkg scope.
 
-DNS checks report whether website domains resolve to this server.
+DNS checks report each configured hostname's addresses and whether they match
+this server. Different addresses can identify another destination or a proxy.
+
+## First-pass upgrade information
+
+Full root collection includes these records:
+
+- `website`: hostname/alias, web-server config path, document root and whether that directory exists, runtime association, DNS addresses and source match.
+- `application`: detected application/version and the exact `version_file` path. Conventional distro WordPress under `/usr/share/wordpress` includes `discovery=conventional_package_path` and `site_mapping=unknown` unless a mapped website already supplies the record.
+- `application_config_presence`: presence of four conventional packaged WordPress configuration paths. Configuration values are never read by this probe.
+- `website_probe`: HTTP/HTTPS HEAD result, remote address, curl exit status and TLS verification result. No page bodies, cookies or response headers are returned; redirects are not followed.
+- `service_state`: fixed MySQL, MariaDB, PostgreSQL and Dovecot unit load/active/substate, enablement/result and daemon process count, including retained units after package removal.
+- `capacity`: root disk space, inode headroom, memory and swap counters.
+- `upgrade_tool` and `upgrade_directory`: fixed upgrade/backup/WP-CLI tool availability and bounded sizes for conventional application, database, package-cache, journal, system and backup directories (including `/var/cache/apt` and `/var/log/journal`).
+- `language_consumer`: observed interpreter process counts and direct cron interpreter references, with source file/line and interpreter name. Command bodies and arguments remain private.
+
+Apache, Nginx and Caddy use their conventional configurations. Apache/Nginx
+collection also reads conventional generated cPanel, Plesk and DirectAdmin vhost
+files under the existing file/count limits. This path-based discovery needs no
+panel API credentials. Custom include layouts can be added after a targeted review.
+
+HTTP probing is enabled in normal root collection. Set `DR_MANIFEST_HTTP=false`
+to disable it; reduced collection skips HTTP requests. Each request has a two-second
+connection limit and four-second total limit. The website phase probes at most 40
+unique protocol/authority pairs with a 45-second shared budget. Duplicate pairs
+are cached. DNS and mail metrics retain their existing controls. Comparison
+snapshots disable HTTP probing to keep them local.
+
+For an owner assessment, group aliases by application and explain the upgrade
+implications for each workload. Put vhost/version-file paths, routing, precise
+service states and in-place steps in the sysadmin appendix. Use standard manifest
+collection first; reserve job-specific checks for consequential gaps.
 
 The manifest supports Debian/Ubuntu package databases and RPM-based systems such as
 CentOS, RHEL, Rocky and AlmaLinux. It preserves distribution package versions,
@@ -100,7 +131,9 @@ Nonexecutable periodic cron jobs remain visible because removing execute permiss
 can disable a package job. Other permission/owner changes are not checked.
 Unverifiable files, other symlinks and files over 1 MiB remain for manual review.
 Ownership-query failures produce one summary warning with a count; affected paths
-retain `ownership=unknown`.
+retain `ownership=unknown`. Removed dpkg packages whose exact path ownership and
+`config-files` state can be queried successfully retain their migration paths as
+`ownership=residual_package_config`; installed-package checks elsewhere stay strict.
 
 Collection reads conventional paths to depth 2, examines at most 200 file paths per
 directory and limits each filesystem scan to five seconds. File metadata is capped
@@ -115,3 +148,17 @@ mail accounts/aliases, backups, certificate validity, remote mounts and applicat
 compatibility still need separate checks. Custom includes, containers and uncommon
 layouts can be missed. RPM support here applies to `--manifest` and `--manifest-json`;
 `--upgrade-report` and Debian-specific upgrade/crossgrade checks retain their APT/dpkg scope.
+
+## Standard pre-upgrade commands
+
+Use `--check-upgrade` for the read-only target/path, package-health and disk gates.
+Use `--upgrade-report` for the detailed APT/dpkg report, holds, kernel/package
+versions, repositories and the manifest. The manifest includes conventional
+backup/application sizes and required-tool availability. Save their output in
+the private job rather than maintaining a separate preflight discovery script.
+
+Use the relevant standard action after the operator approves it: `--upgrade`
+for current-release package work and `--to-next-ubuntu` for one Ubuntu release
+step. S2I provides the standard recovery-archive commands. Per-job orchestration
+may supply approved paths, supervision and log destinations; reusable discovery
+and upgrade logic belongs in the tools.

@@ -20,11 +20,14 @@ looking up an acronym.
 Cover these questions in this order, combining sections for simple cases:
 
 1. **What do we recommend?** Name the source and proposed target, the recommended
-   route, its main reason, and whether this is provisional or ready for approval.
-   State the most important unresolved condition near the recommendation.
+   route and its main reason. Name the decision-changing issue near the
+   recommendation when one remains.
 2. **What is there now, and what would change?** Describe the server's jobs:
    websites, email, stored data, scheduled work and business-critical applications.
-   Use a small comparison table where useful:
+   Start with a human-readable bullet list of websites grouped by application,
+   mail/database services and other active workloads. Give the upgrade implication
+   for each. State current/target distribution and architecture, with an explicit
+   crossgrade needed yes/no. Use a small comparison table where useful:
 
    | Service or component | Current setup | Proposed change | What this means for you |
    | --- | --- | --- | --- |
@@ -33,8 +36,8 @@ Cover these questions in this order, combining sections for simple cases:
    observed, customer-reported and inferred facts; mark missing facts as unknown.
    Say what should continue unchanged and what users may need to do differently.
    Explain relevant support/security changes from current official evidence,
-   including obsolete components that would remain after the upgrade. An OS
-   upgrade does not automatically modernize custom applications or containers.
+   including application updates needed alongside the OS change. State those
+   application tasks directly.
 3. **What are the particular risks?** Explain the few material risks supported
    by this source's evidence. For each, connect the observed condition to the
    proposed change, the possible customer impact, the proposed check/remedy,
@@ -55,6 +58,31 @@ Cover these questions in this order, combining sections for simple cases:
    Name owners, unresolved scope/costs, prerequisites and the next decision.
    Explain backup coverage and recovery limits in ordinary language. An assessment
    is not permission to make changes, buy resources or send customer messages.
+
+## Write concrete findings
+
+Let observations speak directly. Avoid boilerplate such as “this is not evidence
+of”, “absence is not proof of absence”, or “not an upgrade-ready plan”. State an
+uncertainty when it changes a decision, a risk or the next check. For example,
+“MySQL is masked and inactive; no database daemon was running” is useful when
+those states were checked. Installed extensions and an application database's
+location belong in their own findings.
+
+The owner report should include a short in-place sequence and the risks to the
+actual workloads. Keep routine copy isolation, backup preparation and final sync
+in the workflow; avoid presenting them as unusual conditions of this server.
+
+Make the appendix specific: hostname-to-vhost/document-root mapping, exact
+application version file, current/target versions, DNS answers and local/proxy
+routing where established, listener bind scope, package installation and service
+active/enabled/failed/masked states. Identify observed consumers of old runtimes
+from bounded process, cron and web-handler metadata. Keep raw arguments, secret
+settings and customer content out of reports.
+
+Use available authorized discovery to resolve useful gaps rather than repeating
+collection limitations. DNS addresses different from the source call for checking
+a proxy or another server before migration decisions. If only reduced input is
+available, still produce a useful inventory and describe consequential gaps once.
 
 ## Choosing the route
 

@@ -161,6 +161,25 @@ APT exit status separately from current-system probes. Older failures can identi
 the phase while leaving the original exit status unknown.
 An observed error category can refer to an earlier failed attempt within the run; use the latest matching check to determine the current state.
 
+`recorded_package_error_recovery` distinguishes earlier dpkg/file-conflict errors
+from unresolved or unverified package failures. `verified_recovered` requires a
+successful action and a later final outcome verifying the same release and its
+packages. Missing checks, pending package work and failed actions stay
+`unresolved_or_unverified`. A regenerated report also requires a silent successful
+current dpkg audit and exactly one complete, all-zero APT simulation summary.
+Audit output on either stdout or stderr, held-back packages, package action records,
+missing or inconsistent summaries and failed checks leave recovery unverified.
+Stale outcomes cannot override pending or failed current package checks.
+`current_package_health` records those read-only checks. The console uses the same
+strict summary requirement on its final package-check evidence, without changing
+the upgrade action's existing completion or exit policy. It identifies recovered
+package errors after logging finishes. `observed_package_error_categories` and the original
+`observed_error_categories` retain the historical categories; the private detailed
+log retains the error evidence. Package recovery does not establish service,
+application or reboot health. Keep the requested-target and final health checks.
+This reporting does not purge foreign-architecture packages or force overwrites
+to resolve a multiarch file conflict.
+
 For a failed crossgrade plan, retain the matching `bootstrap.plan`, `remaining.plan`
 or `cleanup.plan` and its `.arguments.new` file from the inventory directory printed
 in the log. These files describe that simulation, including the arguments used.

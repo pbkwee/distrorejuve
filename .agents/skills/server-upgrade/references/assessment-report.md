@@ -1,5 +1,12 @@
 # Initial upgrade assessment report
 
+Issue this report only after receiving a usable source-associated manifest or
+successfully collecting source inventory. If neither is available, give a short
+access/collection status with the blocker and next action, and retain resumable
+job notes. General upgrade research, a successful login alone and another
+server's configuration are not a substitute. An operator-supplied manifest is
+enough to begin without SSH; a source-based report may identify remaining gaps.
+
 Write for two readers: the customer deciding what to do, and the sysadmin or
 agent preparing the work. Scale detail to the actual setup. A small, well-understood
 upgrade should produce a short report. Do not pad it with irrelevant risks or

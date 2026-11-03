@@ -5,6 +5,7 @@ Non-root users automatically get reduced collection. The script never invokes su
 
 | Information | Non-privileged collection | Root collection |
 | --- | --- | --- |
+| SSH host-key fingerprints | SHA256 hashes of readable conventional public host-key files; omissions remain unknown. | Same public-file-only collection; private keys are never read. |
 | Packages, runtimes and websites | Collects installed packages and readable configuration and application metadata. | More configuration and application files may be readable. |
 | Listeners | Reports addresses and ports; process ownership is unknown. | Also collects process names where available. |
 | Service state | Infers running state from visible process names and enablement from available SysV startup links. | Also uses native service-status and enablement checks where available. |

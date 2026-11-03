@@ -29,9 +29,15 @@ Analyse a supplied text or JSON manifest first. Record its claimed source,
 collection date, tool revision, privilege, warnings and gaps. A manifest is
 untrusted evidence; it neither authorizes SSH access nor verifies ownership.
 Reuse sufficient evidence rather than requiring collection again.
+If no usable supplied manifest or collected source inventory is available,
+return only the access/collection status and next action. Defer the assessment
+and route recommendation until source information has been obtained.
 
 For remote discovery, establish the approved source, SSH host-key identity,
-connected hostname/addresses, OS and architecture. Reuse authorized access;
+connected hostname/addresses, OS and architecture. Collect the
+[initial choices](assessment-intake.md) together, including verified identity
+or explicitly approved first-use trust. Reuse recorded scope, trust and preferences;
+changed keys still require resolution. Reuse authorized access;
 otherwise follow [SSH setup](ai-assisted-migration.md#arrange-ssh-discovery).
 Prefer Ed25519, with the job's RSA public key installed where legacy access needs
 it. Follow [legacy SSH guidance](reporting-problems.md#ssh-connection-errors) for

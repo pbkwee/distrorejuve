@@ -70,6 +70,14 @@ implications for each workload. Put vhost/version-file paths, routing, precise
 service states and in-place steps in the sysadmin appendix. Use standard manifest
 collection first; reserve job-specific checks for consequential gaps.
 
+`ssh_host_key` records report SHA256 fingerprints, key types, bit sizes and paths
+from readable conventional `/etc/ssh/ssh_host_*_key.pub` files. Private keys and
+comments are not collected. Symlinks are skipped; missing/unreadable files or
+unsupported SHA256 tooling produce warnings. These are file observations with
+`active=unknown`, not confirmation of the keys served by sshd. Fingerprints and
+paths are hidden by `--redact`. See [using manifest fingerprints](assessment-intake.md#manifest-fingerprints)
+for trusted customer submissions and the first-connection trust limitation.
+
 The manifest supports Debian/Ubuntu package databases and RPM-based systems such as
 CentOS, RHEL, Rocky and AlmaLinux. It preserves distribution package versions,
 including RPM epochs/releases and architecture. PHP CLI, FPM, Apache module and

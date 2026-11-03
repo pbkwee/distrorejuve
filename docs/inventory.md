@@ -46,6 +46,66 @@ extension packages are listed separately. Common RPM Apache, Remi and SCL PHP
 configuration paths are included. Runtime associations are inferred from package
 ownership and configuration. Check live processes separately to identify their loaded code.
 
+## Lighttpd workload mapping
+
+Lighttpd is recognized in package, service and listener records. Website mapping
+starts at `/etc/lighttpd/lighttpd.conf` and follows only literal includes within
+the resolved `/etc/lighttpd` tree, including literal glob patterns. A file in
+`conf-enabled` is included only if the inspected configuration references it.
+The collector never runs lighttpd, an application or `include_shell` to obtain
+generated configuration. Custom active configuration paths, generated includes,
+variables, chroot paths, aliases, rewrites and unmodelled modules produce
+explicit gaps; their runtime mapping remains unknown.
+
+The supported subset retains nested host, URL and socket conditions, inherited
+document roots, users, ports, TLS flags, literal redirects and CGI, FastCGI,
+SCGI or reverse-proxy backends. `lighttpd_site` records retain configuration
+scope, selector kind and ancestor conditions. Regexes and URL conditions are
+routing evidence, not literal hostnames for DNS queries. `website_handler`
+records identify configured executable/interpreter paths and backend endpoints;
+they omit command arguments, environment settings and authentication values.
+Redirect targets omit user information, query strings and fragments.
+
+FastCGI endpoints are matched to known FPM pools. PHP version evidence comes
+from the matching pool, rather than the shell's default PHP. Multiple matching
+pools leave the version unknown. Other configured launchers can be associated
+with a shebang and the installed package owning that interpreter; an `env`
+wrapper identifies a language without proving an interpreter version. A handler
+record describes configured execution, not a successful request to the app.
+
+`web_frontend` records use process status metadata to find lighttpd, retain only
+its literal `-f` path from `/proc/PID/cmdline`, and extract module basenames from
+`/proc/PID/maps`. Other arguments and map fields are omitted. A matching process
+configuration does not prove that each site is live or that files changed on
+disk have been loaded. An unreadable or different active configuration requires
+review. Service inventory also distinguishes exited systemd daemon wrappers
+with no main PID from observed running processes.
+
+`web_asset_root` records retain document-root paths and resolved symlink targets
+needed by public assets. Conventional application markers in the root or its
+nearest three ancestors produce `application_context` evidence. Retained Rails,
+PHP or Python files do not establish that the associated application is running.
+Top-level script filenames are sampled as `web_file` records without reading
+their contents. A script served by a complete static-only configuration is a
+file download; its extension does not make it an executing backend. Installed
+runtime packages likewise do not prove website use.
+
+Website and application activity remain unknown until supported by separate
+request/runtime evidence. Preserve live routes and required assets, and keep
+inactive applications inactive; see the [migration defaults](upgrade-and-migration.md).
+Unknown activity does not authorize disabling a site or deleting retained data.
+
+Lighttpd configuration collection is bounded to 200 files, 16 include levels,
+256 KiB per file, 2 MiB total and a five-second token scan; the parser has a
+separate ten-second limit. It rejects include cycles and paths escaping the
+configuration tree. Asset sampling retains at most 20 top-level script paths
+per distinct document root. Handler scripts are inspected only for a bounded
+first-line shebang, and are never executed. These reads still require the
+job's sensitive-data permission for configuration, selected process metadata
+and any script metadata; output redaction does not grant permission to read.
+
+## Other inventory coverage
+
 Mail-storage discovery covers these standard layouts:
 
 | Hosting panel/layout | Mail storage |
@@ -78,6 +138,14 @@ locations before measuring. Custom paths can therefore be reported with unknown
 size. Keep mailbox size unknown until the missing measurements are completed.
 
 Potential compromise indicators appear as `security_indicator` records in text and JSON.
+Process collectors validate the requested numeric columns and names even when
+`ps` exits successfully. Empty, header-only, PID-only and malformed snapshots
+produce warnings and mark core collection incomplete. The name collector can
+fall back to bounded `/proc/PID/status` Name/Pid metadata, without arguments or
+environment reads. Partial name coverage can establish an observed process;
+absence leaves activity unknown. Indicator collection keeps positive findings
+from valid rows while reporting malformed rows as a coverage gap; it never
+reports a malformed snapshot as a clean security result.
 The process check flags shell redirection or `tee` targeting sudoers, Base64 decoding
 piped to a shell, kernel-thread-style names with a nonzero UID or userspace memory,
 and executable or interpreter-script paths under `/tmp`, `/var/tmp` or `/dev/shm`.

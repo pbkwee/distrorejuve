@@ -80,6 +80,18 @@ licences, TLS, mail delivery, IP restrictions and application/database conversio
 Known compromise may require a clean build and selective recovery. Review copied
 content and investigate security risks beyond the inventory's selected indicators.
 
+By default, keep currently live websites live with their existing behaviour, and
+keep inactive websites and applications inactive. List each site's hostname,
+document root, actual handler/application, runtime and observed activity, with
+evidence. Installed runtimes, retained code, enabled legacy startup links or an
+`active (exited)` wrapper do not prove that an application is serving requests.
+An unreachable page or missing process in a single sample does not establish
+inactivity. CGI processes can exist only while handling a request. Keep conflicting
+or incomplete activity evidence unknown.
+Distinguish static downloads from programs the web server executes. Preserve
+required symlink targets and data; inactivity does not authorize deletion.
+Reactivating an old site or application requires an explicit scope decision.
+
 Prefer in-place work when the supported transition, workload compatibility,
 resources, credible recovery and accepted outage make it straightforward.
 Choose a clone or fresh build for concrete compatibility, recovery or rehearsal
@@ -87,6 +99,38 @@ benefits. Base the choice on supported transitions, workload needs and recovery
 evidence; investigate material unknowns. Explain
 what further evidence would change the recommendation and respect the requested
 route by obtaining agreement before changing it.
+
+### Assessing an architecture crossgrade
+
+Distrorejuve includes i386-to-amd64 conversion. Needing that conversion does not
+by itself rule out an in-place upgrade. Treat it as a planned stage and evaluate
+it with the rest of the job. A 64-bit kernel with a 32-bit userland is relevant
+positive evidence, not proof that package conversion and every application will
+work. Hardware that cannot run the target remains a separate constraint.
+
+The current `--crossgrade` release-upgrade path plans conversion at Debian 12
+or Ubuntu 18.04 before moving beyond native i386 support. It requires a running
+`x86_64` kernel. Ubuntu also has an explicit experimental opt-in. Verify the
+selected revision's [options](usage.md), checkpoint and completion checks;
+do not apply a blanket experimental label to every possible conversion route.
+
+| Factor | Evidence to assess and effect on the decision |
+| --- | --- |
+| Release and package state | Establish the actual starting release, repository coverage, package health and intermediate releases. A collector's failed release detection calls for diagnosis; it does not establish an impossible upgrade. |
+| Required workloads | Check application/runtime/database transitions, native binaries, extensions and panel support. Distinguish programs that must execute from inactive retained data and static downloads. |
+| Capacity | Measure transaction space, inodes and memory at each stage. Consider approved disk expansion or other preparation before treating current headroom as a permanent limit. |
+| Boot and access | Verify CPU/kernel compatibility, provider boot selection, networking, administrative access and recovery console. Verify native packages and userland after conversion, then verify boot and services. |
+| Recovery and test evidence | Establish backup coverage, restore readiness and how failures or new writes would be recovered. Identify what a rehearsal on a copy would resolve and its added work. |
+| Customer impact | Compare production outage, IP/dependency changes, data refresh, acceptance before switching, labour and temporary hosting costs. Respect the customer's preference where the route is practical. |
+
+Separate a demonstrated incompatibility from an untested step or a remediable
+prerequisite. If a tool change is needed, identify the defect, owner and isolated
+validation needed before execution. Do not assume a future fix is already
+validated, or dismiss the in-place route because that fix is still pending.
+State the findings that favour the recommended route and what evidence would
+change it. A clean build may be simpler for a small static workload; an in-place
+upgrade may avoid copying a large working application and changing its IP.
+Neither follows from architecture alone.
 
 ### Choosing a distro for a clean install
 
@@ -109,7 +153,8 @@ Old-OS release hops are unnecessary; application/database conversions may still
 need stages. For an in-place or cloned-OS upgrade, establish each intermediate
 release and panel transition from official supported paths. Do not trust the
 script's embedded `--to-latest` endpoint as today's latest release. Crossgrades
-are experimental and need a separately established route. Verify a supported
+need a job-specific stage and completion checks under the
+[crossgrade assessment](#assessing-an-architecture-crossgrade). Verify a supported
 RPM major-release upgrade procedure separately from inventory and package updates.
 Legacy-runtime containment can be considered within scope, with its remaining
 security and maintenance limits explained; it is not automatic modernization.
@@ -222,6 +267,12 @@ workers, database events, containers, payments, callbacks, monitoring and backup
 jobs that could affect production. A broad HTTP/HTTPS exception still permits
 callbacks; arrange controlled package retrieval. Keep the live source authoritative.
 Use a vendor migration sequence where required, checking its source/DNS side effects.
+Carry the observed site/application activity into the destination configuration;
+do not enable dormant virtual hosts, handlers or legacy startup scripts merely
+because their files were copied or their packages were installed.
+Include acceptance checks for live routes, redirects, downloads and required
+asset paths, and verify that inactive applications remain inactive. Retain
+inactive code/data according to the agreed recovery and retention scope.
 
 Upgrade a clone through its supported transitions, or build fresh and migrate
 selected applications/data. Test a repeatable refresh before customer review.

@@ -47,11 +47,13 @@ establishes the preferred working key. On a modern server, omit the RSA identity
 Run on the newer computer; uncomment only exceptions required by this old server:
 
 ```bash
+JOB_ID=UPG-EXAMPLE
+KEY_DIRECTORY="$HOME/.ssh/$JOB_ID"
 SSH_OPTS=(
   -F /dev/null
   -o IdentitiesOnly=yes
-  -i "$HOME/.ssh/server-migration-example"
-  -i "$HOME/.ssh/server-migration-example-rsa"
+  -i "$KEY_DIRECTORY/assessment-ed25519"
+  -i "$KEY_DIRECTORY/assessment-rsa"
   # -o PubkeyAcceptedAlgorithms=+ssh-rsa
   # -o HostKeyAlgorithms=+ssh-rsa
   # -o KexAlgorithms=+diffie-hellman-group14-sha1
@@ -62,8 +64,9 @@ scp -O "${SSH_OPTS[@]}" distrorejuve.sh root@OLD_SERVER:/root/distrorejuve.sh
 ssh "${SSH_OPTS[@]}" root@OLD_SERVER
 ```
 
-Replace `OLD_SERVER` with the intended address. Use only the options required by
-its negotiation errors. Use the same array for downloads and later reconnects;
+Replace `UPG-EXAMPLE` with the assigned job ID and `OLD_SERVER` with the intended
+address. Use the key directory prepared in the linked SSH setup. Use only the
+options required by its negotiation errors. Use the same array for downloads and later reconnects;
 `-F /dev/null` excludes user/system SSH configuration. Add any agreed bastion or
 known-hosts options explicitly; for a custom port add `-o Port=2222` for both tools.
 `-O` selects

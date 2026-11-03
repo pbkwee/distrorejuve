@@ -9,6 +9,13 @@ Put the assigned `job_id` and report revision in the report header. They must
 match the durable [job record](../../../../docs/job-records.md). Keep request,
 ticket and VM identifiers distinct from the job ID.
 
+Provide a complete customer assessment that the operator can forward. It must
+stand alone without raw manifests, runner paths or another chat. Put detailed
+commands, access troubleshooting and collector diagnostics in a separate
+technical appendix. Link both artifacts from the private job record and keep
+their job ID, revision, recommendation and unresolved conditions consistent.
+Distinguish the report date from the evidence date when reusing an assessment.
+
 ## Customer explanation
 
 Use plain English, short paragraphs and descriptive headings. Explain technical
@@ -32,6 +39,13 @@ Cover these questions in this order, combining sections for simple cases:
    Include the OS and relevant application/database/panel versions. Distinguish
    observed, customer-reported and inferred facts; mark missing facts as unknown.
    Say what should continue unchanged and what users may need to do differently.
+   Name the websites and distinguish currently live sites from inactive retained
+   applications. Default to preserving the live sites and their behaviour while
+   leaving inactive sites and applications inactive. File presence, an installed
+   runtime or an exited startup wrapper is not proof of live use. Note required
+   symlink targets and separate retention decisions; do not infer deletion or
+   reactivation authority from inactivity. Keep uncertain activity unknown and
+   name the missing check instead of proposing to disable that site.
    Explain relevant support/security changes from current official evidence,
    including obsolete components that would remain after the upgrade. An OS
    upgrade does not automatically modernize custom applications or containers.
@@ -66,7 +80,7 @@ with no second-server copy, changing-data resync or traffic cutover. State that
 production changes happen before the customer can test the upgraded result.
 
 Choose **a separate copy or fresh server** when specific findings justify rehearsal
-or rebuilding: incompatible architecture, unsupported panel transitions, substantial
+or rebuilding: hardware incompatible with the target, unsupported panel transitions, substantial
 application/database changes, or important behaviour that needs testing before
 production changes. Multiple release hops can add risk but do not mandate a copy.
 Explain what this route helps test and what it does not solve. Account for copied
@@ -83,6 +97,17 @@ Explain why the other route is less suitable and what finding would change the
 recommendation. If neither is presently feasible, say so and identify the next check.
 For original-server image replacement, explain the overwrite, final verification
 and temporary-VM retirement. For a DNS/traffic switch, the prepared VM stays live.
+
+An i386-to-amd64 crossgrade is a candidate in-place stage, rather than an
+automatic reason to rebuild. Distrorejuve includes this path; verify its actual
+revision, prerequisites and application support for the job. Treat a needed tool
+fix as named work with an owner and validation, rather than assuming conversion
+will remain unavailable. Distinguish implemented capability, evidence from other
+jobs and an untested route on this source. Use the
+[crossgrade assessment](../../../../docs/upgrade-and-migration.md#assessing-an-architecture-crossgrade)
+to weigh release/package state, workload compatibility, capacity, boot/access,
+recovery, outage and customer preferences together. Explain which findings
+actually decide the route and which are remediable prerequisites.
 
 Distinguish **clean installation on a new server** from upgrading a clone.
 Explain when rebuilding avoids obsolete OS state or unsupported transitions,

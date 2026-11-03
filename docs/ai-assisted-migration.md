@@ -67,18 +67,40 @@ First agree which server it may inspect and what discovery includes.
 
 Use an existing authorized connection where suitable. Otherwise the operator
 creates job-specific keys on the machine making the SSH connection and keeps
-both private keys there. Generate Ed25519 for modern servers and RSA for older
-ones, using unused filenames and a passphrase for each key:
+both private keys there. Prepare Ed25519 and RSA before the first source login,
+so the administrator can install the suitable public key without another setup
+round. Check for existing approved job keys before creating replacements.
+Use Ed25519 for modern servers and RSA for older ones, with a passphrase for each.
+
+Replace `UPG-EXAMPLE` with the job's already assigned ID from `job.md`. Use a new,
+unused key directory; do not overwrite existing keys. The comments identify the
+upgrade-assessment purpose and job, without customer names or addresses:
 
 ```bash
-ssh-keygen -t ed25519 -f "$HOME/.ssh/server-migration-example" -C 'server-migration-example-ed25519' &&
-ssh-keygen -t rsa -b 3072 -f "$HOME/.ssh/server-migration-example-rsa" -C 'server-migration-example-rsa'
+JOB_ID=UPG-EXAMPLE
+KEY_DIRECTORY="$HOME/.ssh/$JOB_ID"
+(
+  umask u=rwx,go=
+  mkdir -p -- "$HOME/.ssh" &&
+  chmod u=rwx,go= -- "$HOME/.ssh" &&
+  mkdir -- "$KEY_DIRECTORY" &&
+  ssh-keygen -t ed25519 -f "$KEY_DIRECTORY/assessment-ed25519" \
+    -C "upgrade-assessment $JOB_ID ed25519" &&
+  ssh-keygen -t rsa -b 3072 -f "$KEY_DIRECTORY/assessment-rsa" \
+    -C "upgrade-assessment $JOB_ID rsa"
+)
 ```
 
 Run this on a modern operator machine, not the old source. Ed25519 support arrived
 in [OpenSSH 6.5 in 2014](https://www.openssh.org/txt/release-6.5); a typical 2005
 server needs RSA. The private-key file format is read by the connecting client,
-so an old remote server does not require `-m PEM`. Use an SSH agent when appropriate.
+so an old remote server does not require `-m PEM`. Use an identified, authorized
+SSH agent when appropriate. On a shared machine, do not borrow another session's
+agent because its socket has the same Unix owner or client IP. Ask the operator
+to identify the socket and expected public fingerprint, or use the job's keys.
+If the operator authorizes named candidates despite unknown provenance, record
+that exception privately against this job, target and operation. Do not carry it
+forward as permission to borrow other agents on future jobs.
 
 Give the administrator only the public `.pub` files. Install Ed25519 on modern
 servers; add the RSA public key on a legacy source. Both public keys may be added
@@ -91,18 +113,63 @@ and file belong to that account. For a conventional setup, their permissions are
 account for assessment. Privileged discovery or later execution needs separately
 agreed access; a key alone does not grant sudo or make operations read-only.
 
+Offer installation commands with the public keys. If an existing authorized
+login works from the operator machine, the administrator can use:
+
+```bash
+ssh-copy-id -i "$KEY_DIRECTORY/assessment-ed25519.pub" ACCOUNT@SERVER
+ssh-copy-id -i "$KEY_DIRECTORY/assessment-rsa.pub" ACCOUNT@SERVER
+```
+
+Replace `ACCOUNT` and `SERVER` with the verified source login. Add the tested
+port, known-hosts and any necessary per-source legacy options to both commands.
+These commands change access; run them only with the administrator's authority.
+If the operator machine cannot yet log in, supply just the two single-line
+`.pub` contents. The administrator can append them from an existing trusted
+session on the source, running as the intended account:
+
+```bash
+mkdir -p -- "$HOME/.ssh" &&
+chmod u=rwx,go= -- "$HOME/.ssh" &&
+touch -- "$HOME/.ssh/authorized_keys" &&
+chmod u=rw,go= -- "$HOME/.ssh/authorized_keys" &&
+printf '\n%s\n' 'PASTE_ED25519_PUBLIC_KEY_LINE_HERE' \
+  'PASTE_RSA_PUBLIC_KEY_LINE_HERE' >> "$HOME/.ssh/authorized_keys"
+```
+
+Replace both placeholder lines before running. Preserve existing entries and
+any managed-key policy. Do not change another account's files or copy private
+keys to the source. A comment is an audit label, not a technical access limit;
+record allowed operations, expiry/removal ownership and public fingerprints in
+the private job. Keep these key paths for the tests and legacy examples below.
+After successful creation, obtain the fingerprints from the public files:
+
+```bash
+ssh-keygen -lf "$KEY_DIRECTORY/assessment-ed25519.pub"
+ssh-keygen -lf "$KEY_DIRECTORY/assessment-rsa.pub"
+```
+
+The explicit `-i` connection examples below use the private files directly and
+can prompt for their passphrases. If an agent is needed for unattended collection,
+load only these job keys into an identified, authorized agent. Never add keys to
+an agent of unknown ownership or remove its other identities.
+
 Give the operator the SSH address, port, username and a host-key fingerprint
 obtained through a trusted route such as the hosting provider console. The operator
 compares that fingerprint and checks the connected server's identity. A changed
 or unexplained key must be resolved before continuing. Keep console/recovery
 access available. Agree when the job key will be removed; a comment on a key
 does not make it expire automatically. Remove both job keys wherever installed
-when access ends.
+when access ends. Match their recorded public fingerprints and comments; retain
+unrelated entries. Remove these specific keys from any agent used for the job
+with `ssh-add -d KEY_FILE`, using that agent's scoped socket. Then remove the
+job's local private-key files under the agreed retention policy. Record
+completion and any outstanding access.
 
 Test Ed25519 first, replacing `ACCOUNT` and `SERVER` with the agreed login:
 
 ```bash
-ssh -F /dev/null -o IdentitiesOnly=yes -i "$HOME/.ssh/server-migration-example" ACCOUNT@SERVER
+ssh -F /dev/null -o IdentitiesOnly=yes -i "$KEY_DIRECTORY/assessment-ed25519" ACCOUNT@SERVER
 ```
 
 `-F /dev/null` excludes configured identities from this test. Add agreed port,
@@ -127,6 +194,13 @@ recommendation from a plan ready to approve.
 | Upgrade in place | Change the existing server's OS and applications through supported steps. | A straightforward supported upgrade with acceptable downtime and credible recovery. |
 | Upgrade a separate copy | Copy the existing installation, upgrade it separately, test, then transfer final data and switch. | You need to rehearse the existing setup before changing production. |
 | Build a fresh server | Install a supported OS and applications, then migrate selected data and reviewed settings. | Rebuilding is simpler or better supported than carrying the old OS forward. |
+
+A change from 32-bit to 64-bit can form part of an in-place upgrade using
+distrorejuve. It does not automatically require another server. The recommendation
+should weigh the actual package state, applications, resources, recovery,
+interruption and costs. The operator must distinguish a planned conversion
+from a route already verified for this server; see the
+[crossgrade assessment](upgrade-and-migration.md#assessing-an-architecture-crossgrade).
 
 A separate server may be at your current hosting provider, another hosting provider, or
 [RimuHosting](rimuhosting.md). A clean install needs application migration;

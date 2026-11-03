@@ -77,5 +77,8 @@ Offline regression checks (no production operations):
 ```sh
 bash -n distrorejuve.sh
 python3 tests/test-upgrade-review.py
+python3 tests/test-manifest-processes.py
+python3 tests/test-lighttpd-parser.py
+python3 tests/test-lighttpd-manifest.py
 shellcheck -S error distrorejuve.sh
 ```

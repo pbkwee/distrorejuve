@@ -72,6 +72,7 @@ manifest_fpm_versions=()
 manifest_fpm_packages=()
 manifest_fpm_users=()
 manifest_web_indicators() {{ :; }}
+manifest_http() {{ :; }}
 packages_output_file_owner() {{ return 1; }}
 packages_output_inventory() {{ return 1; }}
 {setup}
@@ -82,6 +83,17 @@ printf '],"core_failed":%s}}\\n' "$manifest_collection_failed"
         result = subprocess.run(['bash'], input=script, text=True, capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
+
+    def test_application_keeps_version_provenance_and_execution(self):
+        self.frontend()
+        self.write('/srv/www/wp-includes/version.php', '$wp_version = "6.5.3";\n')
+        data = self.collect()
+        application = next(r for r in data['records'] if r['type'] == 'application')
+        self.assertEqual(application['version'], '6.5.3')
+        self.assertEqual(application['version_file'], '/srv/www/wp-includes/version.php')
+        self.assertEqual(application['discovery'], 'configured_document_root')
+        self.assertEqual(application['site_mapping'], 'configured_document_root')
+        self.assertEqual(application['execution'], 'static_file_only')
 
     def test_static_sites_frontend_and_unreferenced_fragment(self):
         self.frontend()

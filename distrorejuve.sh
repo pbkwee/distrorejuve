@@ -11237,6 +11237,9 @@ function manifest_dns() {
 
 # Read version declarations as text. Executing an application file to obtain
 # its version could run customer code, load secrets or change the application during inventory collection.
+# manifest_application /srv/www configured_document_root configured_document_root static_file_only
+# keeps discovery/site_mapping in arguments 2/3 and execution in argument 4.
+# Conventional packaged copies instead use conventional_package_path/unknown.
 function manifest_application() {
   local version_pattern='^[0-9][A-Za-z0-9.+_()\ -]{0,100}$'
   local discovery=${2:-configured_document_root} site_mapping=${3:-configured_document_root}

@@ -88,7 +88,8 @@ manifest_packages
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('package name wordpress version 5.8.3+dfsg1-1', result.stdout)
         self.assertIn('package name wordpress-l10n version 5.8.3+dfsg1-1', result.stdout)
-        self.assertNotIn('wordpress-old', result.stdout)
+        self.assertNotIn('package name wordpress-old', result.stdout)
+        self.assertIn('package_state name wordpress-old version 4.9 architecture all status deinstall ok config-files', result.stdout)
 
 
 if __name__ == '__main__':

@@ -35,6 +35,16 @@ manifest_process_indicators
 printf 'failed=%s\\n' "$manifest_collection_failed"
 ''')
 
+    def test_complete_process_snapshot_enables_shared_service_counts(self):
+        result = run(['manifest_process_names'], """
+manifest_run_bounded() { printf '101 lighttpd\\n102 mysqld\\n'; }
+manifest_process_names
+printf 'available=%s\\n' "$manifest_processes_available"
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        self.assertIn('available=true', result.stdout)
+
     def test_zero_exit_does_not_validate_malformed_snapshots(self):
         for snapshot in ['', ',ppid=,uid=,vsz=,args=\n                1\n                2\n              521',
                          'PID PPID UID VSZ COMMAND', '0 1 0 9000 nginx', '101 1 0 9000']:

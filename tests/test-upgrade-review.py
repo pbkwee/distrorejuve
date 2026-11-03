@@ -89,6 +89,7 @@ crossgrade_debian() {
 }
 upgrade_prepare_nss_lookup() { :; }
 upgrade_precondition_checks() { :; }
+upgrade_check_target_init_plan() { :; }
 apt_sources_prepare() { :; }
 check_usrmerge() { :; }
 upgrade_prepare_php_source_retry() { :; }
@@ -570,6 +571,7 @@ apt_state_updated=
 apt_package_lock_warn() {{ :; }}
 pause_check() {{ :; }}
 apt_configure_archive_authentication() {{ :; }}
+apt_repair_debian_signing_keys() {{ :; }}
 apt_state_output_signature() {{ printf '%s-state\n' "$1"; }}
 apt-cache() {{ :; }}
 apt-get() {{
@@ -1695,6 +1697,7 @@ manifest_website apache example.test 80 false /var/www/missing www-data unknown 
             result = run(['manifest_config_files', 'manifest_read_metadata', 'manifest_websites'], f'''
 manifest_root={directory!r}
 manifest_website() {{ printf '%s\n' "$*"; }}
+manifest_lighttpd_websites() {{ :; }}
 manifest_websites
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)

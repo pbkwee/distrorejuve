@@ -77,6 +77,23 @@ extension packages are listed separately. Common RPM Apache, Remi and SCL PHP
 configuration paths are included. Runtime associations are inferred from package
 ownership and configuration. Check live processes separately to identify their loaded code.
 
+`package_state` records retain every known installed, partial or configuration-only
+package with its version, architecture and full selection/state. For example,
+`install ok config-files` (shown as `ic` by dpkg) retains configuration but is not
+an installed interpreter. These records enable original-to-final package comparisons
+without inferring application use from package names. Existing selected runtime
+and daemon records remain separate.
+
+On APT/dpkg hosts, `package_review` records reuse the availability classification
+used by `--show-changes` and `--upgrade-report`: obsolete, unavailable, transitional
+or incomplete. Collection uses existing indexes and recorded release provenance;
+it never refreshes indexes, installs a helper or removes packages. Freshness and
+removal safety remain unverified, and failures produce an explicit unknown probe.
+Fixture roots do not use the operator host's APT indexes. These records contain
+package metadata and fixed reasons, not repository credentials or configuration
+diffs. Config sidecar contents, protocol tests and application acceptance remain
+separate, scoped review steps. See [handoff commands](handoff-reports.md).
+
 Mail-storage discovery covers these standard layouts:
 
 | Hosting panel/layout | Mail storage |

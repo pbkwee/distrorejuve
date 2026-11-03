@@ -184,6 +184,15 @@ evidence, console/rescue access, retention and compatible startup order.
 Include expanded data size, dumps, extraction caches, inodes and transfer time
 in capacity planning. Never test a restore over the live source.
 
+For routine provider snapshots, keep services running by default. Explain that
+the recovery point may be crash-consistent rather than application-consistent.
+A customer may optionally provide service pauses, database-native coordination
+or quiescing hooks. Do not require a pause choice or offer for every snapshot.
+Use additional consistency measures when the actual workload requires them;
+agree affected writers and downtime, and record the chosen method and limits.
+An existing approved pause plan still applies to that job. Verify resumption of
+the original services after a pause, including when backup creation fails.
+
 Capture application baselines before changes: representative pages at wide and
 narrow widths, browser errors, login and business transactions, database access,
 mail and jobs as relevant. Inspect screenshots rather than relying on HTTP 200.
@@ -288,6 +297,21 @@ Use the [completion report guide](../.agents/skills/server-upgrade/references/co
 for the owner report and sysadmin handoff. Describe the actual state changes,
 key actions, checked results and server-specific follow-up. Keep full retry logs
 private; omit generic work that has no effect on this server.
+
+Complete the [before/after review](upgrade-review.md#beforeafter-review) using
+the original job evidence and final state, including the post-reboot state.
+Verify the identity/date of the baseline selected by `--show-changes`, keep raw
+output private and extract only approved non-secret findings. Account for
+preparation changes before that baseline. Review package removals/replacements,
+retained unavailable packages, services/listeners, configuration replacement and
+boot/network differences. Separate expected changes and existing faults from
+regressions and unknowns. Add material customer impacts to the owner handoff and
+technical evidence, acceptance checks and owners to the sysadmin handoff. Missing
+original configuration evidence limits what can be claimed as an upgrade change.
+Use the [handoff command reference](handoff-reports.md) for evidence collection
+after changes and reboot. Complete or explicitly defer
+[package cleanup](upgrade-review.md#package-cleanup-at-completion) with a reason
+and owner before closing the technical report.
 
 Check real application functions, errors, mail, jobs, resources, boot/SSH,
 monitoring and a usable destination backup. Record customer acceptance, remaining

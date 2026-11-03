@@ -6,7 +6,8 @@
 function environment_validate_settings() {
   local name value
   for name in DR_ALLOW_BACKPORTS DR_ALLOW_CROSSGRADE_BLOCKERS DR_ALLOW_UNAUTHENTICATED_ARCHIVES \
-      DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_HTTP DR_MANIFEST_MAIL_METRICS DR_PREFER_PACKAGED_USRMERGE_FILES \
+      DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_HTTP DR_MANIFEST_MAIL_METRICS \
+      DR_UPGRADE_MANIFEST DR_PRECOMPILED_LOCALES DR_PREFER_PACKAGED_USRMERGE_FILES \
       DR_PURGE_INCOMPATIBLE_PACKAGES DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES DR_REMOVE_X11_PACKAGES \
       DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK DR_SKIP_DISK_SPACE_CHECK DR_SKIP_DOVECOT_MIGRATION_CHECK \
       DR_SKIP_KERNEL_CHECK DR_SKIP_OLD_PACKAGE_CHECK DR_SKIP_X11_CHECK DR_UNPRIVILEGED; do
@@ -143,6 +144,10 @@ DNS checks are enabled by default; DR_MANIFEST_DNS=false skips them.
 DR_MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
 HTTP/HTTPS HEAD probes run in full collection; DR_MANIFEST_HTTP=false skips them.
 Probes discard headers/body, do not follow redirects, and use bounded connection/total times.
+DR_UPGRADE_MANIFEST=false skips optional automatic application inventories and comparisons during upgrades.
+Required service/runtime checks still read configuration; explicit manifest/report actions are unchanged.
+Debian upgrades prepare locales-all for 100 or more standard configured locales.
+DR_PRECOMPILED_LOCALES=false skips this preparation.
 Website records include the primary configured URL and local certificate-file presence.
 Missing names, indirect configuration and automatically managed certificates may remain unknown.
 Potential compromise indicators include suspicious process commands, kernel-thread name masquerading,
@@ -159,7 +164,8 @@ Run with --list-leftover-packages to see packages that do not belong to the curr
 
 Run with --remove-leftover-packages to remove old packages and 32 bit applications on 64 bit distros.
 
-Run with --remove-deprecated-packages to remove old packages
+Run with --remove-deprecated-packages for guarded obsolete-package cleanup and autoremove.
+Unknown-origin, protected and residual-config packages remain for review; configurations are not purged.
 
 Package authentication is required by default. DR_ALLOW_UNAUTHENTICATED_ARCHIVES=true permits
 unauthenticated installs only while every binary source is an official archived repository.
@@ -189,8 +195,8 @@ DR_REMOVE_X11_PACKAGES enables X11 removal; DR_ENABLE_UBUNTU_CROSSGRADE permits 
 DR_CONFIGURATION_HISTORY_DAYS sets the configuration-history lookback (default 7 days).
 DR_PURGE_INCOMPATIBLE_PACKAGES=false blocks known config-breaking packages before release upgrades.
 Set it to literal true to back them up and purge them; reinstall and configure them manually afterward.
-DR_PREFER_PACKAGED_USRMERGE_FILES=false stops on known executable collisions before a required /usr merge.
-Set it to literal true to privately archive only an unowned conflicting file and retain its packaged counterpart.
+DR_PREFER_PACKAGED_USRMERGE_FILES=true archives an unowned executable collision and keeps its verified packaged counterpart.
+Set it to literal false to require manual resolution. Modified or ambiguous packaged files always stop the merge.
 DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=true removes verified obsolete crossgrade packages after backup.
 Set it to literal false to require their manual removal before starting.
 
@@ -1480,6 +1486,87 @@ function upgrade_precondition_checks() {
 
 # Archive-keyring packages maintain distro trust; never import unrelated keyserver keys.
 # https://www.debian.org/doc/manuals/debian-handbook/sect.package-authentication.en.html
+function apt_debian_archive_key_install() {
+(
+  local name=$1 fingerprint=$2 destination=$3 temporary exported stage='' gpg_command
+  case "$name" in archive-key-10|archive-key-10-security|archive-key-11|archive-key-11-security|archive-key-12|archive-key-12-security|archive-key-13|archive-key-13-security) :;; *) return 1;; esac
+  case "$fingerprint" in *[!0-9A-F]*|'') return 1;; esac
+  [ "${#fingerprint}" -eq 40 ] && [ "${destination#/}" != "$destination" ] && [ ! -L "$destination" ] || return 1
+  if command -v gpg >/dev/null 2>&1; then gpg_command=gpg
+  elif command -v gpg2 >/dev/null 2>&1; then gpg_command=gpg2
+  else echo 'dss:error: GnuPG is required to verify missing Debian archive keys; authentication was not weakened.' >&2; return 1; fi
+  temporary=$(mktemp -d "${TMPDIR:-/tmp}/distrorejuve-key.XXXXXXXX") || return 1
+  trap 'if command -v gpgconf >/dev/null 2>&1; then gpgconf --homedir "$temporary" --kill gpg-agent >/dev/null 2>&1 || :; fi; [ -z "$stage" ] || rm -f -- "$stage"; rm -rf -- "$temporary"' EXIT
+  chmod u=rwx,go= -- "$temporary" || return 1
+  # HTTPS authenticates the publisher; the full primary fingerprint pins the key.
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --silent --show-error --connect-timeout 15 --max-time 45 \
+      --output "$temporary/key.asc" "https://ftp-master.debian.org/keys/$name.asc" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    wget --quiet --timeout=45 --tries=1 --max-redirect=0 --output-document="$temporary/key.asc" \
+      "https://ftp-master.debian.org/keys/$name.asc" || return 1
+  else echo 'dss:error: curl or wget with working HTTPS is required to repair Debian archive keys.' >&2; return 1; fi
+  [ -s "$temporary/key.asc" ] && [ "$(wc -c < "$temporary/key.asc")" -le 1048576 ] || return 1
+  "$gpg_command" --no-options --homedir "$temporary" --batch --import "$temporary/key.asc" > "$temporary/import.log" 2>&1 || return 1
+  exported=$("$gpg_command" --no-options --homedir "$temporary" --batch --with-colons --fingerprint --list-keys "$fingerprint" 2>/dev/null) || return 1
+  # GnuPG colon records: "pub:..." then
+  # "fpr:::::::::80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE:" -> that primary fingerprint.
+  # Require one primary key with the pinned fingerprint, not a signing subkey.
+  printf '%s\n' "$exported" | awk -F: -v expected="$fingerprint" '
+    $1 == "pub" { primary++; next_fingerprint=1; if ($2 == "r" || $2 == "e") bad=1 }
+    $1 == "sub" { next_fingerprint=0 }
+    $1 == "fpr" && next_fingerprint { if ($10 != expected) bad=1; found++; next_fingerprint=0 }
+    END { exit (bad || primary != 1 || found != 1) }
+  ' || { echo 'dss:error: Downloaded Debian key is expired, revoked or does not match its pinned primary fingerprint.' >&2; return 1; }
+  # Export only the pinned primary and its verified subkeys; never trust extra keys in a download.
+  "$gpg_command" --no-options --homedir "$temporary" --batch --export "$fingerprint" > "$temporary/key.gpg" || return 1
+  [ -s "$temporary/key.gpg" ] || return 1
+  mkdir -p -m u=rwx,go=rx -- "${destination%/*}" || return 1
+  stage=$(mktemp "$destination.tmp.XXXXXXXX") || return 1
+  install -m u=rw,go=r -- "$temporary/key.gpg" "$stage" && mv -f -- "$stage" "$destination" || return 1
+  stage=''
+  printf 'dss:info: Installed verified Debian archive key %s (%s).\n' "$name" "$fingerprint" >&2
+)
+}
+
+# Repair known missing official signers, including newer signatures on old archives.
+# Unknown/vendor keys and genuinely expired-only signatures keep their existing failure.
+function apt_repair_debian_signing_keys() {
+  local logfile=$1 missing config records official=false provider type name fingerprint ids key selected found=false _
+  [ -f /etc/debian_version ] || return 0
+  # APT/GPG output "NO_PUBKEY 112695A0E562B32A" -> that public signing ID only.
+  missing=$(LC_ALL=C awk '{ for (i=1;i<NF;i++) if ($i == "NO_PUBKEY" && $(i+1) ~ /^[0-9A-Fa-f]+$/ && length($(i+1)) == 16) print toupper($(i+1)) }' "$logfile" | LC_ALL=C sort -u) || return 1
+  [ -n "$missing" ] || return 0
+  records=$(apt_sources_list) || return 1
+  while IFS=$'\t' read -r _ _ provider type _ _ _ _; do
+    [ "$provider:$type" != debian:deb ] || official=true
+  done <<< "$records"
+  $official || return 0
+  [ -z "${APT_CONFIG:-}${DPKG_ADMINDIR:-}${DPKG_ROOT:-}" ] || return 1
+  config=$(apt-config dump) || return 1
+  apt_config_has_standard_paths "$config" || return 1
+  # Public primary and signing-subkey IDs from Debian's published keys; full fingerprints
+  # are pinned independently of any key IDs supplied by an untrusted repository error.
+  while IFS='|' read -r name fingerprint ids; do
+    selected=false
+    for key in $missing; do case " $ids " in *" $key "*) selected=true;; esac; done
+    $selected || continue
+    found=true
+    apt_debian_archive_key_install "$name" "$fingerprint" "/etc/apt/trusted.gpg.d/distrorejuve-$name.gpg" || return 1
+  done <<'DEBIAN_KEYS'
+archive-key-10|80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE|DC30D7C23CBBABEE 648ACFD622F3D138
+archive-key-10-security|5E61B217265DA9807A23C5FF4DFAB270CAA96DFA|4DFAB270CAA96DFA 112695A0E562B32A
+archive-key-11|1F89983E0081FDE018F3CC9673A4F27B8DD47936|73A4F27B8DD47936 0E98404D386FA1D9
+archive-key-11-security|AC530D520F2F3269F5E98313A48449044AAD5C5D|A48449044AAD5C5D 54404762BBB6E853
+archive-key-12|B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8|B7C5D7D6350947F8 6ED0E7B82643E131
+archive-key-12-security|05AB90340C0C5E797F44A8C8254CF3B5AEC0A8F0|254CF3B5AEC0A8F0 BDE6D2B9216EC7A8
+archive-key-13|04B54C3CDCA79751B16BC6B5225629DF75B188BD|225629DF75B188BD 78DBA3BC47EF2265
+archive-key-13-security|5E04A1E3223A19A20706E20F9904613D4CCE68C6|9904613D4CCE68C6 8E9F831205B4BA95
+DEBIAN_KEYS
+  if $found; then echo 'dss:info: Missing Debian archive signers repaired; retrying authenticated index refresh.' >&2; fi
+  return 0
+}
+
 function apt_ensure_archive_keyring() {
   local package=$1 info status
   if info=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null); then
@@ -3803,7 +3890,7 @@ function upgrade_finish_run() {
   fi
   if [ -f /etc/redhat-release ]; then rpm_packages_finish_run "$@"; return $?; fi
   local action_status=$1 logfile=$2 baseline='' services=2 web_failed=false status category state detail reason audit='' plan=''
-  local findings='' web_complete=false
+  local findings='' web_complete=false comparison_status
   local release='not verified' packages='not verified' cleanup='' php_removals='' service_summary='unknown' package_verified=false
   local directory=${DR_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0 autoremove_skipped=''
   local none=false obsolete_none=false cleanup_done=false missing_provenance=false cleanup_failed=false cleanup_deferred=false
@@ -3906,7 +3993,14 @@ function upgrade_finish_run() {
   fi
   printf 'dss:stage: Cleanup: %s.\n' "${cleanup:-not run (no release transition reached cleanup in this run)}" >&2
   # Inventory changes are observations; package/service checks determine operational success.
-  manifest_compare_baseline "$baseline" || :
+  comparison_status=0
+  manifest_compare_baseline "$baseline" || comparison_status=$?
+  # Application inventory can be excluded or unavailable. Replaced system
+  # conffiles still need a path-only review under the approved config scope.
+  if [ "$comparison_status" -eq 2 ] && [ -n "$baseline" ]; then
+    print_pkg_to_modified_diff review "$baseline" ||
+      echo 'dss:warn: Configuration replacement review is incomplete; inspect the private change report before handoff.' >&2
+  fi
   printf 'dss:stage: Detailed run log: %s\n' "$logfile" >&2
   return "$status"
 }
@@ -4890,6 +4984,26 @@ function usrmerge_is_complete() {
   done
 }
 
+# A package name alone does not establish which copy is safe to retain.
+# Require unchanged package bytes and root-controlled regular files on both sides.
+function usrmerge_collision_is_repairable() {
+  local source=$1 target=$2 owner=$3 current status origin file metadata uid mode
+  [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$target" ] && [ ! -L "$target" ] || return 1
+  current=$(packages_output_file_owner "$source"); status=$?
+  [ "$status" -eq 1 ] || return 1
+  current=$(packages_output_file_owner "$target") && [ "$current" = "$owner" ] || return 1
+  origin=$(packages_output_file_origin "$target" dpkg) || return 1
+  [ "$origin" = "packaged"$'\t'"$owner" ] || return 1
+  for file in "$source" "$target"; do
+    # stat -c '%u %a': "0 755" -> root, no group/other write bits.
+    metadata=$(stat -c '%u %a' -- "$file") || return 1
+    read -r uid mode <<< "$metadata"
+    [ "$uid" = 0 ] || return 1
+    case "$mode" in ''|*[!0-7]*) return 1;; esac
+    [ "$((8#$mode & 0022))" -eq 0 ] || return 1
+  done
+}
+
 # Tab records: archive/manual, unowned/source path, packaged/destination path, owner/reason.
 # shortcut: inspect top-level /bin and /sbin only; library/nested collisions need manual converter recovery.
 function usrmerge_output_collisions() {
@@ -4917,15 +5031,18 @@ function usrmerge_output_collisions() {
       fi
       left=$(packages_output_file_owner "$source"); left_status=$?
       right=$(packages_output_file_owner "$target"); right_status=$?
-      if [ "$left_status:$right_status" = 1:0 ]; then printf 'archive\t%s\t%s\t%s\n' "$source" "$target" "$right"
-      elif [ "$left_status:$right_status" = 0:1 ]; then printf 'archive\t%s\t%s\t%s\n' "$target" "$source" "$left"
-      else printf 'manual\t%s\t%s\townership ambiguous or neither/existing package-owned copies\n' "$source" "$target"; fi
+      if [ "$left_status:$right_status" = 1:0 ] && usrmerge_collision_is_repairable "$source" "$target" "$right"; then
+        printf 'archive\t%s\t%s\t%s\n' "$source" "$target" "$right"
+      elif [ "$left_status:$right_status" = 0:1 ] && usrmerge_collision_is_repairable "$target" "$source" "$left"; then
+        printf 'archive\t%s\t%s\t%s\n' "$target" "$source" "$left"
+      else printf 'manual\t%s\t%s\tunverified ownership, content or permissions\n' "$source" "$target"; fi
     done
   done
 }
 
 function usrmerge_check_collisions() {
-  local prefer=${DR_PREFER_PACKAGED_USRMERGE_FILES:-false} collisions action source target owner blocked=false
+  local prefer=${DR_PREFER_PACKAGED_USRMERGE_FILES:-true} collisions action source target owner blocked=false
+  case "$prefer" in true|false) :;; *) echo 'dss:error: DR_PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
   collisions=$(usrmerge_output_collisions) || return 1
   while IFS=$'\t' read -r action source target owner; do
     [ -n "$action" ] || continue
@@ -4934,7 +5051,7 @@ function usrmerge_check_collisions() {
     else
       echo "dss:error: usrmerge collision: $source and $target ($owner)." >&2
       if [ "$action" = archive ]; then
-        echo 'dss:error: Review the unowned executable; DR_PREFER_PACKAGED_USRMERGE_FILES=true explicitly archives it and keeps the packaged counterpart.' >&2
+        echo 'dss:error: DR_PREFER_PACKAGED_USRMERGE_FILES=false requires manual resolution; true archives the unowned executable and keeps the verified packaged counterpart.' >&2
         usrmerge_preference_needed=true
       fi
       blocked=true
@@ -4959,8 +5076,9 @@ function usrmerge_check_upgrade_path() {
 function usrmerge_archive_collisions() {
 (
   umask 077
-  local collisions=$1 baseline parent directory action source target owner relative current status
+  local collisions=$1 baseline parent directory action source target owner relative
   [ -n "$collisions" ] || return 0
+  [ "${DR_PREFER_PACKAGED_USRMERGE_FILES:-true}" = true ] || return 1
   record_config_state >&2 || return 1
   baseline=$(config_state_output_baseline) || return 1
   parent="$baseline.usrmerge"
@@ -4972,15 +5090,19 @@ function usrmerge_archive_collisions() {
   dpkg-query -W -f='${Package}\t${Architecture}\t${Status}\t${Version}\n' > "$directory/packages.before" || return 1
   while IFS=$'\t' read -r action source target owner; do
     [ "$action" = archive ] || return 1
+    usrmerge_collision_is_repairable "$source" "$target" "$owner" || return 1
     relative=${source#/}
     printf '%s\0' "$relative" >> "$directory/archive-paths" || return 1
+    relative=${target#/}
+    printf '%s\0' "$relative" >> "$directory/archive-paths" || return 1
+    sha256sum -- "$source" "$target" >> "$directory/files.sha256" || return 1
   done <<< "$collisions"
   tar --acls --xattrs -C / -cpf "$directory/files.tar" --null -T "$directory/archive-paths" || return 1
+  # Verify the recoverable copies and reject changes before moving any original.
+  tar --compare --acls --xattrs -C / -f "$directory/files.tar" || return 1
+  sha256sum --check --status "$directory/files.sha256" || return 1
   while IFS=$'\t' read -r action source target owner; do
-    [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$target" ] && [ ! -L "$target" ] || return 1
-    current=$(packages_output_file_owner "$source"); status=$?
-    [ "$status" -eq 1 ] || return 1
-    current=$(packages_output_file_owner "$target") && [ "$current" = "$owner" ] || return 1
+    usrmerge_collision_is_repairable "$source" "$target" "$owner" || return 1
     relative=${source#/}
     mkdir -p -- "$directory/originals/${relative%/*}" || return 1
     mv --no-clobber -- "$source" "$directory/originals/$relative" || return 1
@@ -5006,6 +5128,8 @@ function check_usrmerge() {
   collisions=$(usrmerge_output_collisions) || return 1
   if [ -n "$collisions" ]; then
     usrmerge_archive_collisions "$collisions" || { echo 'dss:error: usrmerge collision backup/move failed; no converter or APT operation attempted. Review the reported backup directory.' >&2; return 1; }
+    collisions=$(usrmerge_output_collisions) || return 1
+    [ -z "$collisions" ] || { echo 'dss:error: New usrmerge collisions appeared; no converter or APT operation attempted. Review the saved attempt before retrying.' >&2; return 1; }
   fi
   if [ -x "/usr/lib/usrmerge/convert-usrmerge" ]; then
     # Retry the packaged converter before APT can configure other packages on a partial merge.
@@ -5057,12 +5181,27 @@ function retain_etc_networking_naming_re_enX0() {
 
 
 # return 0 if a file or two was removed.  e.g. so you can to rm_overwrite_files $tmplog && retry
+function upgrade_database_has_mysql_server() {
+  local records
+  records=$(dpkg-query -W -f='${Package}\t${Status}\n' 2>/dev/null) || return 2
+  # dpkg-query records: "mysql-server-5.0:i386<TAB>deinstall ok config-files"
+  # and "libmariadbclient18<TAB>install ok installed" -> no server.
+  # "mariadb-server-10.5<TAB>install ok half-configured" -> real pending server.
+  printf '%s\n' "$records" | awk -F '\t' '
+    $1 ~ /^(mysql|mariadb)-server(-[0-9]+([.][0-9]+)*)?(:[a-z0-9-]+)?$/ &&
+      $2 ~ / ok (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ { found=1 }
+    END { exit !found }
+  '
+}
+
 function rm_overwrite_files() {
    [  -z "$1" ] && return 1
    [  ! -f "$1" ] && return 1
    local tmplog="$1"
    grep -qF 'dss:error: Cannot capture APT output;' "$tmplog" && return 1
 
+  # Only diagnose real installed/pending servers, never dormant RC data or client libraries.
+  if upgrade_database_has_mysql_server; then
   if egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $tmplog; then
     echo "dss:warn: mysql error.  Trying a mysql_upgrade to resolve."
     mysql_upgrade
@@ -5098,6 +5237,7 @@ function rm_overwrite_files() {
   fi
 
 
+  fi
   if egrep -qi "doveconf: Fatal: " "$tmplog"; then
     # e.g. doveconf: Fatal: Error in configuration file /etc/dovecot/dovecot.conf: ssl enabled, but ssl_cert not set
     echo "dss:error: issue with dovecot config.  Resolve (e.g. by removing dovecot for fixing the issue). $(egrep -i "doveconf: Fatal: " "$tmplog")"
@@ -7586,7 +7726,7 @@ function upgrade_autoremove_packages() {
 )
 }
 
-function apt_packages_print_review() {
+function apt_packages_output_review() {
 (
   [ -f /etc/debian_version ] || return 0
   umask 077
@@ -7616,6 +7756,13 @@ function apt_packages_print_review() {
   fi
   apt_packages_output_classifications "$directory/status" "$native" "$directory/available" "$directory/previous" "$directory/current" \
     > "$directory/classifications" || return 1
+  cat -- "$directory/classifications"
+)
+}
+
+function apt_packages_print_review() {
+  local records
+  records=$(apt_packages_output_review) || return 1
   awk -F '\t' '
     $4 == "obsolete" || $4 == "unavailable" {
       print "dss:warn: Installed package " $1 ":" $2 " (" $3 ") has no versions in active APT indexes. Classification: " $4 ". " $5 ". Review manually and migrate if needed; package preserved."
@@ -7623,8 +7770,50 @@ function apt_packages_print_review() {
     $4 == "transitional" {
       print "dss:info: Transitional package " $1 ":" $2 " (" $3 "). " $5 "; package preserved."
     }
-  ' "$directory/classifications"
-)
+  ' <<< "$records"
+}
+
+# Reuse release-hop cleanup, never the broad apt-show-versions removal helper.
+# Only the recorded transition ending at the current release supplies provenance.
+function upgrade_cleanup_deprecated_packages() {
+  local current family baseline directory from name found=false audit
+  local DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK=false apt_sources_transition_target=''
+  [ -f /etc/debian_version ] || { echo 'dss:error: Guarded deprecated-package cleanup requires APT/dpkg.' >&2; return 1; }
+  current=$(distro_output_codename) || return 1
+  case " $ALL_DEBIAN " in
+    *" $current "*) family=debian;;
+    *) case " $ALL_UBUNTU " in
+      *" $current "*) family=ubuntu;;
+      *) echo 'dss:error: Unknown distro; no cleanup attempted.' >&2; return 1;;
+    esac;;
+  esac
+  audit=$(LC_ALL=C dpkg --audit 2>&1) || return 1
+  [ -z "$audit" ] || { echo 'dss:error: Incomplete package work; finish repair before cleanup.' >&2; return 1; }
+  apt_sources_check_releases_and_vendors || return 1
+  apt_get_update 'before guarded package cleanup' || return $?
+  if baseline=$(config_state_output_baseline); then
+    for directory in "$baseline.obsolete-packages/$family-"*"-to-$current"; do
+      [ -d "$directory" ] && [ ! -L "$directory" ] && [ -f "$directory/prepared" ] || continue
+      name=${directory##*/}; from=${name#"$family-"}; from=${from%"-to-$current"}
+      # Directory "debian-bookworm-to-trixie" -> from=bookworm;
+      # empty, equal or non-release tokens cannot select a cleanup transition.
+      case "$from" in ''|*[!a-z0-9]*) return 1;; esac
+      [ "$from" != "$current" ] || return 1
+      if [ "$family" = debian ]; then
+        case " $ALL_DEBIAN " in *" $from "*) :;; *) return 1;; esac
+      else
+        case " $ALL_UBUNTU " in *" $from "*) :;; *) return 1;; esac
+      fi
+      upgrade_remove_retired_packages "$family" "$from" "$current" || return $?
+      found=true
+    done
+  fi
+  if ! $found; then
+    echo 'dss:warn: No recorded transition to this release; unknown-origin obsolete packages are preserved.' >&2
+  fi
+  upgrade_autoremove_packages || return $?
+  apt_packages_print_review || return 1
+  echo 'dss:info: Guarded cleanup finished without purging configs. Review retained packages and residual configuration separately; custom software use is not proven by APT dependencies.' >&2
 }
 
 function print_no_available_versions() {
@@ -7777,10 +7966,9 @@ function tweak_broken_configs() {
   # => mkdir /var/run/sshd
   # FIXME: https://wiki.debian.org/ReleaseGoals/RunDirectory
   # => do we need to if -d /var/run; then mv -f /var/run/* /run/; rm -rf /var/run; ln -s /run /var/run; fi
-  # Preserve removed database services and their data. For example, dpkg -l can
-  # report "rc mysql-server-5.7" alongside "ii mysql-server-core-5.7"; this is
-  # retained configuration, not an instruction to install the target server.
-  # Database package selection belongs to the approved database migration plan.
+  # Removed/configuration-only server records and installed client libraries do
+  # not establish a database workload. Never recreate a server from those clues;
+  # missing-server recovery needs the approved package/service provenance.
 
   #Failed because this line in /etc/mysql/my.cnf.migrated
   #log_slow_queries      = /var/log/mysql/mysql-slow.log
@@ -7789,7 +7977,7 @@ function tweak_broken_configs() {
   #slow_query_log_file             = /var/log/mysql/mysql-slow.log
   #find /var/log -type f | xargs --no-run-if-empty grep log_slow | grep ERROR
   #/var/log/daemon.log:Apr  6 19:14:44 examplehost mysqld_safe[13273]: 2020-04-06 19:14:44 3079187200 [ERROR] /usr/sbin/mysqld: unknown variable 'log_slow_queries=/var/log/mysql/mysql-slow.log'
-  if [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
+  if upgrade_database_has_mysql_server && [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
     echo "dss:info: Disabling log_slow settings, they are now slow_query_log"
     [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs --no-run-if-empty grep -l '^log_slow'); do
       sed -i 's/^log_slow/#log_slow/' "$file" || return $?
@@ -7823,7 +8011,13 @@ exit 0' > "$i" || return 1
     # dpkg -l | grep '/dev'
     # ii  makedev                          2.3.1-93                       all          creates device files in /dev
     # rc  udev                             232-25+deb9u1                  i386         /dev/ and hotplug management daemon
-    if dpkg -l | grep -qai '^ii.*udev-'; then break; fi
+    local udev_state udev_status
+    if udev_state=$(dpkg-query -W -f='${Status}' udev 2>/dev/null); then
+      case "$udev_state" in 'install ok installed'|'hold ok installed') break;; esac
+    else
+      udev_status=$?
+      [ "$udev_status" -eq 1 ] || return "$udev_status"
+    fi
 
     apt_get_install udev
     ret=$?
@@ -8061,7 +8255,10 @@ function print_pkg_to_modified_diff() {
       '') continue;;
       *) echo 'dss:warn: Unrecognized package conffile metadata; configuration verification is incomplete.' >&2; report_status=1; continue;;
     esac
-    if [ "$mode" = review ]; then case "$package_status" in *' ok installed') :;; *) continue;; esac; fi
+    # dpkg-query can return both installed amd64 and removed i386 records for
+    # one path. "Package: libpam-modules:i386<TAB>deinstall ok config-files"
+    # carries an obsolete digest, not an active configuration to compare.
+    case "$package_status" in *' ok installed') :;; *) continue;; esac
     # Retired conffiles are not shipped, including newconffile remove-on-upgrade records.
     # " /etc/ssh/sshd_config 0123456789abcdef0123456789abcdef" -> absolute path plus trailing MD5.
     # A trailing obsolete or remove-on-upgrade marker skips the record before checksum extraction.
@@ -8143,7 +8340,7 @@ function print_minimal_config_diff() {
 }
 function print_config_state_changes() {
   prepare_output_dir
-  local availability_ret=0 report_status now fromfile=$1 file files post_recorded=false
+  local availability_ret=0 report_status now fromfile=$1 file files post_recorded=false comparison_status
   local -a pipeline_status=()
   apt_packages_print_review || availability_ret=$?
   if ! now=$(date +%s); then
@@ -8172,7 +8369,13 @@ function print_config_state_changes() {
       [ "$availability_ret" -ne 0 ] || availability_ret=1
     fi
   fi
-  manifest_compare_baseline "$fromfile" || :
+  comparison_status=0
+  manifest_compare_baseline "$fromfile" || comparison_status=$?
+  if [ "$comparison_status" -eq 2 ]; then
+    print_pkg_to_modified_diff review "$fromfile" || {
+      report_status=$?; [ "$availability_ret" -ne 0 ] || availability_ret=$report_status;
+    }
+  fi
   print_pkg_to_modified_diff '' || { report_status=$?; [ "$availability_ret" -ne 0 ] || availability_ret=$report_status; }
   if [ -d /etc/apache2/sites-available ] && [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include.*sites-.*conf' /etc/apache2/apache2.conf; then
     if files=$(find /etc/apache2/sites-available -type f ! -name '*.conf' ! -name '*dpkg-*'); then
@@ -8321,10 +8524,20 @@ if [ "$ret" -eq 0 ] && apt_get_update_has_failed_indexes "$tmplog"; then
   ret=1
   echo 'dss:warn: APT returned success with failed index downloads; retrying refresh before package selection.' >&2
 fi
+# Old APT can exit zero after rejecting an index and retaining stale lists.
+# "W: ... NO_PUBKEY 112695A0E562B32A" is a failed authenticated refresh,
+# even without an exit-100 error; never advance using its unauthenticated packages.
+if [ "${apt_archive_authentication_enabled:-false}" != true ] &&
+    grep -Eq '(^|[[:space:]])(NO_PUBKEY|EXPKEYSIG|REVKEYSIG|BADSIG|KEYEXPIRED)([[:space:]]|$)' "$tmplog"; then ret=100; fi
 
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
 if [ "$ret" -ne 0 ]; then
   local -a release_options=()
+  if ! apt_repair_debian_signing_keys "$tmplog"; then
+    echo 'dss:error: Automatic Debian signing-key repair failed; package authentication remains required.' >&2
+    rm -f -- "$tmplog"
+    return 1
+  fi
   # E: Repository 'URI suite InRelease' changed its 'Suite' value from 'stable' to 'oldstable'
   # Quoted fields 6/8 must age together in EVERY repository, preserving pocket suffixes.
   # https://manpages.debian.org/trixie/apt/apt-get.8.en.html#allow-releaseinfo-change
@@ -8339,9 +8552,13 @@ if [ "$ret" -ne 0 ]; then
     release_options=(-o Acquire::AllowReleaseInfoChange::Suite=true)
   fi
   echo "dss:stage: Retrying index refresh over IPv4 after APT update failed (status $ret)" >&2
+  # The outer run log retains both attempts. Inspect only the final refresh for
+  # remaining signature failures and cacheability after a successful key repair.
   LC_ALL=C apt-get $APT_GET_INSTALL_OPTIONS -o Acquire::ForceIPv4=true "${release_options[@]}" update 2>&1 | tee "$tmplog"
   update_status=("${PIPESTATUS[@]}")
   ret=${update_status[0]}
+  if [ "${apt_archive_authentication_enabled:-false}" != true ] &&
+      grep -Eq '(^|[[:space:]])(NO_PUBKEY|EXPKEYSIG|REVKEYSIG|BADSIG|KEYEXPIRED)([[:space:]]|$)' "$tmplog"; then ret=100; fi
 fi
 if [ "$ret" -eq 0 ] && [ "${update_status[1]}" -ne 0 ]; then
   ret=${update_status[1]}; phase=index_log_capture
@@ -8394,6 +8611,96 @@ function apt_get_autoremove() {
   apt_get_apply $APT_GET_INSTALL_OPTIONS autoremove
 }
 
+# Return a count only when both configured and available locales are standard.
+# locale.gen/SUPPORTED: "en_US.UTF-8 UTF-8" -> one selection;
+# locale -a: "en_US.utf8" -> that supported name. C/C.utf8/POSIX are built in.
+# An unknown configured pair or available name -> 0 (keep local generation).
+function upgrade_locales_output_standard_count() {
+  local supported=$1 configuration=$2 available=$3
+  LC_ALL=C awk '
+    function normalized(name) { name=tolower(name); gsub(/-/, "", name); return name }
+    FILENAME == ARGV[1] {
+      if (NF == 2) {
+        supported[$1 SUBSEP $2]=1; names[normalized($1)]=1
+        # SUPPORTED "de_DE@euro ISO-8859-15" also permits the locale -a
+        # codeset alias "de_DE.iso885915@euro".
+        base=$1; modifier=""
+        if (match(base, /@.*/)) { modifier=substr(base, RSTART); base=substr(base, 1, RSTART-1) }
+        if (base !~ /[.]/) names[normalized(base "." $2 modifier)]=1
+      }
+      next
+    }
+    FILENAME == ARGV[2] {
+      sub(/[ \t]*#.*/, "")
+      if (!NF) next
+      if (NF != 2 || !(($1 SUBSEP $2) in supported)) { custom=1; next }
+      if (!selected[$1 SUBSEP $2]++) count++
+      next
+    }
+    {
+      name=normalized($0)
+      if (name != "c" && name != "c.utf8" && name != "posix" && !(name in names)) custom=1
+    }
+    END { print custom ? 0 : count+0 }
+  ' "$supported" "$configuration" /dev/stdin <<< "$available"
+}
+
+# Install before dpkg can configure locales during a package/release upgrade.
+# Small selections retain generation; locales-all otherwise adds about 200 MiB.
+function upgrade_prepare_debian_locales() {
+  local enabled=${DR_PRECOMPILED_LOCALES:-true} current state status available count native plan before after
+  local -a options=()
+  case "$enabled" in
+    false) return 0;; true) :;;
+    *) echo 'dss:error: DR_PRECOMPILED_LOCALES must be true or false.' >&2; return 1;;
+  esac
+  current=$(distro_output_codename) || return 1
+  case " $ALL_DEBIAN " in *" $current "*) :;; *) return 0;; esac
+  [ -z "${I18NPATH:-}${LOCPATH:-}" ] || return 0
+  [ -r /etc/locale.gen ] && [ -r /usr/share/i18n/SUPPORTED ] || return 0
+  [ ! -s /usr/local/share/i18n/SUPPORTED ] || return 0
+  if state=$(dpkg-query -W -f='${Status}' locales-all 2>/dev/null); then
+    case "$state" in
+      *' ok installed'|*' ok unpacked'|*' ok half-configured'|*' ok half-installed'|*' ok triggers-awaited'|*' ok triggers-pending'|hold*) return 0;;
+    esac
+  else status=$?; [ "$status" -eq 1 ] || return "$status"; fi
+  if state=$(dpkg-query -W -f='${Status}' locales 2>/dev/null); then :
+  else status=$?; [ "$status" -eq 1 ] && return 0; return "$status"; fi
+  [ "$state" = 'install ok installed' ] || return 0
+  available=$(LC_ALL=C locale -a) || return 1
+  count=$(upgrade_locales_output_standard_count /usr/share/i18n/SUPPORTED /etc/locale.gen "$available") || return 1
+  [ "$count" -ge 100 ] || return 0
+  # Optional preparation must not use the archive authentication exception.
+  [ "${DR_ALLOW_UNAUTHENTICATED_ARCHIVES:-false}" != true ] || return 0
+  native=$(dpkg --print-architecture) || return 1
+  case "$native" in ''|*[!a-z0-9-]*) return 1;; esac
+  before=$(sha256sum -- /etc/locale.gen) || return 1
+  read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
+  if ! plan=$(LC_ALL=C apt-get "${options[@]}" -o APT::Get::AllowUnauthenticated=false \
+      -o APT::Get::AutomaticRemove=false --no-remove --no-install-recommends --simulate install "locales-all:$native" 2>&1); then
+    echo 'dss:warn: Precompiled locales are unavailable; retaining normal locale generation.' >&2
+    return 0
+  fi
+  # APT simulation: "Inst locales-all (2.31 ... [amd64])" -> allowed.
+  # Permit its locale-data dependency, but no removals or unrelated package work.
+  if ! awk '
+    /^(Remv|Purg) / { bad=1 }
+    /^(Inst|Conf) / { name=$2; sub(/:.*/, "", name); if (name != "locales-all" && name != "libc-l10n") bad=1 }
+    /^Inst locales-all(:[a-z0-9-]+)? / { found=1 }
+    END { exit bad || !found }
+  ' <<< "$plan"; then
+    echo 'dss:warn: Precompiled locale plan requires other package changes; retaining normal locale generation.' >&2
+    return 0
+  fi
+  echo "dss:stage: Installing precompiled Debian locale data for $count configured locales." >&2
+  apt_get_install -o APT::Get::AllowUnauthenticated=false -o APT::Get::AutomaticRemove=false \
+    --no-remove --no-install-recommends "locales-all:$native" || return $?
+  after=$(sha256sum -- /etc/locale.gen) || return 1
+  [ "$before" = "$after" ] || { echo 'dss:error: Locale selection changed during precompiled locale preparation; review /etc/locale.gen.' >&2; return 1; }
+  state=$(dpkg-query -W -f='${Status}' "locales-all:$native") || return 1
+  [ "$state" = 'install ok installed' ] || { echo 'dss:error: Precompiled locale package is not fully installed.' >&2; return 1; }
+}
+
 function apt_get_upgrade() {
   pause_check
   [ ! -f /etc/debian_version ] && return 0
@@ -8416,7 +8723,8 @@ function apt_get_upgrade() {
   apt_state_upgraded=
   apt_state_dist_upgraded=
   echo "dss:trace:apt_get_upgrade"
-  record_config_state
+  record_config_state || return $?
+  upgrade_prepare_debian_locales || return $?
   echo "dss:info: Configuring pending packages before the package upgrade (dpkg --configure -a)." >&2
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
@@ -10146,6 +10454,15 @@ function manifest_packages() {
     manifest_collection_failed=true
     return
   fi
+  # Preserve the full package state before filtering daemon/runtime summaries.
+  # dpkg: python<TAB>2.7.12-1~16.04<TAB>install ok config-files<TAB>i386
+  # -> package_state status="install ok config-files", not an installed runtime.
+  while IFS=$'\t' read -r package version status architecture; do
+    [ -n "$package" ] || continue
+    case "$status" in *' not-installed') continue;; esac
+    manifest_emit package_state name "${package%%:*}" version "$version" architecture "${architecture:-unknown}" \
+      status "$status" package_backend "$manifest_package_backend"
+  done <<< "$records"
   # Prefer the daemon owner over plugins and transitional package names.
   # nginx:amd64<TAB>1.24.0<TAB>install ok installed<TAB>amd64 -> name=nginx, version=1.24.0.
   # dovecot-core plus dovecot-imapd -> one service owned by dovecot-core; residual config-files rows are skipped.
@@ -10205,6 +10522,27 @@ function manifest_read_metadata() {
   # Configuration/metadata only: cap individual files even when they contain a huge single line.
   [ -f "$1" ] && [ -r "$1" ] || return 1
   head -c 1048576 -- "$1" 2>/dev/null
+}
+
+# Availability is metadata from existing indexes, never a refresh or removal.
+function manifest_package_review() {
+  local records package architecture version classification reason
+  [ "$manifest_package_backend" = dpkg ] || return 0
+  if [ -n "$manifest_root" ]; then
+    manifest_emit warning area package_review reason 'APT availability is unavailable for a fixture root; host indexes were not used.'
+    return 1
+  fi
+  if ! records=$(apt_packages_output_review); then
+    manifest_emit warning area package_review reason 'Existing APT index or package provenance query failed; availability is unknown. No packages or indexes were changed.'
+    return 1
+  fi
+  # Classifier TSV: libexample<TAB>amd64<TAB>1.0<TAB>unavailable<TAB>reason
+  # -> metadata only; residual-config state is already in package_state records.
+  while IFS=$'\t' read -r package architecture version classification reason; do
+    case "$classification" in obsolete|unavailable|transitional|incomplete) :;; *) continue;; esac
+    manifest_emit package_review name "$package" architecture "$architecture" version "$version" \
+      classification "$classification" reason "$reason" indexes existing freshness unverified removal_safety unverified
+  done <<< "$records"
 }
 
 # These conventional paths give migration hints, not complete server configuration.
@@ -11207,6 +11545,7 @@ function manifest_output() (
   manifest_probe language_consumers manifest_language_consumers
   manifest_probe packages manifest_packages
   manifest_probe service_states manifest_service_states
+  manifest_probe package_review manifest_package_review
   manifest_probe apache_php manifest_apache_php
   manifest_probe fpm_pools manifest_fpm_pools
   manifest_probe mail manifest_mail
@@ -11230,6 +11569,13 @@ function manifest_output() (
 # Publish a paired JSON inventory and sorted review file only after collection succeeds.
 function manifest_capture() {
 (
+  case "${DR_UPGRADE_MANIFEST:-true}" in
+    true) :;;
+    false)
+      echo 'dss:warn: Automatic application inventory disabled by DR_UPGRADE_MANIFEST=false; supply scoped application baselines and checks separately.' >&2
+      return 2;;
+    *) echo 'dss:error: DR_UPGRADE_MANIFEST must be true or false.' >&2; return 1;;
+  esac
   umask 077
   local directory=$1 file MANIFEST_REDACT=false
   mkdir -m 700 -- "$directory" && chmod 700 -- "$directory" || return 1
@@ -11275,6 +11621,14 @@ function manifest_print_key_changes() {
 # Status: 0 unchanged, 1 observations changed, 2 comparison unavailable. Never test application behaviour.
 function manifest_compare_baseline() {
 (
+  # Apply the current collection scope even when an older full inventory exists.
+  case "${DR_UPGRADE_MANIFEST:-true}" in
+    true) :;;
+    false)
+      echo 'dss:warn: Automatic application comparison disabled by DR_UPGRADE_MANIFEST=false; application behavior remains unverified by inventory.' >&2
+      return 2;;
+    *) echo 'dss:error: DR_UPGRADE_MANIFEST must be true or false.' >&2; return 1;;
+  esac
   umask 077
   local baseline=$1 original="$1.applications" directory result file
   if [ -z "$baseline" ] || [ -L "$original" ] || [ ! -f "$original/manifest.json" ] ||
@@ -11955,8 +12309,7 @@ elif [ "--remove-leftover-packages" = "${DR_ACTION:-$1}" ] ; then
   exit $?
 elif [ "--remove-deprecated-packages" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
-  ! has_leftover_packages oldpkg && echo "No leftover packages (all installed packages from the current distro).  Nothing to do.  All good." && exit 0
-  remove_leftover_packages oldpkg
+  upgrade_cleanup_deprecated_packages
   exit $?
 elif [ "--to-64bit" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1

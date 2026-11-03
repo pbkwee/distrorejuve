@@ -54,11 +54,13 @@ sudo env DR_MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --to-latest
 | `DR_LOG_DIRECTORY` | `/root/distrorejuveinfo/runs`; parent directory for private run logs. |
 | `DR_MANIFEST_DNS` | `true`; set to `false` to skip DNS lookups in manifests and upgrade reports. |
 | `DR_MANIFEST_MAIL_METRICS` | `true`; set to `false` to skip mail size scans and spool counts. |
+| `DR_UPGRADE_MANIFEST` | `true`; set to `false` to skip optional automatic application inventory capture and comparison during upgrades. Required service/runtime configuration checks remain enabled. Explicit manifest and upgrade-report actions are unchanged. |
+| `DR_PRECOMPILED_LOCALES` | `true`; Debian package/release upgrades prepare authenticated `locales-all` for 100 or more standard configured locales. Small/custom selections retain generation. Set to `false` to skip preparation; an existing package is retained. See [locale preparation](upgrade-review.md#precompiled-debian-locales). |
 | `DR_MIN_FREE_DISK_MIB` | `2048`; minimum available MiB on each checked filesystem. Use a positive integer. |
 | `DR_SKIP_DISK_SPACE_CHECK` | `false`; set to `true` to bypass disk-space checks after review. |
 | `DR_ALLOW_CROSSGRADE_BLOCKERS` | `false`; permit starting despite predicted package blockers during a crossgrade. Final native 64-bit verification remains required. |
 | `DR_PURGE_INCOMPATIBLE_PACKAGES` | `false`; set to `true` to back up and purge known config-only upgrade blockers. Reinstall manually afterward. |
-| `DR_PREFER_PACKAGED_USRMERGE_FILES` | `false`; set to `true` after review to back up an unowned `/usr` merge conflict and keep the packaged file. |
+| `DR_PREFER_PACKAGED_USRMERGE_FILES` | `true`; back up both executable copies, archive the unowned conflict and keep its checksum-verified packaged counterpart before `/usr` conversion. Set to `false` to require manual resolution. Modified or ambiguous copies always stop. Read-only checks never move files. See [collision recovery](upgrade-review.md#usr-merge-collision-recovery). |
 | `DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES` | `true`; remove verified obsolete compiler, library and transitional packages after backup during a crossgrade. Set to `false` to require manual removal. |
 | `DR_SKIP_KERNEL_CHECK` | `false`; bypass the old-kernel precondition. |
 | `DR_SKIP_X11_CHECK` | `false`; bypass the X11 precondition when `DR_REMOVE_X11_PACKAGES` is `false`. |

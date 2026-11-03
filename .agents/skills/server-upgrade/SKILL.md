@@ -124,6 +124,18 @@ before acting. Follow only the relevant procedure sections:
 - [Handoff and retirement](../../../docs/upgrade-and-migration.md#verify-hand-over-and-retire)
   for acceptance, backup readiness, remaining work, retention and access/billing cleanup.
 
+Before handoff, complete the [before/after review](../../../docs/upgrade-review.md#beforeafter-review)
+against the verified original job baseline and post-reboot evidence. Use
+`--show-changes` as private evidence under the approved data scope, with a
+controlled environment and only approved non-secret facts returned to AI.
+Separate current-package differences and historical sidecars from proven job
+changes. Report material effects, remaining checks and owners in the owner and
+sysadmin handoffs; a successful report is not application acceptance.
+Use the [handoff evidence commands and report guidance](../../../docs/handoff-reports.md)
+after changes, cleanup and reboot. It distinguishes owner-facing effects from
+sysadmin evidence and specifies which reports to refresh without exposing raw
+configuration to AI. Record deferred package cleanup and its application owner.
+
 If the customer chooses RimuHosting, load the optional
 [account and API guide](../../../docs/rimuhosting.md). New accounts must contact
 support and complete review before VM creation. Account approval is separate from
@@ -134,6 +146,13 @@ Other providers use their own verified provisioning and recovery procedure.
 Keep a verified authenticated SSH control connection through OpenSSH package
 changes, alongside the supervised action. Use the procedure's private control-path
 example and verify a fresh independent connection afterward.
+
+Keep services running for routine provider snapshots by default. Do not make a
+service-pause offer or approval a routine prerequisite. Explain crash-consistency
+limits and accept an optional customer-provided pause or quiescing procedure.
+If the workload needs additional consistency measures, identify the concrete
+requirement and agree the method and downtime. Honour an explicitly approved
+job-specific pause plan; record which services actually paused and resumed.
 
 On interruption or an ambiguous outcome, establish actual state before retrying.
 Do not repeat destructive operations or reboot after partial failure blindly.

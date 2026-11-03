@@ -39,10 +39,13 @@ activation. Custom PHP pools/sockets, monitoring listener health and
 hosting provider boot selection still require the explicit review described in the output.
 
 For running MySQL/MariaDB, privileged preflight and the post-upgrade service gate
-also test a local root query. Socket authentication is tried first, then root's
-client option files for existing password administration. No credentials or raw
-client errors are printed. Nonstandard administration accounts or socket locations
-require a reviewed local procedure. InnoDB buffer pools using at least 70% of
+also test authenticated maintenance access. By default, socket root authentication
+is tried first, then root's client option files for password administration. When a specific
+maintenance file is authorized, set `DR_DATABASE_DEFAULTS_FILE` to its absolute
+path. The client consumes it directly; the script does not read credentials or
+fall back to another account after that selection fails. Its account and socket
+are preserved. No credentials or raw client errors are printed. Custom administration
+still requires a reviewed local procedure. InnoDB buffer pools using at least 70% of
 physical RAM get a warning; cgroup limits and other memory consumers still need
 review. Verify maintenance access with an authenticated administrative query.
 
@@ -181,7 +184,10 @@ availability, state differences and existing configuration sidecars. It does
 not repair configuration or establish application acceptance.
 
 Verify the source identity, reviewed tool revision and original baseline path
-and date first. The automatic selector uses the oldest baseline within
+and date first. Set `DR_CONFIG_BASELINE` to the verified original file for a job
+with multiple invocations or release hops. An explicitly selected file has no
+age limit and never falls back to global history. Without that setting, the
+automatic selector uses the oldest baseline within
 `DR_CONFIGURATION_HISTORY_DAYS` (default seven days), including legacy
 `/root/deghostinfo` files. Check that this is the job's original baseline across
 all hops, rather than another run's evidence. If it is missing, expired or
@@ -267,7 +273,12 @@ custom executable under `/usr/local`, manual runtime, dlopen plugin or scheduled
 script can use an old library without declaring a dpkg dependency. A new library
 with a different SONAME is not an automatic substitute. Held packages, kernels,
 services, essential packages and files under data/service paths need the existing
-protections and a reviewed migration. The tool's APT checks and file preservation
+protections and a reviewed migration. Packages owning conventional `dig`, `host`
+or `nslookup` executables are also retained, including legacy package names.
+This protects installed diagnostic capabilities; it does not install missing
+clients or prove that custom tools have no consumers. Review the actual removal
+plan and before/after package evidence when investigating a lost utility.
+The tool's APT checks and file preservation
 do not prove that unregistered application consumers are absent.
 
 For example, dpkg's `ic python:i386` means desired action Install and current
@@ -299,6 +310,7 @@ Offline regression checks (no production operations):
 ```sh
 bash -n distrorejuve.sh
 python3 tests/test-upgrade-review.py
+python3 tests/test-run-lessons.py
 python3 tests/test-manifest-firstpass.py
 python3 tests/test-manifest-upgrade-assets.py
 python3 tests/test-manifest-packaged-wordpress.py

@@ -27,6 +27,16 @@ function environment_validate_settings() {
     printf 'dss:error: %s must be a positive integer.\n' "$name" >&2
     return 1
   done
+  for name in DR_CONFIG_BASELINE DR_DATABASE_DEFAULTS_FILE; do
+    value=${!name}
+    case "$value" in
+      '') :;;
+      /*) case "$value" in */) ;; *) continue;; esac;;
+    esac
+    [ -z "$value" ] && continue
+    printf 'dss:error: %s must be an absolute file path.\n' "$name" >&2
+    return 1
+  done
   case "${DR_RPM_MIGRATION_TARGET:-}" in
     ''|alma|rocky|centos-vault) :;;
     *) echo 'dss:error: DR_RPM_MIGRATION_TARGET must be alma, rocky or centos-vault.' >&2; return 1;;
@@ -195,6 +205,8 @@ Skip controls accept true/false: DR_SKIP_KERNEL_CHECK, DR_SKIP_X11_CHECK, DR_ALL
 DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK (current-release only), DR_SKIP_OLD_PACKAGE_CHECK, DR_SKIP_DOVECOT_MIGRATION_CHECK (2.4 migration only).
 DR_REMOVE_X11_PACKAGES enables X11 removal; DR_ENABLE_UBUNTU_CROSSGRADE permits experimental Ubuntu crossgrading.
 DR_CONFIGURATION_HISTORY_DAYS sets the configuration-history lookback (default 7 days).
+DR_CONFIG_BASELINE pins the original pre-upgrade snapshot to an absolute file path across runs and release hops.
+DR_DATABASE_DEFAULTS_FILE selects an authorized database maintenance client option file; no credentials are printed.
 DR_PURGE_INCOMPATIBLE_PACKAGES=false blocks known config-breaking packages before release upgrades.
 Set it to literal true to back them up and purge them; reinstall and configure them manually afterward.
 DR_PREFER_PACKAGED_USRMERGE_FILES=true archives an unowned executable collision and keeps its verified packaged counterpart.
@@ -1395,14 +1407,29 @@ function upgrade_configuration_review() {
 }
 
 # This query returns fixed labels only, never authentication strings. Test local
-# root maintenance access separately from daemon activity; table upgrades need their own checks.
+# maintenance access separately from daemon activity; table upgrades need their own checks.
 function upgrade_database_verify() {
-  local client result memory buffer target=${1:-}
+  local client result memory buffer target=${1:-} defaults_file=${DR_DATABASE_DEFAULTS_FILE:-}
   local -a auth_options=(--no-defaults --protocol=socket --user=root)
   if command -v mariadb >/dev/null 2>&1; then client=mariadb
   elif command -v mysql >/dev/null 2>&1; then client=mysql
   else echo 'dss:error: Database client unavailable; authenticated maintenance is unverified.' >&2; return 1; fi
+  if [ -n "$defaults_file" ]; then
+    case "$defaults_file" in /*) :;; *) echo 'dss:error: DR_DATABASE_DEFAULTS_FILE must be an absolute file path.' >&2; return 1;; esac
+    if [ ! -f "$defaults_file" ] || [ ! -r "$defaults_file" ]; then
+      echo 'dss:error: Designated database client option file is unavailable; authenticated maintenance is unverified.' >&2
+      return 1
+    fi
+    # --defaults-file must be the first client option. Keep its account/socket
+    # selection; never read credentials into the shell or try another identity.
+    # An empty --init-command is a query on some MariaDB clients; omit it.
+    auth_options=("--defaults-file=$defaults_file")
+  fi
   if ! result=$(manifest_run_bounded 10 "$client" "${auth_options[@]}" --batch --skip-column-names --execute='SELECT 1' 2>/dev/null) || [ "$result" != 1 ]; then
+    if [ -n "$defaults_file" ]; then
+      echo 'dss:error: Designated database maintenance authentication failed; no alternate credentials tried.' >&2
+      return 1
+    fi
     # Older servers often configure a local administrative password in root's
     # option file. Read it through the client; never copy it into argv or logs.
     auth_options=(--protocol=socket --user=root)
@@ -1434,7 +1461,7 @@ function upgrade_database_verify() {
       echo 'dss:warn: Socket identity compatibility query unavailable (older grant layout or permissions); manually review before MariaDB 11.6 or newer.' >&2
     fi
   fi
-  echo 'dss:info: Local root socket maintenance succeeded. Review database startup/upgrade logs and table-upgrade completion separately.' >&2
+  echo 'dss:info: Authenticated database maintenance succeeded. Review database startup/upgrade logs and table-upgrade completion separately.' >&2
 }
 
 function upgrade_precondition_checks() {
@@ -7399,6 +7426,11 @@ function upgrade_cleanup_output_safe_package() {
     fi
   fi
   while IFS= read -r file; do
+    # dpkg-query -L dnsutils: /usr/bin/dig -> preserve this DNS capability,
+    # even when its package name differs from the protected bind9* family.
+    case "$file" in /bin/dig|/bin/host|/bin/nslookup|/usr/bin/dig|/usr/bin/host|/usr/bin/nslookup)
+      echo "dss:warn: Preserving $package because it supplies DNS diagnostic client $file." >&2; return 3;;
+    esac
     case "$file" in /etc/init.d/?*|/etc/init/?*|/etc/cron*|/etc/systemd/system/?*|/etc/systemd/user/?*|/lib/systemd/system/?*|/lib/systemd/user/?*|/usr/lib/systemd/system/?*|/usr/lib/systemd/user/?*|/etc/network/?*|/etc/netplan/?*|/etc/NetworkManager/?*|/etc/kernel/?*|/boot/?*|/var/lib/?*|/var/spool/?*|/srv/?*|/home/?*|/var/www/?*)
       echo "dss:warn: Preserving $package because it owns service/data path $file." >&2; return 3;;
     esac
@@ -8349,7 +8381,7 @@ function print_minimal_config_diff() {
 }
 function print_config_state_changes() {
   prepare_output_dir
-  local availability_ret=0 report_status now fromfile=$1 file files post_recorded=false comparison_status
+  local availability_ret=0 report_status now fromfile=$1 file files post_recorded=false comparison_status postfile
   local -a pipeline_status=()
   apt_packages_print_review || availability_ret=$?
   if ! now=$(date +%s); then
@@ -8357,21 +8389,24 @@ function print_config_state_changes() {
     [ "$availability_ret" -ne 0 ] || availability_ret=1
     return "$availability_ret"
   fi
-  if record_config_state "/root/distrorejuveinfo/postupgrade.dpkg.$now"; then post_recorded=true
+  postfile="/root/distrorejuveinfo/postupgrade.dpkg.$now"
+  [ -z "${DR_CONFIG_BASELINE:-}" ] || postfile="${DR_CONFIG_BASELINE%/*}/postupgrade.dpkg.$now.$$"
+  if record_config_state "$postfile"; then post_recorded=true
   else
     echo 'dss:error: Cannot record current configuration state; comparison is incomplete.' >&2
     [ "$availability_ret" -ne 0 ] || availability_ret=1
   fi
   if [ -z "$fromfile" ]; then fromfile=$(config_state_output_baseline) || fromfile=; fi
   if [ -z "$fromfile" ] || [ ! -f "$fromfile" ]; then
-    echo 'dss:warn: No recent pre-upgrade baseline; before/after comparison is unavailable.' >&2
+    echo 'dss:warn: No usable pre-upgrade baseline; before/after comparison is unavailable.' >&2
+    [ -z "${DR_CONFIG_BASELINE:-}" ] || availability_ret=1
     return "$availability_ret"
   fi
   print_incompatible_package_changes "$fromfile"
   print_crossgrade_obsolete_package_changes "$fromfile" || { report_status=$?; [ "$availability_ret" -ne 0 ] || availability_ret=$report_status; }
   echo 'dss:info: Configuration changes are review observations; changed or missing files may be intentional. Sidecars are compared only when already present.'
   if $post_recorded; then
-    print_minimal_config_diff "$fromfile" "/root/distrorejuveinfo/postupgrade.dpkg.$now" | awk '{print "dss:configdiff:statechanges:" $0}'
+    print_minimal_config_diff "$fromfile" "$postfile" | awk '{print "dss:configdiff:statechanges:" $0}'
     pipeline_status=("${PIPESTATUS[@]}")
     if [ "${pipeline_status[0]}" -gt 1 ] || [ "${pipeline_status[1]}" -ne 0 ]; then
       echo 'dss:error: Cannot compare original and current configuration state.' >&2
@@ -8405,8 +8440,20 @@ function print_config_state_changes() {
 # Keep purge reminders attached to the same oldest recent baseline used for configuration diffs.
 function config_state_output_baseline() {
   local file baseline='' days=${DR_CONFIGURATION_HISTORY_DAYS:-7}
+  if [ -n "${DR_CONFIG_BASELINE:-}" ]; then
+    case "$DR_CONFIG_BASELINE" in /*) :;; *) echo 'dss:error: DR_CONFIG_BASELINE must be an absolute file path.' >&2; return 1;; esac
+    if [ ! -e "$DR_CONFIG_BASELINE.incomplete" ] && [ ! -L "$DR_CONFIG_BASELINE.incomplete" ] &&
+        [ ! -L "$DR_CONFIG_BASELINE" ] && [ -s "$DR_CONFIG_BASELINE" ] && [ -f "$DR_CONFIG_BASELINE" ] && [ -r "$DR_CONFIG_BASELINE" ]; then
+      printf '%s\n' "$DR_CONFIG_BASELINE"
+      return 0
+    fi
+    echo 'dss:warn: Pinned configuration baseline unavailable; no global history fallback selected.' >&2
+    return 1
+  fi
   for file in "/root/distrorejuveinfo/"*preupgrade* "/root/deghostinfo/"*preupgrade*; do
-    [ -f "$file" ] || continue
+    case "$file" in *.incomplete) continue;; esac
+    [ ! -e "$file.incomplete" ] && [ ! -L "$file.incomplete" ] || continue
+    [ -f "$file" ] && [ -s "$file" ] || continue
     [ -n "$(find "$file" -maxdepth 0 -mtime "-$days" -print)" ] || continue
     if [ -z "$baseline" ] || [ "$file" -ot "$baseline" ]; then baseline=$file; fi
   done
@@ -8447,48 +8494,129 @@ function print_incompatible_package_changes() {
   done
 }
 
+# Preserve the existing comparison format with either native listener tool.
+function config_state_output_listeners() {
+  local output backend
+  if command -v netstat >/dev/null 2>&1; then
+    output=$(netstat -ntpl) || return 1
+    backend=netstat
+  elif command -v ss >/dev/null 2>&1; then
+    output=$(ss -lntp) || return 1
+    backend=ss
+  else
+    echo 'dss:error: Listener snapshot unavailable: neither netstat nor ss is installed.' >&2
+    return 1
+  fi
+  # netstat -ntpl: tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN 42/sshd
+  # ss -lntp: LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=42,fd=3))
+  # Both retain the legacy record: Listen ports: :::22 sshd
+  (set -o pipefail
+    printf '%s\n' "$output" | LC_ALL=C awk -v backend="$backend" '
+      backend == "netstat" && /LISTEN/ {
+        address=$4; program=$7; sub(/^[0-9]+\//, "", program)
+      }
+      backend == "ss" && $1 == "LISTEN" {
+        address=$4; program="-"
+        if (match($0, /"[^"]+"/)) program=substr($0,RSTART+1,RLENGTH-2)
+      }
+      address != "" {
+        sub(/^0[.]0[.]0[.]0:/, ":::", address)
+        print "Listen ports: " address " " program
+        address=""
+      }
+    ' | sort -k 3 | uniq
+  )
+}
+
+# Required producers and writes must succeed; no matches are normal empty sections.
+# Scoped pipefail stays inside this capture and does not change upgrade control flow.
+function config_state_capture() {
+(
+  set -o pipefail
+  local file=$1 files now config_file
+  local -a config_files=()
+  now=$(date) || return 1
+  # find /etc -type f: /etc/example.conf.dpkg-old -> configfiles entry;
+  # /etc/example.conf -> no sidecar entry. Keep the established suffix matches.
+  files=$(find /etc -type f | awk '/.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|[.]rpmnew|[.]rpmsave/' | sort) || return 1
+  printf 'Date: %s\n' "$now" >> "$file" || return 1
+  if [ -n "$files" ]; then
+    while IFS= read -r config_file; do config_files+=("$config_file"); done <<< "$files"
+    ls -lrt -- "${config_files[@]}" | awk '{print "configfiles:" $0}' >> "$file" || return 1
+  fi
+  printf 'Listening ports:\n\n' >> "$file" || return 1
+  config_state_output_listeners >> "$file" || return 1
+  printf 'Apache vhosts:\n\n' >> "$file" || return 1
+  print_distro_info >> "$file" || return 1
+  if [ -x /usr/sbin/apache2ctl ]; then
+    /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> "$file" || return 1
+  fi
+  printf '\nRunning processes:\n\n' >> "$file" || return 1
+  ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' |
+    awk '!/^process: \[|COMMAND|init/' | sort | uniq >> "$file" || return 1
+  if [ -x /usr/bin/dpkg ]; then
+    printf 'Installed packages:\n' >> "$file" || return 1
+    # dpkg -l: ii  bash:amd64  5.2-2  amd64  shell -> installed: bash.
+    # No installed packages is a valid empty section, unlike a failed dpkg query.
+    dpkg -l | awk '/^ii/ { name=$2; sub(/:.*/, "", name); if (name !~ /^lib/) print "installed: " name }' |
+      sort >> "$file" || return 1
+  fi
+  return 0
+)
+}
+
 function record_config_state() {
   prepare_output_dir
-  local file=$1
+  local file=$1 pinned=false original=false parent
+  [ -n "$file" ] || file=${DR_CONFIG_BASELINE:-}
+  if [ -n "${DR_CONFIG_BASELINE:-}" ] && [ "$file" = "$DR_CONFIG_BASELINE" ]; then
+    pinned=true
+    case "$file" in /*) :;; *) echo 'dss:error: DR_CONFIG_BASELINE must be an absolute file path.' >&2; return 1;; esac
+    # The operator prepares a private, source-local parent directory for this job.
+    # Refuse empty, linked or non-regular existing files rather than replacing them.
+    if [ -e "$file" ] || [ -L "$file" ] || [ -e "$file.incomplete" ] || [ -L "$file.incomplete" ]; then
+      config_state_output_baseline >/dev/null
+      return $?
+    fi
+    parent=${file%/*}; parent=${parent:-/}
+    [ -d "$parent" ] || { echo 'dss:error: Prepare the pinned baseline parent directory before collection.' >&2; return 1; }
+  fi
   if [ -z "$file" ]; then
     if ! file=$(config_state_output_baseline); then
       file="/root/distrorejuveinfo/preupgrade.dpkg.$$"
       [ -e "$file" ] && file="$file.$(date +%s)"
     fi
   fi
-  # don't overwrite the preupgrade file
-  echo "$file" | grep -qai preupgrade && [ -f "$file" ] && return 0
+  # Do not overwrite an existing original, including a failed marked attempt.
+  case "${file##*/}" in *preupgrade*)
+    original=true
+    [ ! -L "$file" ] && [ ! -e "$file.incomplete" ] && [ ! -L "$file.incomplete" ] || return 1
+    if [ -f "$file" ]; then [ -s "$file" ]; return $?; fi;;
+  esac
+  if $pinned; then original=true; fi
   echo "dss:trace:record_config_state:$file"
-  local files=$(find "/etc" -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
-  > "$file" || return 1
-  # conf files
-  echo "Date: $(date)" >> "$file"
-  [ ! -z "$files" ] && ls -lrt $files | awk '{print "configfiles:" $0}' >> "$file"
-  echo "Listening ports:" >> "$file"
-  echo "" >> "$file"
-  # listening ports
-  # Listen ports: 0.0.0.0:995 dovecot
-  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 3 | uniq >> "$file"
-  echo "Apache vhosts:" >> "$file"
-  echo "" >> "$file"
-  print_distro_info >> "$file"
-  # vhosts
-  [ -x /usr/sbin/apache2ctl ] && /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> "$file"
-  echo "" >> "$file"
-  echo "Running processes:" >> "$file"
-  echo "" >> "$file"
-  ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' | egrep -v '^process: \[|COMMAND|init' | sort | uniq >> "$file"
-
-  [  -x /usr/bin/dpkg ] && echo "Installed packages:" >> "$file" && dpkg -l | grep '^ii' | awk '{print $2}' | sed 's/:.*//' | sort | grep -v '^lib' | awk '{ print "installed: " $0 }' >> "$file"
-  case "${file##*/}" in preupgrade.dpkg.*)
+  if $original; then
+    # A failed required snapshot keeps its marker and cannot be accepted on retry.
+    # Reserve only this new baseline; a concurrent collection cannot truncate it.
+    (umask 077; set -o noclobber; : > "$file.incomplete" && : > "$file" &&
+      chmod u=rw,go= -- "$file" "$file.incomplete") || return 1
+  else
+    (umask 077; : > "$file" && chmod u=rw,go= -- "$file") || return 1
+  fi
+  if ! config_state_capture "$file"; then
+    echo 'dss:error: Required configuration snapshot failed; preserve this attempt and collect a usable original before package changes.' >&2
+    return 1
+  fi
+  if $pinned || [[ "${file##*/}" = preupgrade.dpkg.* ]]; then
     # Capture active web roles before package work, independently of the optional manifest.
     (umask 077; mkdir -m 700 -- "$file.php-runtime" && upgrade_php_runtime_snapshot "$file.php-runtime") || return 1
     (umask 077; mkdir -m 700 -- "$file.services" && upgrade_services_snapshot "$file.services") || return 1
     # Save original site/runtime relationships once, without DNS or mail-store traversal.
     if ! manifest_capture "$file.applications"; then
       echo "dss:warn: Original application manifest was not completed; review $file.applications before relying on it." >&2
-    fi;;
-  esac
+    fi
+  fi
+  if $original; then rm -f -- "$file.incomplete" || return 1; fi
   return 0
 }
 
@@ -8986,17 +9114,26 @@ function dist_upgrade_ubuntu_to_latest() {
 }
 
 function print_distro_info() {
-if [ -f /etc/redhat-release ]; then
-  local foo="dss:distroinfo: REDHAT $(cat /etc/redhat-release)"
+  local information foo
+  if [ -f /etc/redhat-release ]; then
+    information=$(cat /etc/redhat-release) || return 1
+    [ -n "$information" ] || return 1
+    foo="dss:distroinfo: REDHAT $information"
+  elif [ -x /usr/bin/lsb_release ] || [ -x /bin/lsb_release ]; then
+    information=$(lsb_release -a 2>/dev/null) || return 1
+    # lsb_release -a: Description:	Debian GNU/Linux 12 (bookworm)
+    # -> dss:distroinfo: Description: Debian GNU/Linux 12 (bookworm).
+    information=$(printf '%s\n' "$information" | grep -i description) || return 1
+    foo="dss:distroinfo: $information"
+  elif [ -f /etc/debian_version ]; then
+    information=$(cat /etc/debian_version) || return 1
+    [ -n "$information" ] || return 1
+    foo="dss:distroinfo: DEBIAN $information"
+  else
+    foo='dss:distroinfo: NA'
+  fi
+  # Preserve the established single-line whitespace normalization.
   echo $foo
-elif [ -x /usr/bin/lsb_release ] || [ -x /bin/lsb_release ] ; then
-  local foo="dss:distroinfo: $(lsb_release -a 2>/dev/null | grep -i description)"
-  echo $foo
-elif [ -f /etc/debian_version ]; then
-  local foo="dss:distroinfo: DEBIAN $(cat /etc/debian_version)"
-  echo $foo
-else echo "dss:distroinfo: NA"; fi
-return 0
 }
 
 
@@ -11175,9 +11312,11 @@ function manifest_dns() {
     fi
   done
   if [ "${#manifest_dns_names[@]}" -ge "$manifest_dns_limit" ]; then manifest_dns_reason=domain_limit; return; fi
-  if { ! command -v timeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; } ||
-      { ! command -v getent >/dev/null 2>&1 && ! command -v host >/dev/null 2>&1; }; then
-    manifest_dns_reason=resolver_or_timeout_unavailable; return
+  if ! command -v getent >/dev/null 2>&1 && ! command -v host >/dev/null 2>&1; then
+    manifest_dns_reason=resolver_client_unavailable; return
+  fi
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; then
+    manifest_dns_reason=timeout_facility_unavailable; return
   fi
   if command -v getent >/dev/null 2>&1 && addresses=$(manifest_run_bounded 2 getent ahosts "$domain" 2>/dev/null); then
     # 192.0.2.1 STREAM example.invalid plus a DGRAM row for the same address -> one 192.0.2.1.

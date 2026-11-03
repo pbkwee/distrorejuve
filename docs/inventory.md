@@ -40,6 +40,14 @@ and `--list-leftover-packages` (which can install a helper) require root outside
 DNS checks report each configured hostname's addresses and whether they match
 this server. Different addresses can identify another destination or a proxy.
 
+DNS website observations distinguish missing prerequisites from network results:
+`resolver_client_unavailable` means neither `getent` nor `host` is available;
+`timeout_facility_unavailable` means neither `timeout` nor the Perl fallback is
+available. `timed_out` records an actual bounded lookup timeout. Other failed
+lookups can remain `resolution_failed_or_timed_out` when the resolver hides the
+cause. These states do not establish a DNS outage. Missing tools are never
+installed by collection.
+
 ## First-pass upgrade information
 
 Full root collection includes these records:

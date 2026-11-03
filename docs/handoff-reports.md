@@ -19,6 +19,7 @@ reporting state, but do not authorize package removal or a new upgrade.
 tool=/root/upgrade-tools/reviewed-distrorejuve.sh
 evidence=/root/upgrade-evidence/final-01
 run_directory=/root/distrorejuveinfo/runs/recorded-upgrade-run
+baseline=/root/upgrade-evidence/job-original/preupgrade.dpkg.original
 umask 077
 mkdir -- "$evidence"
 chmod u=rwx,go= -- "$evidence"
@@ -33,7 +34,7 @@ env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin NO_COLOR=1 \
   bash "$tool" --support-report "$run_directory" > "$evidence/support-report.txt" 2>&1
 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin DR_UPGRADE_MANIFEST=false \
   DR_MANIFEST_DNS=false DR_MANIFEST_MAIL_METRICS=false NO_COLOR=1 \
-  bash "$tool" --show-changes > "$evidence/show-changes.private.txt" 2>&1
+  DR_CONFIG_BASELINE="$baseline" bash "$tool" --show-changes > "$evidence/show-changes.private.txt" 2>&1
 
 dpkg --audit > "$evidence/dpkg-audit.txt" 2>&1
 dpkg-query -W -f='${Package}\t${Architecture}\t${Status}\t${Version}\n' \
@@ -51,8 +52,10 @@ install dependencies. Do not use `--check-upgrade` as final acceptance: it is
 readiness for a prospective upgrade, with a potentially different target.
 
 Confirm that `--show-changes` selects the recorded original job baseline, using
-its path, date and source association. Its default history window can expire or
-include unrelated baselines. If the correct baseline is unavailable, disclose
+its path, date and source association. The example pins the verified original
+using `DR_CONFIG_BASELINE`; replace its path with the job's recorded value.
+Without explicit selection, the default history window can expire or include
+unrelated baselines. If the correct baseline is unavailable, disclose
 that and compare the recorded job evidence separately. Do not manufacture one
 from the changed server. Capture pre-reboot evidence, then repeat relevant
 checks after reboot and verify that the boot ID changed.
@@ -84,7 +87,12 @@ non-secret fields before AI processing. A support report is also subject to revi
 Use workload-specific configuration validation and approved application checks
 after collecting these facts. Verify the protocol behind changed listeners,
 actual daemon state, authenticated maintenance where relevant, useful endpoints,
-scheduled work and external dependencies. Port 443 alone is not TLS acceptance;
+scheduled work and external dependencies. Compare failed units with the original
+checkpoint, including ancillary services and timers outside the tool's selected
+service roles. Check replacements before clearing a retired unit's failed state;
+retain the original evidence. Follow [execution checkpoints](execution-checkpoints.md)
+for supervision, stale session processes and availability coverage.
+Port 443 alone is not TLS acceptance;
 an active/exited wrapper is not a running authentication daemon.
 
 ## Write the two reports

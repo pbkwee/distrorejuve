@@ -256,6 +256,8 @@ Follow the approved explicit-target procedure and release/panel gates. Avoid
 replacing it with a generic package-manager command. Use an available supervised
 or resumable facility for long operations. Verify completion from actual operation
 and package state, including final status after a supervised operation starts.
+Use the [execution checkpoints](execution-checkpoints.md) for pinned originals,
+launch reconciliation, parser fallbacks and observed service/sampling gaps.
 
 Before changing OpenSSH packages, keep a verified authenticated control connection
 open alongside the supervised action. Use the job's private directory and the

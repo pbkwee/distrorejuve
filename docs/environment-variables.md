@@ -16,6 +16,11 @@ See [migration inventory](inventory.md) for reduced coverage.
 An explicit `--support-report` remains available even when an inherited upgrade
 setting is invalid.
 
+`DR_CONFIG_BASELINE` pins a source-local original snapshot for one job. Its parent
+must already be a private directory. Reuse that exact path across release hops,
+retries and final reports; explicit selection bypasses the history window and
+never falls back to another job's baseline. See [execution checkpoints](execution-checkpoints.md).
+
 `DR_RUN_DIRECTORY` identifies the logging child's current run. Use `DR_LOG_DIRECTORY`
 to choose the log location.
 
@@ -76,7 +81,9 @@ sudo env DR_MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --to-latest
 | `DR_RPM_MIGRATION_SCRIPT` | Absolute path to the reviewed vendor script; required for an Alma/Rocky conversion. |
 | `DR_ALLOW_UNAUTHENTICATED_ARCHIVES` | `false`; explicit official APT archive exception. Never affects RPM signature checks. |
 | `DR_ACTION` | Unset; override the action selected from command-line arguments. Prefer a command-line action. |
-| `DR_CONFIGURATION_HISTORY_DAYS` | `7`; days to look back for the pre-upgrade comparison baseline. |
+| `DR_CONFIGURATION_HISTORY_DAYS` | `7`; days to look back for the pre-upgrade comparison baseline when no explicit path is selected. |
+| `DR_CONFIG_BASELINE` | Unset; absolute source-local file path for the job's original configuration snapshot. Existing usable originals are retained without an age limit; new captures require an existing private parent. Current reports are written beside it. Other log/recovery locations are unchanged. |
+| `DR_DATABASE_DEFAULTS_FILE` | Unset; absolute path to an explicitly authorized MySQL/MariaDB client option file for maintenance checks. Passed directly as the first client option, preserving its account and socket. An unavailable file or failed authentication stops the check. |
 | `UCF_FORCE_CONFFOLD` | Unset; retain the caller's explicit ucf keep-old-configuration policy. |
 
 Boolean settings accept `true` or `false`. Unset or empty settings use their documented defaults.

@@ -9636,8 +9636,17 @@ function manifest_emit() {
         package:name|package:version|package:architecture|package:package_backend|\
         runtime:kind|runtime:version|runtime:package|runtime:package_version|runtime:version_source|runtime:conditional|\
         application:application|application:version|application:language|application:language_version|application:language_version_source|\
+        application:execution|application:activity|application:activity_basis|\
         website:server|website:port|website:tls|website:certificate_file_present|website:runtime_version|\
         website:runtime_version_source|website:runtime_package|website:dns|website:dns_reason|website:proxy_basis|\
+        website:execution|website:activity|website:activity_basis|\
+        web_asset_root:exists|web_asset_root:symlink|web_asset_root:migration_role|web_asset_root:execution|\
+        web_file:language|web_file:execution|web_file:evidence|\
+        application_context:role|application_context:activity|application_context:execution|application_context:migration_default|\
+        website_handler:server|website_handler:kind|website_handler:language|website_handler:runtime_version|website_handler:runtime_package|website_handler:runtime_version_source|website_handler:activity|website_handler:activity_basis|\
+        website_redirect:server|website_redirect:activity|website_redirect:activity_basis|\
+        web_frontend:server|web_frontend:activity|web_frontend:activity_basis|\
+        lighttpd_site:selector_kind|lighttpd_site:mapping|lighttpd_site:runtime|lighttpd_site:frontend|lighttpd_site:activity|lighttpd_site:activity_basis|\
         mail_storage:size_mib|mail_storage:mailbox_count|mail_storage:size_basis|mail_storage:count_reason|mail_storage:reason|\
         migration_path:kind|migration_path:ownership|migration_path:package|migration_path:verification|\
         migration_mount:filesystem|migration_mount:mounted|hosting_panel:name|hosting_panel:version|\
@@ -9649,7 +9658,7 @@ function manifest_emit() {
         collection_status:core_collectors_failed|collection_status:warning_count|collection_status:completeness) :;;
         website:runtime)
           # An unmatched handler can contain a customer socket path or upstream name.
-          case "$value" in unknown|php-fpm|php_disabled|apache-mod-php|fastcgi_handler_version_unknown|php_handler_version_unknown) :;; *) value='[redacted]';; esac;;
+          case "$value" in unknown|php-fpm|php_disabled|apache-mod-php|fastcgi_handler_version_unknown|php_handler_version_unknown|static_files|cgi|scgi|reverse_proxy) :;; *) value='[redacted]';; esac;;
         *) case "$value" in ''|unknown) :;; *) value='[redacted]';; esac;;
       esac
       public_record+=("$key" "$value")
@@ -9744,6 +9753,7 @@ function manifest_listeners() {
       apache2|httpd) application=Apache ;;
       nginx*) application=nginx ;;
       caddy*) application=Caddy ;;
+      lighttpd*) application=lighttpd ;;
     esac
     case "$port" in
       25|465|587) protocol=smtp ;;
@@ -9760,6 +9770,83 @@ function manifest_listeners() {
   done <<< "$parsed"
 }
 
+# Output process names from kernel status metadata only; do not read cmdline/environ.
+# /proc/553/status metadata (literal tabs):
+# Name:	lighttpd
+# Pid:	553
+# -> lighttpd.
+# A missing/mismatched Pid or unreadable status leaves coverage incomplete.
+function manifest_output_proc_process_names() {
+  local directory file pid line name recorded_pid lines count=0 found=0 started=$SECONDS incomplete=false
+  [ -d "$manifest_root/proc" ] && [ ! -L "$manifest_root/proc" ] || return 1
+  for directory in "$manifest_root"/proc/[0-9]*; do
+    [ -d "$directory" ] || continue
+    pid=${directory##*/}
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    count=$((count+1))
+    if [ "$count" -gt 20000 ] || [ $((SECONDS-started)) -ge 5 ]; then incomplete=true; break; fi
+    file=$directory/status
+    if [ -L "$directory" ] || [ -L "$file" ] || [ ! -f "$file" ] || [ ! -r "$file" ]; then incomplete=true; continue; fi
+    name= recorded_pid= lines=0
+    # Kernel status is line-oriented and tab-delimited. Bound individual reads
+    # too, so an unexpected fixture file cannot bypass the overall time limit.
+    while IFS= read -r -t 1 line; do
+      lines=$((lines+1))
+      if [ "$lines" -gt 64 ] || [ $((SECONDS-started)) -ge 5 ]; then incomplete=true; break; fi
+      case "$line" in
+        Name:$'\t'*) name=${line#*$'\t'};;
+        Pid:$'\t'*) recorded_pid=${line#*$'\t'};;
+      esac
+      [ -z "$name" ] || [ -z "$recorded_pid" ] || break
+    done < "$file"
+    case "$name" in ''|*$'\t'*|*$'\r'*|*$'\n'*) incomplete=true; continue;; esac
+    if [ "$recorded_pid" != "$pid" ] || [ "${#name}" -gt 64 ]; then incomplete=true; continue; fi
+    printf '%s\n' "$name"
+    found=$((found+1))
+  done
+  [ "$found" -gt 0 ] && ! $incomplete
+}
+
+# Validate process names independently of command exit status before inferring services.
+function manifest_process_names() {
+  local snapshot names reason
+  manifest_processes_available=false
+  manifest_processes=
+  if snapshot=$(LC_ALL=C manifest_run_bounded 5 ps -eo pid=,comm= 2>/dev/null); then
+    # ps -eo pid=,comm=: " 553 lighttpd" -> lighttpd; "PID COMMAND"
+    # or "lighttpd 553" -> invalid, even when ps exits zero. Names may contain spaces.
+    if names=$(LC_ALL=C awk '
+      NR > 20000 { bad=1; next }
+      $1 !~ /^[0-9]+$/ || $1+0 == 0 || NF < 2 { bad=1; next }
+      {
+        name=$0
+        sub(/^[ \t\r\013\014]*[0-9]+[ \t\r\013\014]+/, "", name)
+        if (name ~ /[\t\r\013\014]/ || length(name) > 64) { bad=1; next }
+        valid++; print name
+      }
+      END { if (bad || !valid) exit 1 }
+    ' <<< "$snapshot"); then
+      manifest_processes=$names
+      manifest_processes_available=true
+      return
+    fi
+    reason='Process-name snapshot was malformed despite successful ps exit status'
+  else
+    reason='Process-name snapshot failed or timed out'
+  fi
+  manifest_emit warning area processes reason "$reason; trying bounded /proc status metadata. Process coverage remains incomplete."
+  manifest_collection_failed=true
+  # Keep useful names even when other processes exit or are unreadable. Absence
+  # never proves a service stopped, and no arguments are recovered from /proc.
+  if names=$(manifest_output_proc_process_names); then
+    manifest_processes=$names
+    manifest_processes_available=true
+  else
+    manifest_processes=$names
+    manifest_emit warning area processes reason 'The /proc process-name fallback was unavailable or incomplete (permissions, exited processes, malformed status, 5 seconds or 20000 processes); missing service activity is unknown.'
+  fi
+}
+
 # Inspect arguments as data only; emit fixed indicators and numeric references, never raw commands.
 # Explicit C whitespace and escaped regex slashes also work with pre-POSIX-class AWK.
 # Detection examples are invented. USER, HIDDEN, URL, ENCODED and TOKEN are placeholders.
@@ -9768,6 +9855,8 @@ function manifest_process_indicators() {
   # ps -eww -o pid=,ppid=,uid=,vsz=,args=, for example:
   # 101 50 1001 9000 tee -a /etc/sudoers -> sudoers_write_command.
   # 102 50 1001 4000 [kworker/0:0] 47128 -> userspace_kernel_name, not a kernel thread.
+  # Legacy ps can exit zero with ",ppid=,uid=,vsz=,args=" followed by
+  # "              521" -> malformed snapshot, not evidence of no indicators.
   # Finish ps before starting the parser: otherwise ps can collect AWK's own
   # regex program, whose mining examples match the heuristic. Do not exclude
   # descendants or generic awk processes; their arguments remain evidence.
@@ -9786,8 +9875,9 @@ function manifest_process_indicators() {
       counts[key]++
     }
     NR > 20000 { limited=1; next }
-    $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || NF < 5 { bad=1; next }
+    $1 !~ /^[0-9]+$/ || $1+0 == 0 || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || NF < 5 { bad=1; next }
     {
+      valid++
       args=$0; sub(/^[ \t\r\013\014]*[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+/, "", args)
       # printf RULE >> /etc/sudoers or tee -a /etc/sudoers -> sudoers_write_command.
       # cat /etc/sudoers > /tmp/example.txt -> no write indicator.
@@ -9829,7 +9919,7 @@ function manifest_process_indicators() {
         printf "%s\t%d\t%s\t%s\t%s\n", kinds[key], counts[key], pids[key], parents[key], uids[key]
       }
       if (limited) print "limit"
-      if (bad) print "parse_failed"
+      if (bad || !valid) print "parse_failed"
     }
   ' <<< "$snapshot" | LC_ALL=C sort); then
     manifest_emit warning area security_processes reason 'Process snapshot failed or timed out; potential compromise indicators could not be evaluated.'
@@ -9840,7 +9930,7 @@ function manifest_process_indicators() {
     case "$indicator" in
       '') continue;;
       limit) manifest_emit warning area security_processes reason 'Only the first 20000 processes and 200 indicator/parent/UID groups were examined; coverage is incomplete.'; continue;;
-      parse_failed) manifest_emit warning area security_processes reason 'Some process rows could not be parsed; coverage is incomplete.'; continue;;
+      parse_failed) manifest_emit warning area security_processes reason 'Process snapshot was empty or contained malformed rows despite successful ps exit status; argument-indicator coverage is incomplete. Raw arguments are not emitted and /proc names cannot replace argument inspection.'; manifest_collection_failed=true; continue;;
       sudoers_write_command) reason='Command references a sudoers write; verify authorization and whether the write succeeded.';;
       encoded_shell_pipeline) reason='Command decodes Base64 and pipes to a shell; review its origin without executing the payload.';;
       mining_command_arguments) reason='Command contains a mining protocol or correlated algorithm, pool and user options; verify whether mining is authorized.';;
@@ -10082,7 +10172,7 @@ function manifest_run_bounded() {
 function manifest_service() {
   local name=$1 package=$2 version=$3 selector=$1 running=unknown enabled=unknown state result link processes
   local systemd=false
-  local enabled_source=unknown running_source=unknown clusters row cluster_version cluster port cluster_state
+  local enabled_source=unknown running_source=unknown clusters row cluster_version cluster port cluster_state fields key value sub_state main_pid
   if [ -d "$manifest_root/run/systemd/system" ]; then
     case "$(readlink "$manifest_root/proc/1/exe" 2>/dev/null)" in */systemd|*/'systemd (deleted)') systemd=true;; esac
   fi
@@ -10100,7 +10190,26 @@ function manifest_service() {
       running_source=pg_lsclusters
     fi
   elif ! "${manifest_unprivileged:-false}" && command -v upgrade_services_is_active >/dev/null 2>&1; then
-    if upgrade_services_is_active "$name" "$selector"; then running=yes; running_source=service_status
+    if upgrade_services_is_active "$name" "$selector"; then
+      running=yes; running_source=service_status
+      # systemctl show for a legacy daemon wrapper:
+      # SubState=exited followed by MainPID=0 -> no observed daemon, not running=yes.
+      # Postfix has a separately verified oneshot/master status path; preserve it.
+      if $systemd && [ "$name" != postfix ]; then
+        sub_state= main_pid=
+        if fields=$(manifest_run_bounded 2 systemctl show -p SubState -p MainPID "$selector.service" 2>/dev/null); then
+          while IFS='=' read -r key value; do
+            case "$key" in SubState) sub_state=$value;; MainPID) main_pid=$value;; esac
+          done <<< "$fields"
+          if [ "$sub_state:$main_pid" = exited:0 ]; then
+            running=unknown; running_source=systemd_exited_wrapper
+          elif [[ ! "$sub_state" =~ ^[a-z-]+$ ]] || [[ ! "$main_pid" =~ ^[0-9]+$ ]]; then
+            running=unknown; running_source=systemd_state_unknown
+          elif [ "$main_pid" = 0 ]; then
+            running=unknown; running_source=systemd_no_main_pid
+          fi
+        else running=unknown; running_source=systemd_state_unknown; fi
+      fi
     else
       result=$?
       # Old init scripts can return 1 for an unsupported status action; do not call that stopped.
@@ -10501,7 +10610,7 @@ function manifest_packages() {
     name=''
     case "$package" in
       apache2|apache2-bin|apache2.2-common) name=apache2;; httpd) name=httpd;; nginx|nginx-core|nginx-full|nginx-light|nginx-extras) name=nginx;;
-      caddy|postfix|redis|redis-server|fail2ban) name=$package;; exim4*daemon*|exim4) name=exim4;; exim) name=exim;;
+      caddy|lighttpd|postfix|redis|redis-server|fail2ban) name=$package;; exim4*daemon*|exim4) name=exim4;; exim) name=exim;;
       sendmail|sendmail-bin) name=sendmail;; dovecot|dovecot-core|dovecot-common|dovecot-imapd|dovecot-pop3d) name=dovecot;; courier*) name=courier;; mailman*) name=mailman;;
       mysql-server|mysql-server-[0-9]*) name=mysql;; mariadb-server|mariadb-server-[0-9]*|MariaDB-server) name=mariadb;; postgresql-server) name=postgresql;; postgresql[0-9][0-9]-server)
         release=${package#postgresql}; release=${release%-server}
@@ -10640,6 +10749,337 @@ function manifest_apache_php() {
     manifest_apache_php_package=unknown
   fi
   if [ "$count" -eq 1 ] && ! $ambiguous; then manifest_apache_php_available=true; fi
+}
+
+# Tokenize configuration as data. Never invoke lighttpd, include_shell or a backend.
+# Input from lighttpd.conf: server.document-root = "/srv/www" # comment
+# -> w/vserver.document-root, p/v=, s/v/srv/www, n/v (TSV adds file and line).
+# The v prefix preserves empty quoted strings through Bash tab-delimited reads.
+function manifest_lighttpd_tokens() {
+  local file=$1 depth=$2 resolved size tokens type value source line extra include_value='' include_count=0 include_line=0 in_include=false
+  local candidate pattern matches
+  if [ "$depth" -gt 16 ] || [ "$manifest_lighttpd_files" -ge 200 ] || [ $((SECONDS-manifest_lighttpd_started)) -ge 5 ]; then
+    printf 'W\tvcollection_limit\t%s\t1\n' "$manifest_lighttpd_main"; return
+  fi
+  case "$file" in *$'\t'*|*$'\r'*|*$'\n'*|*'\'*|*/../*|*/..|*/./*) printf 'W\tvunsafe_include\t%s\t1\n' "$manifest_lighttpd_main"; return;; esac
+  resolved=$(manifest_run_bounded 1 readlink -f -- "$file" 2>/dev/null) || resolved=
+  case "$resolved" in "$manifest_lighttpd_base"/*) :;; *) printf 'W\tvinclude_outside_config_tree\t%s\t1\n' "$manifest_lighttpd_main"; return;; esac
+  case "|$manifest_lighttpd_stack|" in *"|$resolved|"*) printf 'W\tvinclude_cycle\t%s\t1\n' "${file#"$manifest_root"}"; return;; esac
+  if [ ! -f "$resolved" ] || [ ! -r "$resolved" ]; then printf 'W\tvunreadable_include\t%s\t1\n' "${file#"$manifest_root"}"; return; fi
+  size=$(manifest_run_bounded 1 wc -c < "$resolved") || size=9999999
+  manifest_lighttpd_bytes=$((manifest_lighttpd_bytes+size))
+  if [ "$size" -gt 262144 ] || [ "$manifest_lighttpd_bytes" -gt 2097152 ]; then printf 'W\tvcollection_limit\t%s\t1\n' "${file#"$manifest_root"}"; return; fi
+  manifest_lighttpd_files=$((manifest_lighttpd_files+1))
+  local manifest_lighttpd_stack="$manifest_lighttpd_stack$resolved|"
+  tokens=$(LC_ALL=C manifest_run_bounded 2 awk -v source="${file#"$manifest_root"}" '
+    function out(kind,value) { printf "%s\tv%s\t%s\t%d\n",kind,value,source,FNR }
+    {
+      if (length($0)>65536 || FNR>20000) { out("e","token_limit"); exit }
+      text=$0
+      while (length(text)) {
+        if (text ~ /^[ \t\r]/) { sub(/^[ \t\r]+/,"",text); continue }
+        c=substr(text,1,1)
+        if (c=="#") break
+        if (c=="\042") {
+          value=""; escaped=0; closed=0
+          for (i=2;i<=length(text);i++) {
+            c=substr(text,i,1)
+            if (escaped) { if (c!="\042" && c!="\\") value=value "\\"; value=value c; escaped=0 }
+            else if (c=="\\") escaped=1
+            else if (c=="\042") { closed=1; break }
+            else value=value c
+          }
+          if (!closed || value ~ /[\t\r\013\014]/) { out("e","invalid_string"); break }
+          out("s",value); text=substr(text,i+1); continue
+        }
+        if (text ~ /^(\+=|=>|==|=~|!=|!~|:=)/) { out("p",substr(text,1,2)); text=substr(text,3); continue }
+        if (c ~ /[(){}\[\],=$+;]/) { out("p",c); text=substr(text,2); continue }
+        if (match(text,/^[A-Za-z0-9_.:-]+/)) { out("w",substr(text,1,RLENGTH)); text=substr(text,RLENGTH+1); continue }
+        out("e","unsupported_token"); break
+      }
+      out("n","")
+    }
+  ' "$resolved") || { printf 'W\tvtokenizer_failed\t%s\t1\n' "${file#"$manifest_root"}"; return; }
+  while IFS=$'\t' read -r type value source line extra; do
+    if [ -n "$extra" ]; then printf 'W\tvinvalid_token_record\t%s\t1\n' "$manifest_lighttpd_main"; return; fi
+    if [ $((SECONDS-manifest_lighttpd_started)) -ge 5 ]; then printf 'W\tvcollection_limit\t%s\t1\n' "$manifest_lighttpd_main"; return; fi
+    if [ "$type:$value" = w:vinclude ] || [ "$type:$value" = w:vinclude_shell ]; then
+      in_include=true; include_count=0; include_value=; include_line=$line
+      if [ "$value" = vinclude_shell ]; then include_count=100; fi
+      continue
+    fi
+    if $in_include; then
+      if [ "$type" != n ]; then
+        include_count=$((include_count+1))
+        if [ "$type" = s ] && [ "$include_count" -eq 1 ]; then include_value=${value#v}; else include_count=100; fi
+        continue
+      fi
+      in_include=false
+      if [ "$include_count" -ne 1 ]; then printf 'W\tvdynamic_or_generated_include\t%s\t%s\n' "$source" "$include_line"; continue; fi
+      case "$include_value" in
+        ''|*'$'*|*'`'*|*'%'*|*'|'*|*'..'*|*'('*|*')'*|*$'\t'*|*$'\r'*|*$'\n'*) printf 'W\tvunsafe_include\t%s\t%s\n' "$source" "$include_line"; continue;;
+        /etc/lighttpd/*) pattern="$manifest_root$include_value";;
+        /*) printf 'W\tvinclude_outside_config_tree\t%s\t%s\n' "$source" "$include_line"; continue;;
+        *) pattern="${file%/*}/$include_value";;
+      esac
+      # compgen expands a quoted literal glob; it neither evaluates shell text nor
+      # reads unreferenced conf-enabled files. At most 201 names are retained.
+      matches=$(manifest_run_bounded 1 env -u BASH_ENV -u ENV /bin/bash --noprofile --norc -c 'compgen -G "$1" | LC_ALL=C sort | head -n 201' bash "$pattern") || matches=
+      if [ -z "$matches" ]; then printf 'W\tvinclude_not_found\t%s\t%s\n' "$source" "$include_line"; continue; fi
+      while IFS= read -r candidate; do
+        manifest_lighttpd_tokens "$candidate" "$((depth+1))"
+      done <<< "$matches"
+    else
+      printf '%s\t%s\t%s\t%s\n' "$type" "$value" "$source" "$line"
+    fi
+  done <<< "$tokens"
+}
+
+# A conservative subset, not a replacement for lighttpd configuration evaluation.
+# Literal lighttpd input (arrays may span lines):
+# server.modules = ( "mod_staticfile", "mod_fastcgi" )
+# $HTTP["host"] == "app.example.invalid" { fastcgi.server = ( ".php" =>
+#   (( "socket" => "/run/php.sock", "bin-path" => "/usr/bin/php-cgi -q" )) ) }
+# -> site node 1/literal_host/app.example.invalid; handler node 1/.php/fastcgi,
+# executable /usr/bin/php-cgi, socket /run/php.sock. Arguments/environment stay private.
+# Unknown expressions/includes make all site certainty incomplete; host regex and
+# URL/socket conditions retain their selector kinds instead of becoming URLs.
+function manifest_lighttpd_output_configuration() {
+  local main=$1 base root_path
+  local manifest_lighttpd_main="${1#"$manifest_root"}" manifest_lighttpd_base
+  local manifest_lighttpd_started=$SECONDS manifest_lighttpd_files=0 manifest_lighttpd_bytes=0 manifest_lighttpd_stack='|'
+  case "$manifest_lighttpd_main" in *$'\t'*|*$'\r'*|*$'\n'*|*'\'*) printf 'warning\tunsafe_main_path\tunknown\t1\nmeta\tconfiguration_complete\tfalse\n'; return;; esac
+  root_path=$(manifest_run_bounded 1 readlink -f -- "${manifest_root:-/}" 2>/dev/null) || root_path=
+  base="$manifest_root/etc/lighttpd"
+  manifest_lighttpd_base=$(manifest_run_bounded 1 readlink -f -- "$base" 2>/dev/null) || manifest_lighttpd_base=
+  if [ -z "$root_path" ] || [ "$manifest_lighttpd_base" != "${root_path%/}/etc/lighttpd" ]; then
+    printf 'warning\tunsafe_config_tree\t%s\t1\nmeta\tconfiguration_complete\tfalse\n' "$manifest_lighttpd_main"; return
+  fi
+  # Bound the parser too: many small nested contexts must not turn its final
+  # inheritance pass into an unbounded calculation after bounded file reads.
+  (set -o pipefail; manifest_lighttpd_tokens "$main" 0 | LC_ALL=C manifest_run_bounded 10 awk '
+    function val(v) { return v=="" ? "unknown" : v }
+    function safe(v) { gsub(/[\t\r\n\013\014]/,"",v); return val(v) }
+    function sym(i,v) { return kind[i]=="p" && token[i]==v }
+    function warn(reason,file,line) { print "warning",reason,safe(file),line; incomplete=1 }
+    function literal(a,b) { return a==b && (kind[a]=="s" || (kind[a]=="w" && token[a] ~ /^[0-9]+$/)) }
+    function path(v) { return v ~ /^\// && v !~ /[?$%`{}\r\t]/ ? v : "unknown" }
+    function host(v) { return v ~ /^[A-Za-z0-9_.:\[\]-]+$/ ? v : "unknown" }
+    function target(v) {
+      sub(/[?#].*$/,"",v)
+      if (v ~ /^[A-Za-z][A-Za-z0-9+.-]*:\/\//) sub(/\/\/[^/]*@/,"//",v)
+      if (v !~ /^(https?:\/\/|\/)/ || v ~ /[\t\r ]/) return "unknown"
+      return v
+    }
+    function inherited(node,key,    n) {
+      n=node
+      while (n>=0) { if ((n SUBSEP key) in setting) return setting[n,key]; n=parent[n] }
+      return "unknown"
+    }
+    function effective_module(node,module,    n) {
+      n=node
+      while (n>=0) {
+        if ((n SUBSEP module) in modules) return 1
+        if ((n SUBSEP "modules_reset") in setting) return 0
+        n=parent[n]
+      }
+      return 0
+    }
+    function handler_applies(node,idx,    n) {
+      if(disabled[idx]) return 0
+      for(n=node;n>=0;n=parent[n]) {
+        if(n==handler_node[idx]) return effective_module(node,handler_module[idx])
+        if((n SUBSEP handler_kind[idx] "_reset") in setting) return 0
+      }
+      return 0
+    }
+    function emit_handler(node,ext,handler,executable,socket,backend,port,file,line,    mod) {
+      mod=(handler=="cgi" ? "mod_cgi" : handler=="fastcgi" ? "mod_fastcgi" : handler=="scgi" ? "mod_scgi" : "mod_proxy")
+      handlers[++nh]=node OFS safe(ext) OFS handler OFS safe(executable) OFS safe(socket) OFS safe(backend) OFS safe(port) OFS safe(file) OFS line
+      handler_module[nh]=mod; handler_node[nh]=node; handler_kind[nh]=handler
+    }
+    function arrays(a,b,node,key,file,line,    i,j,d,ext,executable,socket,backend,port,handler,valid,field,endpoints,skip) {
+      if (!sym(a,"(") || !sym(b,")")) { warn("dynamic_array",file,line); unknown[node]=1; return }
+      if (key=="server.modules") {
+        for (i=a+1;i<b;i++) {
+          if (sym(i,",")) continue
+          if (kind[i]!="s" || token[i] !~ /^mod_[A-Za-z0-9_]+$/) { warn("dynamic_modules",file,line); unknown[node]=1; continue }
+          modules[node,token[i]]=1
+          # Unmodelled request handlers prevent a static-only claim.
+          if (token[i] !~ /^mod_(access|accesslog|auth|authn_file|authn_ldap|authn_pam|authn_sasl|authn_mysql|authn_pgsql|authn_dbi|cgi|fastcgi|scgi|proxy|redirect|staticfile|indexfile|dirlisting|deflate|compress|expire|setenv|status|openssl|mbedtls|gnutls|nss|wolfssl|evasive|extforward|rrdtool|secdownload|simple_vhost|evhost)$/) {
+            warn("unmodelled_module",file,line); unknown[node]=1
+          }
+          if (token[i] ~ /^mod_(simple_vhost|evhost)$/) { warn("dynamic_virtual_hosts",file,line); unknown[node]=1 }
+        }
+        return
+      }
+      if (key=="url.redirect") {
+        for(i=a+1;i<b;i++) {
+          if(sym(i,",")) continue
+          if (kind[i]=="s" && sym(i+1,"=>") && kind[i+2]=="s") {
+            redirects[++nr]=node OFS (token[i] ~ /[?@#]/ ? "unknown" : safe(token[i])) OFS safe(target(token[i+2])) OFS safe(file) OFS line; i+=2
+          } else { warn("dynamic_redirect",file,line); unknown[node]=1; break }
+        }
+        return
+      }
+      handler=(key=="cgi.assign" ? "cgi" : key=="fastcgi.server" ? "fastcgi" : key=="scgi.server" ? "scgi" : "reverse_proxy")
+      i=a+1
+      while(i<b) {
+        if(sym(i,",")) { i++; continue }
+        if(kind[i]!="s" || !sym(i+1,"=>")) { warn("dynamic_handler",file,line); unknown[node]=1; break }
+        ext=token[i]; if (ext=="") ext="all_paths"
+        if (ext ~ /[?$@]/) ext="unknown"
+        i+=2; executable=socket=backend=port="unknown"; valid=1; endpoints=0
+        if(handler=="cgi") {
+          if(kind[i]!="s") valid=0
+          else { executable=token[i]; sub(/[ \t].*$/,"",executable); executable=(executable=="" ? "direct_shebang" : path(executable)); i++ }
+        } else if(sym(i,"(")) {
+          d=1; i++
+          # Endpoint keys are read only at the first backend attribute level.
+          # "bin-environment" and its nested map are never traversed as endpoints.
+          for(;i<b && d;i++) {
+            if(kind[i]=="s" && token[i] ~ /^bin-(copy-)?environment$/ && sym(i+1,"=>")) {
+              i+=2
+              if(sym(i,"(")) {
+                skip=1
+                while(skip && ++i<b) { if(sym(i,"(")) skip++; else if(sym(i,")")) skip-- }
+                if(skip) valid=0
+              }
+              continue
+            }
+            if (sym(i,"(")) { d++; continue }
+            if (sym(i,")")) {
+              if (d==2) {
+                emit_handler(node,ext,handler,executable,socket,backend,port,file,line); endpoints++
+                executable=socket=backend=port="unknown"
+              }
+              d--; continue
+            }
+            if(d<=2 && kind[i]=="s" && sym(i+1,"=>") && (kind[i+2]=="s" || kind[i+2]=="w")) {
+              field=token[i]
+              if(field ~ /^(bin-path|socket|host|port)$/ && !literal(i+2,i+2)) { valid=0; i+=2; continue }
+              if(field=="bin-path") { executable=token[i+2]; sub(/[ \t].*$/,"",executable); executable=path(executable) }
+              else if(field=="socket") socket=path(token[i+2])
+              else if(field=="host") backend=host(token[i+2])
+              else if(field=="port" && token[i+2] ~ /^[0-9]+$/ && token[i+2]+0<=65535) port=token[i+2]
+              i+=2
+            } else if (sym(i,"+") || (kind[i]=="w" && token[i] !~ /^[0-9]+$/)) valid=0
+          }
+          if(d) valid=0
+        } else valid=0
+        if(!valid) { warn("dynamic_handler",file,line); unknown[node]=1; break }
+        if (!endpoints) emit_handler(node,ext,handler,executable,socket,backend,port,file,line)
+      }
+    }
+    function assignment(a,b,node,file,line,    key,op,i,scalar) {
+      key=token[a]; op=token[a+1]
+      if (op!="=" && op!="+=") { warn("unsupported_assignment",file,line); unknown[node]=1; return }
+      # server.chroot = "/srv/jail" makes /www relative to that jail,
+      # not the host /www. Leave filesystem/launcher mapping for manual review.
+      if(key=="server.chroot") {
+        if(!literal(a+2,b) || (token[a+2]!="" && token[a+2]!="/")) {
+          warn("unresolved_chroot_paths",file,line); host_paths_unresolved=1
+        }
+        return
+      }
+      if(key=="server.document-root" || key=="server.port" || key=="server.username" || key=="ssl.engine" || key=="server.name") {
+        if (!literal(a+2,b) || op!="=") { setting[node,key]="unknown"; warn("dynamic_site_value",file,line); unknown[node]=1; return }
+        scalar=token[a+2]
+        if(key=="server.document-root") scalar=path(scalar)
+        if(key=="server.name") scalar=host(scalar)
+        if(key=="server.port" && (scalar !~ /^[0-9]+$/ || scalar+0>65535)) scalar="unknown"
+        if(key=="server.username" && scalar !~ /^[A-Za-z0-9_.-]+$/) scalar="unknown"
+        if(key=="ssl.engine") scalar=(scalar=="enable" ? "true" : scalar=="disable" ? "false" : "unknown")
+        setting[node,key]=scalar
+        if(scalar=="unknown") { warn("invalid_site_literal",file,line); unknown[node]=1 }
+        return
+      }
+      if(key=="server.modules" || key=="cgi.assign" || key=="fastcgi.server" || key=="scgi.server" || key=="proxy.server" || key=="url.redirect") {
+        if(key=="server.modules" && op=="=") {
+          for(i in modules) if(index(i,node SUBSEP)==1) delete modules[i]
+          setting[node,"modules_reset"]=1
+        }
+        if (op=="=" && key ~ /^(cgi\.assign|fastcgi\.server|scgi\.server|proxy\.server)$/) {
+          scalar=(key=="cgi.assign" ? "cgi" : key=="fastcgi.server" ? "fastcgi" : key=="scgi.server" ? "scgi" : "reverse_proxy")
+          setting[node,scalar "_reset"]=1
+          for(i=1;i<=nh;i++) if(handler_node[i]==node && handler_kind[i]==scalar) disabled[i]=1
+        }
+        arrays(a+2,b,node,key,file,line); return
+      }
+      # Known metadata/access/TLS directives do not choose an executing handler.
+      # Everything else is unresolved: e.g. alias, rewrite, vhostdb, Lua or variables.
+      if (key !~ /^(server\.(bind|tag|errorlog|errorlog-use-syslog|pid-file|groupname|chroot|event-handler|max-.*|network-backend|upload-dirs|follow-symlink|dir-listing|range-requests)|index-file\.names|mimetype\.assign|accesslog\..*|auth\..*|ssl\..*|url\.access-deny|static-file\..*|dir-listing\..*|compress\..*|deflate\..*|expire\..*|setenv\..*|debug\..*|cgi\.execute-x-only|fastcgi\.debug|scgi\.debug|proxy\.debug)$/) {
+        warn("unresolved_directive",file,line); unknown[node]=1
+      }
+    }
+    function statement(a,b,node,file,line) { if(a<=b) assignment(a,b,node,file,line) }
+    function condition(a,b,node,file,line,    id,selector,what,op,v) {
+      id=++nodes; parent[id]=node; source[id]=file; lineno[id]=line; selector="unknown"; what="conditional"
+      if(token[a]=="$" && (token[a+1]=="HTTP" || token[a+1]=="SERVER") && token[a+2]=="[" && kind[a+3]=="s" && token[a+4]=="]" && kind[a+6]=="s" && a+6==b) {
+        op=token[a+5]; v=token[a+6]
+        if(token[a+1]=="HTTP" && token[a+3]=="host" && (op=="==" || op=="!=")) { what=(op=="==" ? "literal_host" : "host_exclusion"); selector=host(v) }
+        else if(token[a+1]=="HTTP" && token[a+3]=="host" && (op=="=~" || op=="!~")) { what=(op=="=~" ? "host_regex" : "host_regex_exclusion"); if(v !~ /[@#\r\t \/=]/) selector=safe(v) }
+        else if(token[a+1]=="HTTP" && token[a+3]=="url" && (op=="==" || op=="=~" || op=="!=" || op=="!~")) {
+          what=(op=="!=" ? "url_exclusion" : op=="!~" ? "url_regex_exclusion" : "url")
+          if(v !~ /[@#\r\t ]/ && v !~ /\\\?|\[\?\]/ && ((op=="=~" || op=="!~") || v !~ /\?/)) selector=safe(v)
+        }
+        else if(token[a+1]=="SERVER" && token[a+3]=="socket" && op=="==") { what="socket"; selector=host(v); if(v ~ /:[0-9]+$/) { sub(/^.*:/,"",v); setting[id,"server.port"]=v } }
+      }
+      selection[id]=selector; selection_kind[id]=what
+      if(what=="conditional" || selector=="unknown") { warn("unresolved_condition",file,line); unknown[id]=1 }
+      return id
+    }
+    BEGIN { FS="\t"; OFS="\t"; parent[0]=-1; selection[0]="default"; selection_kind[0]="default"; current=0; start=1 }
+    $1=="W" || $1=="e" { warn(substr($2,2),$3,$4); next }
+    {
+      typ=$1; value=substr($2,2)
+      if(typ=="n" && parens>0) next
+      if(typ=="n" || (typ=="p" && value==";")) { statement(start,count,current,first_file,first_line); count=0; start=1; next }
+      if(typ=="p" && value=="{" && parens==0) { current=condition(start,count,current,first_file,first_line); count=0; start=1; next }
+      if(typ=="p" && value=="}" && parens==0) {
+        statement(start,count,current,first_file,first_line); count=0; start=1
+        if(current==0) warn("unbalanced_context",$3,$4); else current=parent[current]
+        next
+      }
+      if(!count) { first_file=$3; first_line=$4; if(source[0]=="") {source[0]=$3; lineno[0]=$4} }
+      count++; token[count]=value; kind[count]=typ
+      if(typ=="p" && value=="(") parens++
+      if(typ=="p" && value==")") { parens--; if(parens<0) { warn("unbalanced_array",$3,$4); parens=0 } }
+      if(count>20000) {warn("token_limit",$3,$4); exit}
+    }
+    END {
+      if(count) statement(start,count,current,first_file,first_line)
+      if(parens || current) warn("unclosed_context_or_array",first_file,first_line)
+      for(i=1;i<=nh;i++) {
+        if(disabled[i]) continue
+        n=handler_node[i]
+        if(host_paths_unresolved) continue
+        if(effective_module(n,handler_module[i])) {
+          print "handler",handlers[i]
+          active[n,handler_kind[i]]=1
+        } else {warn("handler_module_unresolved",source[n],lineno[n]); unknown[n]=1}
+      }
+      for(i=1;i<=nr;i++) print "redirect",redirects[i]
+      for(n=0;n<=nodes;n++) {
+        runtime="static_files"; seen=0; bad=incomplete
+        for(j=n;j>=0;j=parent[j]) {
+          if(unknown[j]) bad=1
+          for(k=1;k<=nh;k++) if(handler_node[k]==j && handler_applies(n,k)) {
+            if(!seen) runtime=handler_kind[k]; else if(runtime!=handler_kind[k]) runtime="unknown"
+            seen++
+          }
+        }
+        if(bad) runtime="unknown"
+        root=inherited(n,"server.document-root"); username=inherited(n,"server.username"); port=inherited(n,"server.port"); tls=inherited(n,"ssl.engine")
+        if(host_paths_unresolved) root="unknown"
+        if(root=="unknown" && runtime=="static_files") { warn("unresolved_document_root",source[n],lineno[n]); runtime="unknown"; bad=1 }
+        selector=selection[n]; if(n==0 && inherited(0,"server.name")!="unknown") selector=inherited(0,"server.name")
+        route="none"; for(j=n;j>0;j=parent[j]) route=selection_kind[j] ":" selection[j] (route=="none" ? "" : ";" route)
+        print "site",n,safe(selector),selection_kind[n],port,tls,root,username,runtime,safe(source[n]),val(lineno[n]),safe(route),(bad ? "incomplete" : "literal_configuration")
+      }
+      print "meta","configuration_complete",(incomplete ? "false" : "true")
+    }
+  ')
 }
 
 function manifest_has_php_document_root() {
@@ -10795,9 +11235,16 @@ function manifest_dns() {
 function manifest_application() {
   local version_pattern='^[0-9][A-Za-z0-9.+_()\ -]{0,100}$'
   local discovery=${2:-configured_document_root} site_mapping=${3:-configured_document_root}
-  local document_root="$1" file='' application=unknown version=unknown language=unknown language_version=unknown version_source=unknown modified=unknown version_file=unknown
+  local document_root="$1" file='' resolved execution="${4:-unknown}" application=unknown version=unknown language=unknown language_version=unknown version_source=unknown modified=unknown version_file=unknown
   case "$document_root" in /*) ;; *) return ;; esac
   case "$document_root" in *'$'*|*'%'*|*'{'*|*'}'*) return ;; esac
+  if [ -n "$manifest_root" ]; then
+    resolved=$(readlink -f -- "$manifest_root$document_root" 2>/dev/null) || resolved=
+    case "$resolved" in "$manifest_root"/*) :;; *)
+      manifest_emit warning area applications reason 'Document root resolves outside the inventory root or is unresolved; application markers were not read.'
+      manifest_collection_failed=true; return;;
+    esac
+  fi
   if [ -f "$manifest_root$document_root/wp-includes/version.php" ]; then
     file="$manifest_root$document_root/wp-includes/version.php"; application=WordPress; language=PHP
     # $wp_version = "6.5.3"; -> version=6.5.3.
@@ -10850,7 +11297,7 @@ function manifest_application() {
     if [[ "$language_version" =~ ^[0-9][0-9A-Za-z.+_-]{0,60}$ ]]; then version_source=project_declared_not_verified_runtime
     else language_version=unknown; fi
   fi
-  manifest_emit application discovery "$discovery" site_mapping "$site_mapping" document_root "$document_root" application "$application" version "$version" language "$language" language_version "$language_version" language_version_source "$version_source" version_file "$version_file" version_file_modified "$modified" date_basis filesystem_metadata_not_install_date
+  manifest_emit application discovery "$discovery" site_mapping "$site_mapping" document_root "$document_root" application "$application" version "$version" language "$language" language_version "$language_version" language_version_source "$version_source" version_file "$version_file" version_file_modified "$modified" date_basis filesystem_metadata_not_install_date execution "$execution" activity unknown activity_basis file_markers_not_live_requests
 }
 
 # Distribution WordPress files can coexist with separately deployed websites.
@@ -10919,6 +11366,7 @@ function manifest_website() {
   local server="$1" names="$2" port="$3" tls="$4" document_root="$5" user="$6" runtime="$7" config="$8"
   local name url scheme=http primary_url=unknown primary=true runtime_version=unknown runtime_source=unknown runtime_package=unknown i matched_pool=-1 ambiguous_pool=false
   local certificate_file=${9:-unknown} certificate_file_present=unknown proxy=${10:-unknown} document_root_exists=unknown
+  local configuration_scope=${11:-unknown} execution=${12:-unknown}
   local url_host_pattern='^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f:.]+\])$'
   case "$document_root" in
     *'$'*|*'%'*|*'{'*|*'}'*) :;;
@@ -10977,7 +11425,7 @@ function manifest_website() {
       primary=false
     fi
     manifest_dns "$name"
-    manifest_emit website server "$server" name "$name" port "$port" tls "$tls" url "$url" primary_url "$primary_url" certificate_file "$certificate_file" certificate_file_present "$certificate_file_present" document_root "$document_root" document_root_exists "$document_root_exists" user "$user" runtime "$runtime" runtime_version "$runtime_version" runtime_version_source "$runtime_source" runtime_package "$runtime_package" config "$config" dns "$manifest_dns_result" dns_addresses "$manifest_dns_addresses" dns_reason "$manifest_dns_reason" proxy "$proxy" proxy_basis literal_config_authority_not_resolved
+    manifest_emit website server "$server" name "$name" port "$port" tls "$tls" url "$url" primary_url "$primary_url" certificate_file "$certificate_file" certificate_file_present "$certificate_file_present" document_root "$document_root" document_root_exists "$document_root_exists" user "$user" runtime "$runtime" runtime_version "$runtime_version" runtime_version_source "$runtime_source" runtime_package "$runtime_package" config "$config" dns "$manifest_dns_result" dns_addresses "$manifest_dns_addresses" dns_reason "$manifest_dns_reason" proxy "$proxy" proxy_basis literal_config_authority_not_resolved configuration_scope "$configuration_scope" execution "$execution" activity unknown activity_basis configuration_not_live_requests
     case "$scheme:$port" in
       http:80|https:443|*:unknown) manifest_http "$name" http 80; manifest_http "$name" https 443;;
       *) manifest_http "$name" "$scheme" "$port";;
@@ -10985,7 +11433,7 @@ function manifest_website() {
   done
   case "|$manifest_seen_roots|" in *"|$document_root|"*) ;; *)
     manifest_seen_roots="$manifest_seen_roots|$document_root"
-    manifest_application "$document_root"
+    manifest_application "$document_root" configured_document_root configured_document_root "$execution"
     manifest_web_indicators "$document_root" ;;
   esac
 }
@@ -11124,6 +11572,225 @@ function manifest_websites() {
       done <<< "$records"
     done <<< "$files"
   done
+  manifest_lighttpd_websites
+}
+
+# Paths are metadata, not a reason to start an old application. A public asset
+# root can point into a retained application: /srv/www/files -> ../legacy/public
+# yields resolved_path=/srv/legacy/public and migration_role=required_public_assets.
+function manifest_website_assets() {
+  local root=$1 execution=$2 actual resolved project file paths candidate depth=0 symlink=false exists=false
+  case "$root" in /*) :;; *) return;; esac
+  case "$root" in /|/home|/root|/srv|/var|/var/www|/usr|/opt|/etc|/etc/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|*'$'*|*'%'*|*'{'*|*'}'*) return;; esac
+  actual="$manifest_root$root"
+  resolved=$(readlink -f -- "$actual" 2>/dev/null) || resolved=
+  if [ -n "$manifest_root" ]; then
+    case "$resolved" in "$manifest_root"/*) :;; *) resolved=;; esac
+  fi
+  [ ! -d "$actual" ] || exists=true
+  if [ -n "$resolved" ] && [ "$resolved" != "$actual" ]; then symlink=true; fi
+  manifest_emit web_asset_root document_root "$root" resolved_path "${resolved#"$manifest_root"}" exists "$exists" symlink "$symlink" migration_role required_public_assets execution "$execution"
+  [ -n "$resolved" ] && $exists || return
+  case "${resolved#"$manifest_root"}" in /|/etc|/etc/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*) return;; esac
+  # Inspect at most four ancestors for a conventional application marker, never
+  # an environment, database config or code body. A Rails config marker does not
+  # establish that the application is running or that its startup should be copied.
+  project=$resolved
+  while [ "$depth" -lt 4 ]; do
+    case "${project#"$manifest_root"}" in ''|/|/home|/root|/srv|/var|/var/www|/usr|/opt) break;; esac
+    for candidate in config/environment.rb config.ru manage.py wp-settings.php; do
+      [ -f "$project/$candidate" ] || continue
+      manifest_emit application_context document_root "$root" path "${project#"$manifest_root"}" marker "$candidate" role asset_ancestor activity unknown execution not_implied_by_asset_use migration_default preserve_activity_and_data
+      break 2
+    done
+    project=${project%/*}; depth=$((depth+1))
+  done
+  if ! paths=$(set -o pipefail; manifest_run_bounded 2 find "$resolved" -maxdepth 1 \
+      \( -name '*[[:cntrl:]]*' -prune \) -o \( -type f \( -name '*.php' -o -name '*.py' -o -name '*.rb' -o -name '*.pl' -o -name '*.cgi' -o -name '*.fcgi' -o -name '*.sh' \) -print \) 2>/dev/null | head -n 21); then
+    manifest_emit warning area website_assets reason 'Script-file metadata sampling failed or timed out; missing files remain unknown.'
+    return
+  fi
+  depth=0
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    depth=$((depth+1))
+    if [ "$depth" -gt 20 ]; then manifest_emit warning area website_assets reason 'Only the first 20 top-level script-file paths were sampled; file contents were not read.'; break; fi
+    case "$file" in *.php) candidate=PHP;; *.py) candidate=Python;; *.rb) candidate=Ruby;; *.pl) candidate=Perl;; *.sh) candidate=Shell;; *) candidate=unknown;; esac
+    manifest_emit web_file document_root "$root" path "${file#"$manifest_root"}" language "$candidate" execution "$execution" evidence filename_not_executed
+  done <<< "$paths"
+}
+
+# Associate a configured handler with its executable/pool, never with CLI PHP.
+# cgi.assign: ".py" => "/usr/bin/python3" -> language=Python; a FastCGI socket
+# matching listen=/run/php/site.sock -> version from that pool, not `php -v`.
+function manifest_lighttpd_handler() {
+  local scope=$1 selector=$2 kind=$3 executable=$4 socket=$5 host=$6 port=$7 config=$8 line=$9
+  local language=unknown interpreter=unknown version=unknown package=unknown version_source=unknown actual first owner rows name candidate status architecture i matches=0
+  local version_pattern='^([0-9]+[.][0-9]+([.][0-9]+)?)'
+  if [ "$kind" = fastcgi ]; then
+    for ((i=0;i<${#manifest_fpm_sockets[@]};i++)); do
+      if { [ "$socket" != unknown ] && [ "$socket" = "${manifest_fpm_sockets[i]}" ]; } ||
+          { [ "$host" != unknown ] && [ "$port" != unknown ] && [ "$host:$port" = "${manifest_fpm_sockets[i]}" ]; }; then
+        matches=$((matches+1))
+        language=PHP; version=${manifest_fpm_versions[i]}; package=${manifest_fpm_packages[i]}; version_source=fpm_pool_config
+      fi
+    done
+    if [ "$matches" -gt 1 ]; then version=unknown; package=unknown; version_source=ambiguous_fpm_pool_config; fi
+  fi
+  case "$executable" in
+    /*)
+      interpreter=$executable
+      actual=$(readlink -f -- "$manifest_root$executable" 2>/dev/null) || actual=
+      if [ -n "$manifest_root" ]; then case "$actual" in "$manifest_root"/*) :;; *) actual=;; esac; fi
+      if [ -f "$actual" ] && [ -r "$actual" ]; then
+        first=$(head -c 2 -- "$actual" 2>/dev/null)
+        if [ "$first" = '#!' ]; then
+          # read stops at the first newline or 512 characters; no code body is needed.
+          IFS= read -r -n 512 -t 1 first < "$actual" || :
+        else first=; fi
+        # #!/usr/bin/env python3 -> interpreter=/usr/bin/env, language=Python;
+        # #!/usr/bin/ruby -> interpreter=/usr/bin/ruby, language=Ruby. No script runs.
+        if [[ "$first" =~ ^\#![[:space:]]*(/[A-Za-z0-9_./+-]+) ]]; then
+          interpreter=${BASH_REMATCH[1]}
+          case "$first" in '#!'*'/env python'*|'#!'*'/env -S python'*) language=Python;; '#!'*'/env ruby'*) language=Ruby;; '#!'*'/env perl'*) language=Perl;; esac
+        fi
+      fi
+      case "${interpreter##*/}" in php*|php-cgi) language=PHP;; python*) language=Python;; ruby*) language=Ruby;; perl*) language=Perl;; esac
+      # An env wrapper only identifies a language; its interpreter version stays unknown.
+      actual=$(readlink -f -- "$manifest_root$interpreter" 2>/dev/null) || actual=
+      if [ -n "$manifest_root" ]; then case "$actual" in "$manifest_root"/*) :;; *) actual=;; esac; fi
+      if [ "$version_source" = unknown ] && [ "${interpreter##*/}" != env ] && [ "$language" != unknown ] && [ -f "$actual" ] &&
+          owner=$(packages_output_file_owner "${actual#"$manifest_root"}" "$manifest_package_backend" 2>/dev/null); then
+        owner=${owner%%:*}
+        if rows=$(packages_output_inventory "$manifest_package_backend" 2>/dev/null); then
+          while IFS=$'\t' read -r name candidate status architecture; do
+            name=${name%%:*}
+            [ "$name" = "$owner" ] || continue
+            case "$status" in installed|*' installed') :;; *) continue;; esac
+            candidate=${candidate#*:}
+            if [[ "$candidate" =~ $version_pattern ]]; then version=${BASH_REMATCH[1]}; package=$owner; version_source=installed_handler_package; fi
+            break
+          done <<< "$rows"
+        fi
+      fi;;
+  esac
+  manifest_emit website_handler server lighttpd configuration_scope "$scope" selector "$selector" kind "$kind" executable "$executable" interpreter "$interpreter" socket "$socket" backend_host "$host" backend_port "$port" language "$language" runtime_version "$version" runtime_package "$package" runtime_version_source "$version_source" config "$config" line "$line" activity unknown activity_basis configured_handler_not_live_requests
+}
+
+# /proc/PID/cmdline: lighttpd<NUL>-f<NUL>/etc/lighttpd/lighttpd.conf<NUL>
+# -> only config=/etc/lighttpd/lighttpd.conf. /proc/PID/maps paths ending in
+# mod_staticfile.so -> modules=mod_staticfile; all other argv/map fields are omitted.
+function manifest_lighttpd_frontends() {
+  local directory pid file line name recorded_pid count=0 lines arg expect_config=false config modules parsed started=$SECONDS incomplete=false
+  manifest_lighttpd_running_configs='|'
+  manifest_lighttpd_loaded_execution=false
+  manifest_lighttpd_frontend_incomplete=false
+  [ -d "$manifest_root/proc" ] && [ ! -L "$manifest_root/proc" ] || return 0
+  for directory in "$manifest_root"/proc/[0-9]*; do
+    [ -d "$directory" ] || continue
+    pid=${directory##*/}
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    count=$((count+1))
+    if [ "$count" -gt 20000 ] || [ $((SECONDS-started)) -ge 5 ]; then incomplete=true; break; fi
+    [ ! -L "$directory" ] && [ ! -L "$directory/status" ] && [ -f "$directory/status" ] && [ -r "$directory/status" ] || continue
+    name= recorded_pid= lines=0
+    while IFS= read -r -t 1 line; do
+      lines=$((lines+1)); [ "$lines" -le 64 ] || break
+      case "$line" in Name:$'\t'*) name=${line#*$'\t'};; Pid:$'\t'*) recorded_pid=${line#*$'\t'};; esac
+      [ -z "$name" ] || [ -z "$recorded_pid" ] || break
+    done < "$directory/status"
+    [ "$name" = lighttpd ] && [ "$recorded_pid" = "$pid" ] || continue
+    config=unknown; expect_config=false; lines=0
+    file=$directory/cmdline
+    if [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ]; then
+      while IFS= read -r -d '' -t 1 arg; do
+        lines=$((lines+1)); if [ "$lines" -gt 100 ] || [ $((SECONDS-started)) -ge 5 ]; then incomplete=true; break; fi
+        if $expect_config; then
+          case "$arg" in /*)
+            case "$arg" in *'$'*|*'%'*|*'|'*|*'?'*|*$'\t'*|*$'\r'*|*$'\n'*) :;; *) [ "${#arg}" -gt 500 ] || config=$arg;; esac;;
+          esac
+          expect_config=false
+        fi
+        [ "$arg" != -f ] || expect_config=true
+      done < "$file"
+    fi
+    modules=unknown
+    if [ -f "$directory/maps" ] && [ -r "$directory/maps" ] && [ ! -L "$directory/maps" ] &&
+        parsed=$(set -o pipefail; manifest_run_bounded 1 head -c 1048576 -- "$directory/maps" 2>/dev/null | LC_ALL=C awk '
+          /\/mod_[a-zA-Z0-9_]+[.]so([.][0-9]+)*([ \t]|$)/ {
+            name=$NF; sub(/^.*\//,"",name); sub(/[.]so.*$/,"",name)
+            if (name ~ /^mod_[A-Za-z0-9_]+$/ && !seen[name]++) { value=value (value ? "," : "") name }
+          }
+          END { if (value!="") print value }
+        '); then [ -z "$parsed" ] || modules=$parsed; fi
+    manifest_emit web_frontend server lighttpd pid "$pid" config "$config" modules "$modules" activity process_observed activity_basis proc_status_cmdline_maps
+    case ",$modules," in *,mod_cgi,*|*,mod_fastcgi,*|*,mod_scgi,*|*,mod_proxy,*|*,mod_magnet,*|*,mod_wstunnel,*) manifest_lighttpd_loaded_execution=true;; esac
+    if [ "$config" = unknown ]; then
+      manifest_emit warning area lighttpd reason 'A running lighttpd process has no readable literal -f configuration path; conventional configuration may not be active.'
+      manifest_lighttpd_frontend_incomplete=true; manifest_collection_failed=true
+    else manifest_lighttpd_running_configs="$manifest_lighttpd_running_configs$config|"; fi
+  done
+  if $incomplete; then
+    manifest_emit warning area lighttpd reason 'Lighttpd process/config/module metadata coverage reached its time or process limit; activity remains unknown.'
+    manifest_lighttpd_frontend_incomplete=true; manifest_collection_failed=true
+  fi
+}
+
+function manifest_lighttpd_websites() {
+  local file="$manifest_root/etc/lighttpd/lighttpd.conf" records type node names selector port tls root user runtime config line route certainty scope execution mapping_complete=true
+  local field1 field2 field3 field4 field5 field6 field7 field8 field9 field10 field11 field12 frontend=unknown has_handlers=false
+  local manifest_lighttpd_running_configs='|' manifest_lighttpd_loaded_execution=false manifest_lighttpd_frontend_incomplete=false
+  local manifest_lighttpd_seen_roots='|'
+  manifest_lighttpd_frontends
+  $manifest_lighttpd_frontend_incomplete && mapping_complete=false
+  if [ ! -f "$file" ]; then
+    if [ "$manifest_lighttpd_running_configs" != '|' ] || $manifest_lighttpd_loaded_execution; then
+      manifest_emit warning area lighttpd reason 'A running lighttpd process has no conventional configuration file to inspect; its sites and handlers require manual mapping.'
+      manifest_collection_failed=true
+    fi
+    return 0
+  fi
+  case "$manifest_lighttpd_running_configs" in *'|/etc/lighttpd/lighttpd.conf|'*) frontend=process_config_observed;; '|') :;; *)
+    manifest_emit warning area lighttpd reason 'The running lighttpd configuration differs from the conventional file; conventional sites may be inactive and the active mapping requires review.'
+    manifest_collection_failed=true; mapping_complete=false;;
+  esac
+  if ! records=$(manifest_lighttpd_output_configuration "$file"); then
+    manifest_emit warning area lighttpd reason 'Lighttpd configuration parsing failed; site/runtime mapping is unknown.'
+    manifest_collection_failed=true
+    return
+  fi
+  while IFS=$'\t' read -r type field1 field2 field3 field4 field5 field6 field7 field8 field9 field10 field11 field12; do
+    if [ "$type:$field1:$field2" = meta:configuration_complete:false ]; then mapping_complete=false; fi
+    [ "$type" != handler ] || has_handlers=true
+  done <<< "$records"
+  if $manifest_lighttpd_loaded_execution && ! $has_handlers; then
+    manifest_emit warning area lighttpd reason 'Loaded executing/proxy modules have no resolved handlers in the inspected configuration; the running mapping may differ and static-only execution is unverified.'
+    manifest_collection_failed=true; mapping_complete=false
+  fi
+  while IFS=$'\t' read -r type field1 field2 field3 field4 field5 field6 field7 field8 field9 field10 field11 field12; do
+    case "$type" in
+      warning)
+        manifest_emit warning area lighttpd reason "$field1" config "$field2" line "$field3"
+        manifest_collection_failed=true;;
+      handler)
+        manifest_lighttpd_handler "lighttpd:$field1" "$field2" "$field3" "$field4" "$field5" "$field6" "$field7" "$field8" "$field9";;
+      redirect)
+        manifest_emit website_redirect server lighttpd configuration_scope "lighttpd:$field1" pattern "$field2" target "$field3" config "$field4" line "$field5" activity unknown activity_basis configured_not_requested;;
+      site)
+        node=$field1; names=$field2; selector=$field3; port=$field4; tls=$field5; root=$field6; user=$field7; runtime=$field8; config=$field9; line=$field10; route=$field11; certainty=$field12
+        scope="lighttpd:$node"; execution=unknown
+        $mapping_complete || runtime=unknown
+        if [ "$runtime" = static_files ] && ! $has_handlers; then execution=static_file_only; fi
+        manifest_emit lighttpd_site configuration_scope "$scope" selector "$names" selector_kind "$selector" route_condition "$route" mapping "$certainty" runtime "$runtime" frontend "$frontend" activity unknown activity_basis configuration_not_live_requests config "$config" line "$line"
+        # Regex and URL selectors are routing conditions, not literal DNS names.
+        case "$selector" in literal_host) :;; default) [ "$names" != default ] || names=unknown;; *) names=unknown;; esac
+        manifest_website lighttpd "$names" "$port" "$tls" "$root" "$user" "$runtime" "$config" unknown unknown "$scope" "$execution"
+        case "$manifest_lighttpd_seen_roots" in *"|$root|"*) :;; *)
+          manifest_lighttpd_seen_roots="$manifest_lighttpd_seen_roots$root|"
+          manifest_website_assets "$root" "$execution";;
+        esac;;
+    esac
+  done <<< "$records"
 }
 
 # Limit both configured paths and resolved aliases before probing mail data.
@@ -11541,8 +12208,8 @@ function manifest_output() (
   manifest_probe process_indicators manifest_process_indicators
   manifest_probe executable_indicators manifest_executable_indicators
   manifest_probe schedule_indicators manifest_schedule_indicators
-  if manifest_processes=$(ps -eo comm= 2>/dev/null); then manifest_processes_available=true
-  else manifest_processes=; fi
+  manifest_probe process_names manifest_process_names
+
   manifest_probe resolver manifest_resolver
   manifest_probe capacity manifest_capacity
   manifest_probe upgrade_assets manifest_upgrade_assets

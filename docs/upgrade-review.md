@@ -305,6 +305,10 @@ python3 tests/test-manifest-packaged-wordpress.py
 python3 tests/test-manifest-resolver.py
 
 python3 tests/test-usrmerge.py
+
+python3 tests/test-manifest-processes.py
+python3 tests/test-lighttpd-parser.py
+python3 tests/test-lighttpd-manifest.py
 shellcheck -S error distrorejuve.sh
 ```
 

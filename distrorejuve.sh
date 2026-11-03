@@ -10106,6 +10106,62 @@ function manifest_probe() {
   return "$status"
 }
 
+# Public host keys only; a local file is evidence, not proof of the active sshd key.
+function manifest_ssh_host_keys() {
+  local file size key_type key_data comment output bits fingerprint remainder count=0 found=false
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    manifest_emit warning area ssh_host_keys reason 'ssh-keygen is unavailable; SHA256 host-key fingerprints are unknown.'
+    return 0
+  fi
+  if [ -L "$manifest_root/etc/ssh" ]; then
+    manifest_emit warning area ssh_host_keys reason 'The conventional SSH directory is a symlink; public host keys were not inspected.'
+    return 0
+  fi
+  for file in "$manifest_root"/etc/ssh/ssh_host_*_key.pub; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    found=true
+    count=$((count+1))
+    if [ "$count" -gt 32 ]; then
+      manifest_emit warning area ssh_host_keys reason 'Public host-key discovery stopped after 32 files; coverage is incomplete.'
+      break
+    fi
+    if [ -L "$file" ] || [ ! -f "$file" ] || [ ! -r "$file" ]; then
+      manifest_emit warning area ssh_host_keys reason 'A public host-key path is not a readable regular non-symlink file; its fingerprint is unknown.'
+      continue
+    fi
+    size=$(stat -c %s -- "$file" 2>/dev/null) || size=unknown
+    case "$size" in ''|*[!0-9]*) size=0;; esac
+    if [ "$size" -eq 0 ] || [ "$size" -gt 65536 ]; then
+      manifest_emit warning area ssh_host_keys reason 'A public host-key file is empty, too large or cannot be measured; its fingerprint is unknown.'
+      continue
+    fi
+    # OpenSSH .pub: ssh-ed25519 AAAA example-comment -> type=ssh-ed25519,
+    # data=AAAA, comment discarded. ssh-keygen separately validates the key blob.
+    key_type=; key_data=; comment=
+    read -r key_type key_data comment < "$file" || :
+    case "$key_type" in ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521) :;; *) key_data=;; esac
+    case "$key_data" in ''|*[!A-Za-z0-9+/=]*)
+      manifest_emit warning area ssh_host_keys reason 'A public host-key file has an unsupported or malformed first line; its fingerprint is unknown.'
+      continue;;
+    esac
+    if ! output=$(printf '%s %s\n' "$key_type" "$key_data" | LC_ALL=C ssh-keygen -l -E sha256 -f - 2>/dev/null); then
+      manifest_emit warning area ssh_host_keys reason 'SHA256 fingerprinting failed; the key may be invalid or this ssh-keygen may lack SHA256 support.'
+      continue
+    fi
+    # ssh-keygen -l -E sha256: 256 SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA (stdin) (ED25519)
+    # -> bits=256, fingerprint=SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; discard the rest.
+    read -r bits fingerprint remainder <<< "$output"
+    if [[ ! "$bits" =~ ^[0-9]+$ ]] || [[ ! "$fingerprint" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || [[ "$output" = *$'\n'* ]]; then
+      manifest_emit warning area ssh_host_keys reason 'Unexpected SHA256 fingerprint output; no host-key identity was recorded for this file.'
+      continue
+    fi
+    manifest_emit ssh_host_key path "${file#"$manifest_root"}" key_type "$key_type" bits "$bits" fingerprint "$fingerprint" source public_key_file active unknown
+  done
+  if ! $found; then
+    manifest_emit warning area ssh_host_keys reason 'No conventional public host-key files were found; custom sshd paths and active keys remain unknown.'
+  fi
+}
+
 function manifest_output() (
   local manifest_format="${1:-text}" manifest_dns_enabled="${2:-${DR_MANIFEST_DNS:-true}}" manifest_root="${3:-/}"
   local manifest_unprivileged=${DR_UNPRIVILEGED:-false} manifest_redact=${MANIFEST_REDACT:-false}
@@ -10145,6 +10201,7 @@ function manifest_output() (
   if $manifest_unprivileged; then
     manifest_emit warning area privileges reason 'Unprivileged collection: service status scripts, listener process ownership and mail size scans are skipped. Unreadable configuration, application files, private cron jobs and mail stores may be omitted; missing results are unknown.'
   fi
+  manifest_probe ssh_host_keys manifest_ssh_host_keys
   manifest_probe hosting_panels manifest_hosting_panels || manifest_collection_failed=true
   manifest_probe listeners manifest_listeners
   manifest_probe process_indicators manifest_process_indicators

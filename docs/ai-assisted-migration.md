@@ -25,6 +25,10 @@ from that message. See [job references and correspondence](job-records.md).
 
 ## 2. Choose how to assess the server
 
+Use the [initial assessment questions](assessment-intake.md) to agree context,
+inventory coverage, access route, host-key policy and working preferences together.
+Existing answers carry forward; a continuation starts from its job record.
+
 Agree what the assistant may inspect and send for AI processing. Configuration
 and environment files can contain passwords or tokens. The agent should start
 with non-secret facts and ask before sensitive access outside the agreed scope.
@@ -58,6 +62,9 @@ a private channel you trust for AI processing. Keep manifests out of public
 issues, repositories and paste sites. Do not add passwords, API keys or private
 SSH keys. Give the assistant the collection date and script revision if known.
 An existing manifest is enough to start a provisional assessment.
+If collection cannot run and no usable source-associated manifest is available,
+the assistant reports the access/collection blocker and next step. The assessment
+follows collection; general research alone does not describe your server.
 
 ### Arrange SSH discovery
 
@@ -93,8 +100,11 @@ agreed access; a key alone does not grant sudo or make operations read-only.
 
 Give the operator the SSH address, port, username and a host-key fingerprint
 obtained through a trusted route such as the hosting provider console. The operator
-compares that fingerprint and checks the connected server's identity. A changed
-or unexplained key must be resolved before continuing. Keep console/recovery
+compares that fingerprint and checks the connected server's identity. A trusted,
+source-associated customer manifest can supply `ssh_host_key` fingerprints.
+Alternatively, explicitly agree the [first-use trust policy](assessment-intake.md#ssh-host-key-policy)
+at intake to accept and pin unseen keys without a question for each host.
+An unexpected changed key must be resolved before continuing. Keep console/recovery
 access available. Agree when the job key will be removed; a comment on a key
 does not make it expire automatically. Remove both job keys wherever installed
 when access ends.

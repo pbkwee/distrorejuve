@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Offline regressions: extract function declarations; never run script entrypoint."""
+import json
 import pathlib
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -10,9 +12,10 @@ SOURCE = (pathlib.Path(__file__).resolve().parents[1] / 'distrorejuve.sh').read_
 
 
 def declaration(name):
-    # Producer is the script's top-level `function NAME() {` ... column-one `}`.
+    # Producer: `function NAME() {` ... column-one `}`, or
+    # `function NAME() (` ... column-one `)` for a subshell function.
     # Nested braces are indented; do not source initialization or dispatch code.
-    match = re.search(r'^function ' + re.escape(name) + r'\(\) \{\n.*?^\}', SOURCE, re.M | re.S)
+    match = re.search(r'^function ' + re.escape(name) + r'\(\) [{(]\n.*?^[})]', SOURCE, re.M | re.S)
     assert match, name
     return match.group()
 
@@ -192,6 +195,115 @@ upgrade_database_verify trixie
 ''')
             self.assertEqual(result.returncode, expected, result.stderr)
             self.assertNotIn('legacy-hash', result.stderr)
+
+
+class ManifestHostKeys(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = pathlib.Path(self.directory.name)
+        self.ssh = self.root / 'etc/ssh'
+        self.ssh.mkdir(parents=True)
+        # Generate disposable fixture keys outside the collector's search path.
+        self.fixture_key = self.root / 'fixture-key'
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '',
+                        '-C', 'COMMENT-MUST-NOT-APPEAR', '-f', str(self.fixture_key)],
+                       check=True, capture_output=True)
+        self.public_text = self.fixture_key.with_suffix('.pub').read_text()
+        result = subprocess.run(['ssh-keygen', '-l', '-E', 'sha256', '-f',
+                                 str(self.fixture_key.with_suffix('.pub'))],
+                                check=True, capture_output=True, text=True)
+        self.fingerprint = result.stdout.split()[1]
+
+    def collect(self, output_format='json', redact=False, override=''):
+        body = f'''
+manifest_root={shlex.quote(str(self.root))}
+manifest_format={output_format}
+manifest_redact={str(redact).lower()}
+manifest_separator=
+{override}
+if [ "$manifest_format" = json ]; then printf '['; fi
+manifest_ssh_host_keys
+if [ "$manifest_format" = json ]; then printf ']'; fi
+'''
+        return run(['manifest_json_string', 'manifest_emit', 'manifest_ssh_host_keys'], body)
+
+    def test_public_hash_in_text_and_json_without_private_files_or_comments(self):
+        public = self.ssh / 'ssh_host_ed25519_key.pub'
+        public.write_text(self.public_text)
+        (self.ssh / 'ssh_host_ed25519_key').write_text('PRIVATE-CONTENT-MUST-NOT-APPEAR')
+        # A symlink to a valid key would yield a second record if followed.
+        (self.ssh / 'ssh_host_alias_key.pub').symlink_to(public)
+        (self.ssh / 'ssh_host_bad_key.pub').write_text('NOT-A-KEY PRIVATE-MARKER\n')
+        (self.ssh / 'ssh_host_directory_key.pub').mkdir()
+        for output_format in ('text', 'json'):
+            with self.subTest(output_format=output_format):
+                result = self.collect(output_format)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(self.fingerprint, result.stdout)
+                self.assertNotIn('COMMENT-MUST-NOT-APPEAR', result.stdout + result.stderr)
+                self.assertNotIn('PRIVATE-', result.stdout + result.stderr)
+                if output_format == 'json':
+                    records = json.loads(result.stdout)
+                    keys = [r for r in records if r['type'] == 'ssh_host_key']
+                    self.assertEqual(len(keys), 1)
+                    self.assertEqual(keys[0]['path'], '/etc/ssh/ssh_host_ed25519_key.pub')
+                    self.assertEqual(keys[0]['key_type'], 'ssh-ed25519')
+                    self.assertEqual(keys[0]['bits'], '256')
+                    self.assertEqual(keys[0]['active'], 'unknown')
+                    self.assertTrue(any(r['type'] == 'warning' for r in records))
+
+    def test_public_redaction_removes_stable_host_identity(self):
+        (self.ssh / 'ssh_host_ed25519_key.pub').write_text(self.public_text)
+        for output_format in ('text', 'json'):
+            with self.subTest(output_format=output_format):
+                result = self.collect(output_format, redact=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(self.fingerprint, result.stdout)
+                self.assertNotIn('/etc/ssh/', result.stdout)
+                self.assertIn('[redacted]', result.stdout)
+                if output_format == 'json':
+                    self.assertEqual(json.loads(result.stdout)[0]['fingerprint'], '[redacted]')
+
+    def test_reduced_manifest_output_includes_host_key_probe(self):
+        (self.ssh / 'ssh_host_ed25519_key.pub').write_text(self.public_text)
+        for output_format in ('text', 'json'):
+            with self.subTest(output_format=output_format):
+                result = run(['manifest_json_string', 'manifest_emit',
+                              'manifest_ssh_host_keys', 'manifest_output'], f'''
+id() {{ printf '1000\\n'; }}
+hostname() {{ printf 'fixture.example.invalid\\n'; }}
+ip() {{ :; }}
+ps() {{ :; }}
+packages_output_backend() {{ printf 'dpkg\\n'; }}
+# Other collectors are outside this fixture's input and side-effect scope.
+manifest_probe() {{ if [ "$1" = ssh_host_keys ]; then shift; "$@"; fi; }}
+manifest_output {output_format} false {shlex.quote(str(self.root))}
+''')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(self.fingerprint, result.stdout)
+                if output_format == 'json':
+                    records = json.loads(result.stdout)['records']
+                    self.assertEqual(sum(r['type'] == 'ssh_host_key' for r in records), 1)
+
+    def test_missing_files_and_unavailable_or_old_tool_remain_unknown(self):
+        result = self.collect()
+        records = json.loads(result.stdout)
+        self.assertTrue(any('No conventional public host-key' in r.get('reason', '') for r in records))
+        (self.ssh / 'ssh_host_ed25519_key.pub').write_text(self.public_text)
+        overrides = [
+            'command() { if [ "$*" = "-v ssh-keygen" ]; then return 1; fi; builtin command "$@"; }',
+            'ssh-keygen() { return 1; }',
+            'ssh-keygen() { printf "256 MD5:invalid (stdin) (ED25519)\\n"; }',
+        ]
+        for override in overrides:
+            with self.subTest(override=override):
+                result = self.collect(override=override)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                records = json.loads(result.stdout)
+                self.assertFalse(any(r['type'] == 'ssh_host_key' for r in records))
+                self.assertTrue(any(r['type'] == 'warning' for r in records))
+                self.assertNotIn('MD5:', result.stdout)
 
 
 if __name__ == '__main__':

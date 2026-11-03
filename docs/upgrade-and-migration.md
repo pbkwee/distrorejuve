@@ -50,8 +50,10 @@ controlled environment. Unset `DR_ACTION`, which can override CLI selection;
 check inherited `DR_*` presence without dumping values and explicitly set
 reviewed non-secret controls. Read specific values only within approved scope.
 Remove `BASH_ENV`/`ENV`. Account for remote shell startup: clearing variables inside a started shell cannot undo startup code.
-The [customer example](ai-assisted-migration.md#provide-a-manifest-yourself)
-disables DNS and mail-size probes and uses reduced collection.
+For authorized full root discovery, enable DNS, mail metrics, listener ownership
+and service-state checks. Use the [customer example](ai-assisted-migration.md#provide-a-manifest-yourself)
+with reduced collection when access or the approved scope requires it. Resolve
+useful gaps with bounded checks; document consequential failures once.
 
 Use `--manifest` or `--manifest-json`; for APT/dpkg systems, `--upgrade-report`
 can add evidence using existing package indexes. Record their age. Do not refresh
@@ -195,6 +197,35 @@ replacing it with a generic package-manager command. Use an available supervised
 or resumable facility for long operations. Verify completion from actual operation
 and package state, including final status after a supervised operation starts.
 
+Before changing OpenSSH packages, keep a verified authenticated control connection
+open alongside the supervised action. Use the job's private directory and the
+same approved host key, account, port and agent settings. For example, with
+`job_directory` already set to that directory:
+
+```bash
+install -d -m u=rwx,go= "$job_directory/ssh-control"
+ssh -fNM -o ControlMaster=yes -o ControlPersist=2h \
+  -o ControlPath="$job_directory/ssh-control/%C" \
+  -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=8 -o ForwardAgent=no \
+  -p 22 root@server.example
+ssh -S "$job_directory/ssh-control/%C" -O check -p 22 root@server.example
+```
+
+Use that `-S` path for subsequent job commands. Test a fresh independent connection
+with `-S none -o ControlMaster=no` after the OpenSSH transition and after reboot.
+Multiple agents can share an authorized SSH agent. Do not reset its identities
+or forwarding session to repair one job. Check that the designated forwarded
+agent responds before reboot and at reconnect. Retest the current approved proxy
+after a session change, even if an earlier probe failed. A retained control connection can outlive its agent socket. If fresh
+login fails, use bounded client diagnostics to check whether a key was offered
+or the socket disappeared. Obtain a replacement socket from the operator when
+needed; avoid attributing a missing client credential to server policy.
+Retain the control connection until independent access works; close it with
+`ssh -S "$job_directory/ssh-control/%C" -O exit -p 22 root@server.example`
+when it is no longer needed. A supervised action survives a connection loss;
+the authenticated control connection supplies a channel for inspecting or repairing
+a temporary listening-service failure. Record console/rescue access in the plan.
+
 At release checkpoints, review package health, configuration merges, web worker
 identities, FPM sockets/permissions, monitoring, network/boot settings and database
 maintenance. Do not blindly copy old config or assume packaged config preserves
@@ -252,6 +283,11 @@ source is intact and authoritative. After new writes, preserve them before
 choosing reverse migration or repair; an old backup may lose orders, uploads or mail.
 
 ## Verify, hand over and retire
+
+Use the [completion report guide](../.agents/skills/server-upgrade/references/completion-report.md)
+for the owner report and sysadmin handoff. Describe the actual state changes,
+key actions, checked results and server-specific follow-up. Keep full retry logs
+private; omit generic work that has no effect on this server.
 
 Check real application functions, errors, mail, jobs, resources, boot/SSH,
 monitoring and a usable destination backup. Record customer acceptance, remaining

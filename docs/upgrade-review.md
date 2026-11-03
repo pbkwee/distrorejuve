@@ -77,5 +77,114 @@ Offline regression checks (no production operations):
 ```sh
 bash -n distrorejuve.sh
 python3 tests/test-upgrade-review.py
+python3 tests/test-manifest-firstpass.py
+python3 tests/test-manifest-upgrade-assets.py
+python3 tests/test-manifest-packaged-wordpress.py
+python3 tests/test-manifest-resolver.py
 shellcheck -S error distrorejuve.sh
 ```
+
+Use these standard commands rather than separate per-job discovery scripts.
+`--upgrade-report` includes the manifest's tool availability and conventional
+application/database/cache/backup sizes. `--check-upgrade` evaluates the target
+path, package health and disk floor. Resolve its reported condition before
+starting the approved action; do not bypass a disk floor to hide a removable cache.
+
+Configuration repair preserves removed database services. Residual server
+configuration alongside old core binaries does not trigger installation of a new
+MySQL or MariaDB server; select database replacement through the job plan.
+
+PHP dependency migration recognizes a planned same-architecture `t64` library
+replacement only after verifying the exact archive candidate and its `Provides`
+and `Replaces` relationships. It pins that version for the transaction and
+records the selection for retries; unrelated package removals remain guarded.
+
+When separate old-PHP removal would drop applications or install target runtimes
+early, use the checked combined transaction. Any installs in the separate plan
+must exactly match the combined plan: names, old/new versions and archive
+architectures. Reject purges, downgrades and unapproved combined removals.
+Retain installed applications and verify the persistent systemd Apache mask
+with the service inactive immediately before package changes. The ordinary
+separate handoff remains available.
+
+Obsolete-package cleanup distinguishes recognized APT dependency conflicts from
+index and access failures. Dependency conflicts enter protected subset planning
+so retained packages keep their required libraries. If that subset still cannot
+resolve dependencies, cleanup records a deferral; other simulation failures stop
+with the exit status and plan path.
+
+APT index refresh checks both the exit status and failed-index diagnostics. A
+zero exit with failed downloads triggers the existing IPv4 retry; persistent
+failures stop before PHP selection. Target PHP selectors and runtimes require
+archive-backed candidates, rather than versions present only in dpkg status.
+Failed full-upgrade simulations retain their plan and print the exit status,
+plan path and final diagnostics before any PHP change.
+
+## APT simulation of package splits
+
+The PHP migration compares its proposed removals with a normal full-upgrade
+plan. That normal plan starts with `apt-get --simulate dist-upgrade`.
+The failure-only validator below can check a complete proposal when configuration replay fails.
+
+Ubuntu 26.04 splits coreutils and sudo into provider/common packages. The new
+selector Pre-Depends on its provider; the provider has versioned Breaks and
+Replaces against the installed predecessor. Real APT uses dpkg automatic
+deconfiguration for that transition. APT simulation can instead report
+`E: Conf Broken coreutils-from-uutils:amd64` or `E: Conf Broken sudo-common:amd64`
+before replaying the scheduled predecessor upgrade. Ubuntu tracks the same
+transition errors in [confirmed bug 2170692](https://bugs.launchpad.net/bugs/2170692).
+See [package split relationships](https://www.debian.org/doc/debian-policy/ch-relationships.html#overwriting-files-and-replacing-packages-replaces)
+and the [APT simulator](https://github.com/Debian/apt/blob/main/apt-pkg/algorithms.cc).
+
+An isolated synthetic split reproduces simulation failure and ordinary successful
+installation with a clean audit. Preinstalling the payload, changing immediate
+configuration, selecting the alternate solver and configuring all packages
+still produce the simulation error. Adding the provider explicitly also uses
+the same transition. Check package origins and relationships before classifying
+a real failure; the error text alone does not select a remedy.
+
+The native dependency validator is a failure-only fallback for this normal
+full-upgrade plan. Successful simulations retain their existing path. An APT
+status of 100, install/configure records and only `E: Conf Broken` errors must
+pass a shell check before Python starts. Interruptions and unrelated failures
+stop there; the validator rejects incomplete or inconsistent proposals.
+
+The fallback checks for `python3` and `timeout`, requires Python 3.7 or newer,
+then verifies importable `python3-apt`, its required APIs and the same libapt
+version as `apt-get` before opening a package cache. These checks never install
+prerequisites. Python provides access to APT's dependency library without
+reimplementing that logic in Bash.
+It applies the same supported options and marks the exact CLI proposal
+in an in-memory package cache. Automatic resolution is disabled. It then checks
+the dependency graph and exact action equality: names, architectures and old/new
+versions. It makes no new package choices. It rejects broken final dependencies,
+changed holds, essential or protected removals, downgrades, untrusted candidates and package/index changes
+during planning. A versioned Breaks relationship must be resolved by the
+planned predecessor upgrade. It has no package-name or bug-number allowlist.
+
+The helper reads package data and writes private plan/provenance files. It
+never downloads or installs packages. It retains the failed transcript and
+creates records for the existing removal/application checks. The ordinary
+installer and service/recovery handling continue afterward. Cached fallback
+plans are regenerated before reuse.
+
+Install a matching distro-provided binding through the reviewed normal package
+procedure when required. Its prerequisites can advance the OS version file
+before all target packages are installed. Resume the recorded target and
+remaining steps; do not select another release merely from that version file.
+
+Regression fixtures cover valid selection and ordinary removal, unsupported
+options, mismatched versions/actions/architectures, malformed or partial output,
+holds, trust, protected removals, unresolved relationships and state changes.
+An isolated real-APT package fixture also verifies fallback planning and normal
+installation without customer operations. See the
+[python-apt API](https://apt-team.pages.debian.net/python-apt/library/apt.cache.html).
+
+## Retained init helpers during a release transition
+
+Before target package changes, the release flow checks an installed systemd
+against its target archive candidate and full-upgrade plan. A held or kept-back
+older helper stops the action. The tool retains a pinned prerequisite simulation
+and status for review; it does not execute that separate proposal. This catches
+transitions where target package scripts use newer helper syntax while their
+unversioned dependencies still permit the installed helper.

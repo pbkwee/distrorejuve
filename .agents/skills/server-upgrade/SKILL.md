@@ -39,7 +39,9 @@ backup or restore tools on the agent machine merely to inspect them. Remote work
 requires verified ownership, target identity and scope. Follow the procedure's
 [collection controls](../../../docs/upgrade-and-migration.md#collect-evidence)
 and the user guide's [SSH setup](../../../docs/ai-assisted-migration.md#arrange-ssh-discovery).
-Prefer reduced initial collection and report missing evidence. Prefer Ed25519;
+Use full root collection, DNS and mail metrics when access and approved scope
+permit. Use reduced collection for restricted access or explicit operator limits.
+Resolve useful gaps with bounded checks and preserve consequential failures. Prefer Ed25519;
 use the job's RSA fallback and only necessary per-source
 [legacy exceptions](../../../docs/reporting-problems.md#ssh-connection-errors).
 Carry tested access through uploads, transfers and reconnects, including tools
@@ -68,7 +70,12 @@ official sources. Use [target selection](../../../docs/upgrade-and-migration.md#
 verify intermediate transitions for OS upgrades. Honour a requested route or
 explain why agreement to change it is needed.
 
-Lead with the customer explanation: current setup, proposed changes, particular
+Lead with the customer explanation and a concrete workload inventory: current/target
+OS and architecture, crossgrade need, websites grouped by application, mail/database
+roles and upgrade implications. State facts directly; explain uncertainty when it
+changes a decision or next action. Give an in-place sequence and workload-specific
+risks. Put vhost/version-file paths, DNS, bind scope, service states and language
+consumers in the appendix. Cover current setup, proposed changes, particular
 risks, recommendation, likely interruption/cost assumptions, remaining work and
 next decision. Follow with the technical appendix and evidence. Separate observed
 facts, customer statements, inferences, blockers and unknowns. Verify application
@@ -124,7 +131,18 @@ approval of costs or production changes. Defer API credentials until authenticat
 work is needed; an external source is not a RimuHosting clone/snapshot source.
 Other providers use their own verified provisioning and recovery procedure.
 
+Keep a verified authenticated SSH control connection through OpenSSH package
+changes, alongside the supervised action. Use the procedure's private control-path
+example and verify a fresh independent connection afterward.
+
 On interruption or an ambiguous outcome, establish actual state before retrying.
 Do not repeat destructive operations or reboot after partial failure blindly.
 Use approved recovery, stop on unresolved unsafe conditions and preserve a
 resumable record. Report completed checks, untested scope and next owner honestly.
+
+## Report the completed work
+
+After the final package and reboot checks, use the [completion report guide](references/completion-report.md)
+to produce a client-ready owner report and a concrete sysadmin handoff. Include
+this server's state changes, key actions, checked results and remaining work.
+Keep complete transcripts and recovery references in the protected job record.

@@ -3299,7 +3299,12 @@ function upgrade_finish_run() {
   if $package_verified; then
     if audit=$(LC_ALL=C dpkg --audit 2>&1) && [ -z "$audit" ] &&
         plan=$(LC_ALL=C apt-get -s dist-upgrade 2>&1) &&
-        awk '/^(Inst|Remv|Purg|Conf) / { bad=1 } END { exit bad }' <<< "$plan"; then :
+        awk '/^(Inst|Remv|Purg|Conf) / { bad=1 } END { exit bad }' <<< "$plan"; then
+      # Keep the operation's existing completion/exit policy. Recovery wording also
+      # requires a complete zero-work summary, including packages held back by APT.
+      if is_complete_package_plan <<< "$plan"; then
+        echo 'dss:trace: Package recovery health: verified.' >&2
+      else echo 'dss:trace: Package recovery health: unverified.' >&2; fi
     else
       [ -z "$audit$plan" ] || printf '%s\n' "$audit" "$plan" >&2
       echo 'dss:error: Final package state is incomplete or could not be verified; review package repair and the detailed log before continuing.' >&2
@@ -10393,12 +10398,77 @@ function upgrade_print_report() {
 # Build the public report from a small field allowlist. Trying to redact
 # arbitrary logs is unreliable because commands and configuration can contain credentials or customer data.
 # Public reports select fixed fields; raw logs/configuration are never copied or redacted.
+function is_complete_package_plan() {
+  # LC_ALL=C apt-get -s dist-upgrade emits, for example:
+  # 0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+  # -> complete. The same summary ending "1 not upgraded." -> incomplete,
+  # even without an Inst/Remv/Purg/Conf record. Require one complete all-zero
+  # summary; missing, duplicate, malformed or inconsistent summaries fail closed.
+  LC_ALL=C awk '
+    /^[0-9]+ upgraded,/ {
+      summaries++
+      if ($0 != "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.") bad=1
+    }
+    /^(Inst|Remv|Purg|Conf) / || /^[EW]:/ { bad=1 }
+    /^The following (packages|upgrades) have been (kept back|held back|deferred due to phasing):/ { bad=1 }
+    END { exit (summaries != 1 || bad) }
+  '
+}
+
+function support_output_package_error_recovery() {
+  local logfile=$1 run_status=$2 package_health=${3:-recorded}
+  [ -f "$logfile" ] && [ ! -L "$logfile" ] || return 1
+  # Private output.log producer examples:
+  # dpkg: error processing archive /var/cache/apt/archives/example.deb (--unpack):
+  #  trying to overwrite shared '/etc/example.conf', which is different from other instances
+  # -> dpkg package_file_conflict. A later line such as:
+  # dss:trace: Package recovery health: verified.
+  # -> final audit and complete zero-work plan evidence for console recovery.
+  # dss:stage: Outcome: release verified (trixie); packages verified (trixie); services verified.
+  # -> verified_recovered only when the action also returned zero. A failed, missing,
+  # mismatched or earlier outcome leaves these observations unresolved_or_unverified.
+  # A later support-report collection also requires its current package health checks.
+  LC_ALL=C awk -v run_status="$run_status" -v package_health="$package_health" '
+    /^dss:trace: Package recovery health: (verified|unverified)[.]$/ {
+      health_verified=($0 == "dss:trace: Package recovery health: verified.")
+      health_line=NR
+    }
+    /^dss:stage: Outcome: release / {
+      verified=0
+      if (/^dss:stage: Outcome: release verified [(][a-z]+[)]; packages verified [(][a-z]+[)]; services (verified|failed|unknown)[.]$/) {
+        split($0, checks, ";")
+        release=checks[1]; sub(/^.*[(]/, "", release); sub(/[)]$/, "", release)
+        packages=checks[2]; sub(/^.*[(]/, "", packages); sub(/[)]$/, "", packages)
+        verified=(release == packages)
+      }
+      outcome_line=NR
+    }
+    {
+      line=tolower($0)
+      if (line ~ /dpkg: error|dpkg returned an error/) { dpkg=1; error_line=NR }
+      if (line ~ /trying to overwrite/) { conflict=1; error_line=NR }
+    }
+    END {
+      if (!error_line) print "none_observed\tnone"
+      else {
+        recovered=(run_status == "0" && verified && outcome_line > error_line &&
+                   (package_health == "verified" ||
+                    (package_health == "recorded" && health_verified && health_line > error_line && health_line < outcome_line)))
+        printf "%s\t", (recovered ? "verified_recovered" : "unresolved_or_unverified")
+        if (dpkg) printf "dpkg"
+        if (conflict) printf "%spackage_file_conflict", (dpkg ? " " : "")
+        print ""
+      }
+    }
+  ' "$logfile"
+}
+
 function support_print_report() {
 (
   set -o pipefail
   local directory=${1:-} status=0 release family=unknown architecture kernel digest run_digest=unknown
   local exit_status=unknown action=unknown crossgrade=unknown target=unknown verification=not_recorded counts available mount
-  local tool version probe_status plan local_review=legacy
+  local tool version probe_status plan local_review=legacy package_recovery package_health=unverified audit
   if [ -n "$directory" ]; then
     if [ ! -d "$directory" ] || [ -L "$directory" ] || [ -L "$directory/support.context" ] || [ -L "$directory/output.log" ]; then
       printf '%s\n' 'dss:error: Choose an existing run directory without linked report files.' >&2; return 1
@@ -10464,7 +10534,7 @@ function support_print_report() {
   printf 'current_apt_policy_exit_status: %s\n' "$probe_status"
   [ "$probe_status" -ne 127 ] || status=1
   # A simulation describes current indexes, not completion of the requested release path.
-  plan=$(LC_ALL=C apt-get -s dist-upgrade 2>/dev/null)
+  plan=$(LC_ALL=C apt-get -s dist-upgrade 2>&1)
   probe_status=$?
   printf 'current_index_dist_upgrade_exit_status: %s\n' "$probe_status"
   if [ "$probe_status" -eq 0 ] && counts=$(printf '%s\n' "$plan" | awk '
@@ -10472,13 +10542,24 @@ function support_print_report() {
     /^[0-9]+ upgraded, [0-9]+ newly installed, [0-9]+ to remove/ { summary=1 }
     /^Inst / { install++ } /^Remv / { remove++ } /^Purg / { purge++ } /^Conf / { configure++ }
     END { if (!summary) exit 1; printf "install_or_upgrade=%d remove=%d purge=%d configure=%d", install, remove, purge, configure }
-  '); then printf 'current_index_package_plan: %s\n' "$counts"
+  '); then
+    printf 'current_index_package_plan: %s\n' "$counts"
+    if is_complete_package_plan <<< "$plan" && \
+        audit=$(LC_ALL=C dpkg --audit 2>&1) && [ -z "$audit" ]; then package_health=verified; fi
   else printf '%s\n' 'current_index_package_plan: unknown'; status=1; fi
+  printf 'current_package_health: %s\n' "$package_health"
   for mount in / /usr /var; do
     available=$(LC_ALL=C df -Pk -- "$mount" 2>/dev/null | awk 'END { if (NF >= 6 && $(NF-2) ~ /^[0-9]+$/) print int($(NF-2)/1024); else exit 1 }') || { available=unknown; status=1; }
     printf 'free_mib%s: %s\n' "$mount" "$available"
   done
   if [ -n "$directory" ] && [ -f "$directory/output.log" ]; then
+    if package_recovery=$(support_output_package_error_recovery "$directory/output.log" "$exit_status" "$package_health"); then
+      printf 'recorded_package_error_recovery: %s\nobserved_package_error_categories: %s\n' \
+        "${package_recovery%%$'\t'*}" "${package_recovery#*$'\t'}"
+    else
+      printf '%s\n' 'recorded_package_error_recovery: unknown' 'observed_package_error_categories: unknown'
+      status=1
+    fi
     if [ -e "$directory/php-runtime.findings.tsv.pending" ] || [ -L "$directory/php-runtime.findings.tsv.pending" ]; then local_review=incomplete
     elif [ -f "$directory/php-runtime.findings.tsv" ] && [ ! -L "$directory/php-runtime.findings.tsv" ]; then
       local_review=$(awk -F '\t' '
@@ -10611,6 +10692,7 @@ function support_print_report() {
       }
     ' "$directory/output.log" 2>/dev/null || status=1
   else
+    printf '%s\n' 'recorded_package_error_recovery: not_recorded' 'observed_package_error_categories: not_recorded'
     printf 'recorded_completion_verification: %s\n' "$verification"
     printf '%s\n' 'recorded_release_check: not_recorded' 'recorded_package_check: not_recorded' 'recorded_service_check: not_recorded' \
       'recorded_release_codename: not_recorded' 'recorded_package_release_codename: not_recorded' \
@@ -10638,7 +10720,7 @@ function logging_run() (
 	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
 	local logging_dir logging_log logging_line logging_status logging_original_umask logging_digest logging_action_status=0
 	local logging_emphasis=false logging_summarize=false logging_level logging_required
-	local logging_expected_stop=false
+	local logging_expected_stop=false logging_package_recovery
 	local -a logging_pipeline_status
 
 	case "$logging_verbose:$logging_trace" in
@@ -10773,6 +10855,14 @@ function logging_run() (
 	fi
 	if ! (umask 077; printf '%s\t%s\t%s\t%s\t%s\n' "$logging_status" "${DR_ACTION:-${2:-}}" "$logging_digest" "${UPGRADE_CROSSGRADE:-false}" "${3:-unknown}" > "$logging_dir/support.context" && chmod 600 -- "$logging_dir/support.context"); then
 		printf '%s\n' 'dss:warn Cannot record support-report context.' >&2
+	fi
+	# Read after tee finishes, so the final outcome and every earlier error are present.
+	if declare -F support_output_package_error_recovery >/dev/null && \
+		logging_package_recovery=$(support_output_package_error_recovery "$logging_log" "$logging_status"); then
+		case "${logging_package_recovery%%$'\t'*}" in
+			verified_recovered) printf '%s\n' 'dss:stage Earlier package errors were recovered; final release and package checks passed. Error evidence remains in the detailed log.' >&2;;
+			unresolved_or_unverified) printf '%s\n' 'dss:warn Earlier package errors remain unresolved or unverified; review the final outcome and detailed log.' >&2;;
+		esac
 	fi
 	if ! $logging_expected_stop && { [ "$logging_status" -ne 0 ] || [ -f "$logging_dir/outcome.incomplete" ]; }; then
 		if declare -F support_print_report >/dev/null; then

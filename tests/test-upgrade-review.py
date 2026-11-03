@@ -11,8 +11,9 @@ SOURCE = (pathlib.Path(__file__).resolve().parents[1] / 'distrorejuve.sh').read_
 
 def declaration(name):
     # Producer is the script's top-level `function NAME() {` ... column-one `}`.
-    # Nested braces are indented; do not source initialization or dispatch code.
-    match = re.search(r'^function ' + re.escape(name) + r'\(\) \{\n.*?^\}', SOURCE, re.M | re.S)
+    # `function logging_run() (` ... column-one `)` is a subshell declaration.
+    # Nested delimiters are indented; do not source initialization or dispatch code.
+    match = re.search(r'^function ' + re.escape(name) + r'\(\) (\{\n.*?^\}|\(\n.*?^\))', SOURCE, re.M | re.S)
     assert match, name
     return match.group()
 
@@ -23,6 +24,143 @@ def run(names, body):
 
 
 class UpgradeReview(unittest.TestCase):
+    PACKAGE_ERROR = ("dpkg: error processing archive /private/EXAMPLE.deb (--unpack):\n"
+                     " trying to overwrite shared '/etc/example.conf', which is different from other instances\n")
+    PACKAGE_OUTCOME = ('dss:trace: Package recovery health: verified.\n'
+                       'dss:stage: Outcome: release verified (trixie); '
+                       'packages verified (trixie); services verified.\n')
+
+    def test_package_error_recovery_requires_later_verified_outcome_and_success(self):
+        for log, status, expected in [
+            (self.PACKAGE_ERROR + self.PACKAGE_OUTCOME, 0, 'verified_recovered'),
+            (self.PACKAGE_ERROR + self.PACKAGE_OUTCOME, 1, 'unresolved_or_unverified'),
+            (self.PACKAGE_ERROR + self.PACKAGE_OUTCOME, 'unknown', 'unresolved_or_unverified'),
+            (self.PACKAGE_OUTCOME + self.PACKAGE_ERROR, 0, 'unresolved_or_unverified'),
+            (self.PACKAGE_ERROR, 0, 'unresolved_or_unverified'),
+            (self.PACKAGE_ERROR + self.PACKAGE_OUTCOME.replace('packages verified (trixie)',
+                                                            'packages failed final verification'),
+             0, 'unresolved_or_unverified'),
+            (self.PACKAGE_ERROR + self.PACKAGE_OUTCOME.replace('packages verified (trixie)',
+                                                            'packages verified (bookworm)'),
+             0, 'unresolved_or_unverified'),
+            (self.PACKAGE_ERROR + self.PACKAGE_OUTCOME +
+             'dss:stage: Outcome: release not verified; packages not verified; services unknown.\n',
+             0, 'unresolved_or_unverified'),
+            (self.PACKAGE_ERROR + self.PACKAGE_OUTCOME.replace(
+                'dss:trace: Package recovery health: verified.\n', ''), 0, 'unresolved_or_unverified'),
+            (self.PACKAGE_OUTCOME, 0, 'none_observed'),
+        ]:
+            with self.subTest(log=log, status=status), tempfile.TemporaryDirectory() as directory:
+                logfile = pathlib.Path(directory) / 'output.log'
+                logfile.write_text(log)
+                result = run(['support_output_package_error_recovery'],
+                             f'support_output_package_error_recovery {str(logfile)!r} {status!r}')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                categories = 'none' if expected == 'none_observed' else 'dpkg package_file_conflict'
+                self.assertEqual(result.stdout, f'{expected}\t{categories}\n')
+                self.assertEqual(logfile.read_text(), log)
+
+    def test_package_recovery_console_keeps_final_health_and_exit_checks(self):
+        for health, action_status, expected_status in [('clean', 0, 0), ('held_back', 0, 0),
+                                                       ('missing_summary', 0, 0), ('pending', 0, 1),
+                                                       ('audit_failed', 0, 1), ('audit_stderr', 0, 1),
+                                                       ('service_failed', 0, 1),
+                                                       ('clean', 7, 7)]:
+            with self.subTest(health=health, action_status=action_status), tempfile.TemporaryDirectory() as directory:
+                result = run(['logging_run', 'upgrade_finish_run', 'upgrade_outcome_record',
+                              'support_output_package_error_recovery', 'is_complete_package_plan'], f'''
+DR_LOG_DIRECTORY={directory!r}
+DR_ACTION=--to-latest
+config_state_output_baseline() {{ printf 'fixture-baseline\n'; }}
+upgrade_services_check() {{ return {1 if health == 'service_failed' else 0}; }}
+upgrade_php_runtime_check() {{ return 0; }}
+upgrade_php_runtime_findings_complete() {{ return 0; }}
+upgrade_php_runtime_write_review() {{ return 0; }}
+upgrade_outcome_output_php_removals() {{ :; }}
+manifest_compare_baseline() {{ :; }}
+support_print_report() {{ printf 'fixture support report\n'; }}
+dpkg() {{ [ "$*" = --audit ] || return 99; {'return 2' if health == 'audit_failed' else "printf 'audit diagnostic\\n' >&2" if health == 'audit_stderr' else ':'}; }}
+apt-get() {{
+  [ "$*" = '-s dist-upgrade' ] || return 99
+  {'return 0' if health == 'missing_summary' else ':'}
+  printf '%s\n' {'"Inst example [1.0] (2.0 fixture [amd64])"' if health == 'pending' else '"0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded."' if health == 'held_back' else '"0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded."'}
+}}
+distrorejuve_main() {{
+  printf '%b' {self.PACKAGE_ERROR!r}
+  upgrade_outcome_record release verified trixie || return 99
+  upgrade_outcome_record packages verified trixie || return 99
+  return {action_status}
+}}
+logging_run distrorejuve_main --to-latest
+''')
+                self.assertEqual(result.returncode, expected_status, result.stderr)
+                logfile, = pathlib.Path(directory).glob('run.*/output.log')
+                self.assertIn('dpkg: error processing archive', logfile.read_text())
+                if health == 'clean' and expected_status == 0:
+                    self.assertIn('Earlier package errors were recovered', result.stderr)
+                    self.assertNotIn('remain unresolved or unverified', result.stderr)
+                else:
+                    self.assertNotIn('Earlier package errors were recovered', result.stderr)
+                    self.assertIn('remain unresolved or unverified', result.stderr)
+                if health in ('pending', 'audit_failed', 'audit_stderr'):
+                    self.assertIn('packages failed final verification', logfile.read_text())
+
+    def test_support_report_keeps_evidence_and_rechecks_current_package_health(self):
+        for health in ('clean', 'pending', 'audit_failed', 'audit_incomplete', 'audit_stderr',
+                       'held_back', 'missing_summary', 'partial_summary', 'malformed_summary', 'nonzero_summary',
+                       'duplicate_summary', 'inconsistent_summary'):
+            with self.subTest(health=health), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                (root / 'support.context').write_text('0\t--to-latest\t' + 'a' * 64 + '\tfalse\tunknown\n')
+                (root / 'output.log').write_text(self.PACKAGE_ERROR + self.PACKAGE_OUTCOME)
+                result = run(['support_print_report', 'support_output_package_error_recovery',
+                              'is_complete_package_plan'], f'''
+ALL_DEBIAN='bookworm trixie'
+ALL_UBUNTU='noble'
+distro_output_codename() {{ printf 'trixie\n'; }}
+sha256sum() {{ printf '%s  fixture-script\n' {'a' * 64!r}; }}
+dpkg() {{
+  case "$*" in
+    --print-architecture) printf 'amd64\n';;
+    --audit) {'return 2' if health == 'audit_failed' else "printf 'example is unpacked but not configured\\n'" if health == 'audit_incomplete' else "printf 'PRIVATE AUDIT WARNING\\n' >&2" if health == 'audit_stderr' else ':'};;
+    *) return 99;;
+  esac
+}}
+dpkg-query() {{
+  case "$*" in
+    *Version*) printf '1.0\n';;
+    *Status*) printf 'install ok installed\n';;
+    *) return 99;;
+  esac
+}}
+apt-cache() {{ [ "$*" = policy ]; }}
+apt-get() {{
+  [ "$*" = '-s dist-upgrade' ] || return 99
+  {'return 0' if health == 'missing_summary' else ':'}
+  {'printf "0 upgraded, 0 newly installed, 0 to remove\\n"; return 0' if health == 'partial_summary' else ':'}
+  {'printf "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded. extra\\n"; return 0' if health == 'malformed_summary' else ':'}
+  {'printf "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\\n"' if health == 'duplicate_summary' else ':'}
+  {'printf "Inst example [1.0] (2.0 fixture [amd64])\\n"' if health in ('pending', 'inconsistent_summary') else ':'}
+  printf '{1 if health in ('pending', 'nonzero_summary') else 0} upgraded, 0 newly installed, 0 to remove and {1 if health == 'held_back' else 0} not upgraded.\n'
+}}
+df() {{ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 8192000 4096000 4096000 50%% /\n'; }}
+uname() {{ [ "$*" = -r ] || return 99; printf '6.12.0-fixture\n'; }}
+support_print_report {directory!r}
+''')
+                self.assertEqual(result.returncode, 1 if health == 'missing_summary' else 0, result.stderr)
+                expected = 'verified_recovered' if health == 'clean' else 'unresolved_or_unverified'
+                self.assertIn(f'recorded_package_error_recovery: {expected}', result.stdout)
+                expected_health = 'verified' if health == 'clean' else 'unverified'
+                self.assertIn(f'current_package_health: {expected_health}', result.stdout)
+                self.assertIn('observed_package_error_categories: dpkg package_file_conflict', result.stdout)
+                observed = re.search(r'^observed_error_categories: (.*)$', result.stdout, re.M).group(1).split()
+                self.assertIn('dpkg', observed)
+                self.assertIn('package_file_conflict', observed)
+                self.assertIn('recorded_completion_verification: verified', result.stdout)
+                self.assertNotIn('/private/', result.stdout)
+                self.assertNotIn('/etc/example.conf', result.stdout)
+                self.assertNotIn('PRIVATE AUDIT WARNING', result.stdout + result.stderr)
+
     def test_process_snapshot_precedes_parser(self):
         result = run(['manifest_process_indicators'], r'''
 manifest_emit() { printf '%s\n' "$*"; }

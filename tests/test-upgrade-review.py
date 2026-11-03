@@ -24,6 +24,189 @@ def run(names, body):
     return subprocess.run(['bash'], input=script, text=True, capture_output=True)
 
 
+def crossgrade_fixture(current='trusty', native='i386', bits=32, kernel='x86_64',
+                      selected=True, ubuntu_enabled=True, conversion='success'):
+    # Script assignment LTS_UBUNTU="trusty xenial bionic" supplies that literal
+    # declaration; use the real release order without sourcing initialization.
+    releases = '\n'.join(re.search(r'^' + name + r'="[^"]*"$', SOURCE, re.M).group()
+                         for name in ('ALL_DEBIAN', 'ALL_UBUNTU', 'LTS_UBUNTU'))
+    settings = f'''
+fixture_release={current!r}
+fixture_native={native!r}
+fixture_bits={bits}
+fixture_kernel={kernel!r}
+fixture_conversion={conversion!r}
+UPGRADE_CROSSGRADE={'true' if selected else 'false'}
+DR_ENABLE_UBUNTU_CROSSGRADE={'true' if ubuntu_enabled else 'false'}
+upgrade_retry_command=()
+'''
+    mocks = r'''
+# Fix the distro marker for the simulated source; other tests use Bash's test.
+function [() {
+  if builtin [ "$#" = 3 ] && builtin [ "$1" = -f ]; then
+    case "$2" in /etc/debian_version) return 0;; /etc/redhat-release) return 1;; esac
+  fi
+  # The caller already supplies the closing ] as the final argument.
+  builtin [ "$@"
+}
+distro_output_codename() { printf '%s\n' "$fixture_release"; }
+dpkg() { builtin [ "$*" = --print-architecture ] || return 99; printf '%s\n' "$fixture_native"; }
+getconf() { builtin [ "$*" = LONG_BIT ] || return 99; printf '%s\n' "$fixture_bits"; }
+uname() { builtin [ "$*" = -m ] || return 99; printf '%s\n' "$fixture_kernel"; }
+crossgrade_output_core_package_issues() { :; }
+crossgrade_output_foreign_packages() {
+  if builtin [ "$fixture_native" = i386 ]; then printf 'bash:i386\n'; fi
+}
+crossgrade_bookworm_output_pending_directory() { return 1; }
+crossgrade_check_apt_architecture_config() { :; }
+crossgrade_check_source_architectures() { :; }
+upgrade_panel_refuse_generic() { :; }
+usrmerge_check_upgrade_path() { :; }
+usrmerge_recover_pending() { :; }
+upgrade_check_crossgrade_package_blockers() { :; }
+upgrade_output_crossgrade_obsolete_packages() { :; }
+upgrade_output_compatibility_issues() { :; }
+upgrade_check_incompatible_packages() { :; }
+apt_sources_check_releases_and_vendors() { :; }
+apt_package_lock_warn() { :; }
+pause_check() { :; }
+check_disk_space() { :; }
+upgrade_check_crossgrade_checkpoint() {
+  builtin [ "$fixture_release" = "$2" ] || return 98
+  printf 'event:checkpoint:%s:%s:%s\n' "$2" "$fixture_native" "$fixture_bits"
+}
+crossgrade_debian() {
+  printf 'event:crossgrade:%s\n' "$fixture_release"
+  case "$fixture_conversion" in
+    fail) return 7;;
+    unchanged) return 0;;
+    native_only) fixture_native=amd64;;
+    success) fixture_native=amd64; fixture_bits=64;;
+    *) return 99;;
+  esac
+}
+upgrade_prepare_nss_lookup() { :; }
+upgrade_precondition_checks() { :; }
+apt_sources_prepare() { :; }
+check_usrmerge() { :; }
+upgrade_prepare_php_source_retry() { :; }
+apt_get_upgrade() { printf 'event:package-update:%s\n' "$fixture_release"; }
+retain_etc_networking_naming_re_enX0() { :; }
+upgrade_record_package_origins() { :; }
+apt_sources_upgrade() {
+  printf 'event:sources:%s:%s:%s:%s\n' "$2" "$3" "$fixture_native" "$fixture_bits"
+  fixture_next=$3
+}
+apt_get_update() { :; }
+apt_get_install() { :; }
+upgrade_migrate_php_packages() { :; }
+apt_get_dist_upgrade() { fixture_release=$fixture_next; }
+upgrade_remove_retired_packages() { :; }
+upgrade_autoremove_packages() { :; }
+upgrade_outcome_record() { :; }
+upgrade_php_runtime_verify() { :; }
+'''
+    return releases + '\n' + settings + mocks
+
+
+class CrossgradeUpgrade(unittest.TestCase):
+    planning_functions = ['is_distro_name_older', 'is_distro_name_newer',
+                          'upgrade_output_crossgrade_release']
+    upgrade_functions = planning_functions + [
+        'ubuntu_output_next_release', 'ubuntu_output_latest_lts',
+        'upgrade_check_path', 'upgrade_preflight_action',
+        'upgrade_crossgrade_before_release', 'dist_upgrade_ubuntu_to_latest']
+
+    def test_i386_release_boundaries_and_crossgrade_permission(self):
+        cases = [
+            # Native upgrades remain possible up to the last i386 LTS.
+            ('ubuntu', 'trusty', 'bionic', False, False, 'i686', 0, ''),
+            ('ubuntu', 'trusty', 'bionic', True, False, 'i686', 0, ''),
+            ('ubuntu', 'trusty', 'resolute', False, True, 'x86_64', 1, '--crossgrade'),
+            ('ubuntu', 'bionic', 'focal', True, False, 'x86_64', 1, 'DR_ENABLE_UBUNTU_CROSSGRADE'),
+            ('ubuntu', 'trusty', 'resolute', True, True, 'i686', 1, 'running x86_64 kernel'),
+            ('ubuntu', 'trusty', 'resolute', True, True, 'x86_64', 0, 'bionic'),
+            ('ubuntu', 'bionic', 'focal', True, True, 'x86_64', 0, 'bionic'),
+            ('ubuntu', 'bionic', 'eoan', False, True, 'x86_64', 1, '--crossgrade'),
+            ('ubuntu', 'cosmic', 'focal', True, True, 'x86_64', 1, 'before later release sources'),
+            ('debian', 'bullseye', 'bookworm', False, False, 'i686', 0, ''),
+            ('debian', 'bullseye', 'trixie', False, False, 'x86_64', 1, '--crossgrade'),
+            ('debian', 'bullseye', 'trixie', True, False, 'x86_64', 0, 'bookworm'),
+        ]
+        for family, current, target, selected, enabled, kernel, status, message in cases:
+            with self.subTest(family=family, current=current, target=target,
+                              selected=selected, enabled=enabled, kernel=kernel):
+                result = run(self.planning_functions,
+                             crossgrade_fixture(current=current, selected=selected,
+                                                ubuntu_enabled=enabled, kernel=kernel)
+                             + f'\nupgrade_output_crossgrade_release {family} {current} {target}\n')
+                self.assertEqual(result.returncode, status, result.stderr)
+                if status == 0:
+                    self.assertEqual(result.stdout.strip(), message)
+                else:
+                    self.assertIn(message, result.stderr)
+
+    def test_native_amd64_needs_no_crossgrade(self):
+        result = run(self.upgrade_functions,
+                     crossgrade_fixture(native='amd64', bits=64, selected=False,
+                                        ubuntu_enabled=False)
+                     + '\ndist_upgrade_ubuntu_to_latest\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('event:crossgrade:', result.stdout)
+        self.assertIn('event:sources:bionic:focal:amd64:64', result.stdout)
+
+    def test_supported_i386_step_needs_no_64bit_kernel_or_opt_in(self):
+        for selected in (False, True):
+            with self.subTest(selected=selected):
+                result = run(self.upgrade_functions,
+                             crossgrade_fixture(current='xenial', kernel='i686',
+                                                selected=selected, ubuntu_enabled=False)
+                             + '\ndist_upgrade_ubuntu_to_latest 1\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('event:crossgrade:', result.stdout)
+                self.assertIn('event:sources:xenial:bionic:i386:32', result.stdout)
+
+    def test_ubuntu_crossgrades_on_bionic_before_focal_sources(self):
+        result = run(self.upgrade_functions,
+                     crossgrade_fixture() + '\ndist_upgrade_ubuntu_to_latest\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = [line for line in result.stdout.splitlines() if line.startswith('event:')]
+        switches = [line for line in events if line.startswith('event:sources:')]
+        self.assertEqual(switches, [
+            'event:sources:trusty:xenial:i386:32',
+            'event:sources:xenial:bionic:i386:32',
+            'event:sources:bionic:focal:amd64:64',
+            'event:sources:focal:jammy:amd64:64',
+            'event:sources:jammy:noble:amd64:64',
+            'event:sources:noble:resolute:amd64:64'])
+        self.assertEqual(events.count('event:crossgrade:bionic'), 1)
+        conversion = events.index('event:crossgrade:bionic')
+        self.assertEqual(events[conversion - 1], 'event:checkpoint:bionic:i386:32')
+        self.assertEqual(events[conversion + 1], 'event:checkpoint:bionic:amd64:64')
+        self.assertLess(conversion, events.index('event:sources:bionic:focal:amd64:64'))
+
+    def test_blocked_full_path_does_not_start_package_or_source_changes(self):
+        for settings in ({'selected': False}, {'ubuntu_enabled': False}, {'kernel': 'i686'}):
+            with self.subTest(settings=settings):
+                result = run(self.upgrade_functions,
+                             crossgrade_fixture(**settings)
+                             + '\nupgrade_preflight_action --to-latest\n')
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('blocked before changes', result.stderr)
+                self.assertNotIn('event:', result.stdout)
+
+    def test_failed_or_incomplete_conversion_stops_before_source_changes(self):
+        for conversion, status in [('fail', 7), ('unchanged', 1), ('native_only', 1)]:
+            with self.subTest(conversion=conversion):
+                result = run(self.upgrade_functions,
+                             crossgrade_fixture(current='bionic', conversion=conversion)
+                             + '\ndist_upgrade_ubuntu_to_latest\n')
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertIn('event:crossgrade:bionic', result.stdout)
+                self.assertNotIn('event:sources:', result.stdout)
+                self.assertNotIn('event:package-update:', result.stdout)
+
+
 class UpgradeReview(unittest.TestCase):
     def test_current_label_retry_checks_init_before_package_mutation(self):
         function = declaration('packages_upgrade').replace('if [ -f /etc/debian_version ]; then', 'if true; then')

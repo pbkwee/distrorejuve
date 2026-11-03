@@ -172,11 +172,13 @@ unauthenticated installs only while every binary source is an official archived 
 It does not repair signing keys or change APT's handling of repository indexes.
 
 Add --crossgrade to a release-upgrade command to permit i386 to amd64 conversion at the last
-release supporting native i386 (Debian 12 or Ubuntu 18.04), then continue to the requested target.
+LTS supporting native i386 (Debian 12 or Ubuntu 18.04), then continue to the requested target.
 A running x86_64 kernel is required. Ubuntu also requires DR_ENABLE_UBUNTU_CROSSGRADE=true.
 Set DR_ALLOW_CROSSGRADE_BLOCKERS=true to attempt despite known package blockers; final native amd64 verification remains required.
 
-Run with --to-64bit to convert a 32 bit distro to 64 bit.  Works OK with Debian.  May work for Ubuntu < 18.04.
+Run with --to-64bit to attempt a standalone i386 to amd64 conversion on the current release.
+It requires a running x86_64 kernel; Ubuntu also requires DR_ENABLE_UBUNTU_CROSSGRADE=true.
+For a release upgrade, use --crossgrade to convert at the checkpoint above.
 
 Run with --to-debian-release VERSION to upgrade Debian to the specified major version
 
@@ -4282,6 +4284,8 @@ function upgrade_output_crossgrade_release() {
   case "$enabled" in true|false) :;; *) echo 'dss:error: Internal crossgrade permission must be true or false.' >&2; return 1;; esac
   case "$family" in
     debian) releases=$ALL_DEBIAN; boundary=bookworm;;
+    # Ubuntu dropped i386 hosts in 19.10; convert on the preceding LTS.
+    # https://documentation.ubuntu.com/release-notes/20.04/#upgrades-on-i386
     ubuntu) releases=$ALL_UBUNTU; boundary=bionic;;
     *) return 0;;
   esac

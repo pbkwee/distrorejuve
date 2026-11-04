@@ -4,6 +4,7 @@
 | --- | --- |
 | `--check-upgrade` (or no argument) | Read-only review of the current distro, intended newer release and known upgrade blockers. RPM major-release upgrades require a reviewed migration procedure. |
 | `--upgrade` | Update native APT or DNF/YUM packages. End-of-life CentOS requires an explicit repository/migration choice below. |
+| `--capture-baseline` | Capture the selected private original before preparatory changes; requires root and `DR_CONFIG_BASELINE`. Preserves existing usable originals and refuses incomplete attempts. |
 | `--dist-update` | Perform a full package upgrade on the current release. |
 | `--to-latest` | Upgrade through successive releases to Debian stable or the latest Ubuntu LTS. |
 | `--to-debian-release VERSION` | Upgrade Debian to a specific release. |

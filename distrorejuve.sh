@@ -17,7 +17,7 @@ function environment_validate_settings() {
       *) printf 'dss:error: %s must be true or false.\n' "$name" >&2; return 1;;
     esac
   done
-  for name in DR_MIN_FREE_DISK_MIB DR_CONFIGURATION_HISTORY_DAYS; do
+  for name in DR_MIN_FREE_DISK_MIB DR_MIN_FREE_BOOT_MIB DR_DISK_SAFETY_PERCENT DR_KERNEL_INITRAMFS_RESERVE_MIB DR_CONFIGURATION_HISTORY_DAYS; do
     value=${!name}
     [ -n "$value" ] || continue
     case "$value" in
@@ -27,7 +27,7 @@ function environment_validate_settings() {
     printf 'dss:error: %s must be a positive integer.\n' "$name" >&2
     return 1
   done
-  for name in DR_CONFIG_BASELINE DR_DATABASE_DEFAULTS_FILE; do
+  for name in DR_CONFIG_BASELINE DR_DATABASE_DEFAULTS_FILE DR_WORKLOAD_CONTRACT DR_WORKLOAD_EXCEPTIONS DR_STAGE_RECORD; do
     value=${!name}
     case "$value" in
       '') :;;
@@ -120,6 +120,8 @@ Arguments:
 
 Run with --help to get this message
 
+Run with --refresh-stale-systemd only during approved execution to refresh an independently verified usrmerge PID 1 path.
+
 Run with --check-upgrade (or no argument) for a read-only report of the current distro, intended target and known upgrade blockers.
 
 Run with --to-latest to upgrade through releases to Debian stable or the latest Ubuntu LTS.
@@ -139,6 +141,9 @@ See docs/hosting-panels.md for prerequisites, supported paths and recovery.
 
 Run with --upgrade-report to collect a read-only handover for developer/application upgrade review.
 It does not test application compatibility.
+
+Run with --capture-baseline to record the selected original before preparatory changes.
+Requires root and DR_CONFIG_BASELINE in a private root-owned directory; does not change packages or services.
 
 Run with --support-report [RUN_DIRECTORY] to print a minimal report for a public bug report.
 Review it before posting. It omits raw logs, configuration and host identifiers; no upload occurs.
@@ -197,6 +202,7 @@ Run with --to-next-ubuntu to get from an ubuntu distro to the next ubuntu versio
 Run with --pause to pause a distro rejuve running process (touch ~/distrorejuve.pause).  Triggers 30s sleeps at key points in the script.
 
 Run with --resume to resume a paused distro rejuve running process (rm -f ~/distrorejuve.pause)
+Run with --resume-stage STAGE_RECORD to finish only the recorded release hop through normal checks.
 
 Disk space: upgrades and crossgrades require 2048 MiB free on package/cache/state filesystems.
 Set DR_MIN_FREE_DISK_MIB to a positive integer to adjust the floor, or DR_SKIP_DISK_SPACE_CHECK=true to bypass.
@@ -206,6 +212,7 @@ DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK (current-release only), DR_SKIP_OLD_PAC
 DR_REMOVE_X11_PACKAGES enables X11 removal; DR_ENABLE_UBUNTU_CROSSGRADE permits experimental Ubuntu crossgrading.
 DR_CONFIGURATION_HISTORY_DAYS sets the configuration-history lookback (default 7 days).
 DR_CONFIG_BASELINE pins the original pre-upgrade snapshot to an absolute file path across runs and release hops.
+Selected originals enable durable release stages at DR_CONFIG_BASELINE.stage; DR_STAGE_RECORD selects another absolute private file.
 DR_DATABASE_DEFAULTS_FILE selects an authorized database maintenance client option file; no credentials are printed.
 DR_PURGE_INCOMPATIBLE_PACKAGES=false blocks known config-breaking packages before release upgrades.
 Set it to literal true to back them up and purge them; reinstall and configure them manually afterward.
@@ -1334,14 +1341,264 @@ function check_disk_space() {
   return 0
 }
 
+# apt-config shell APT_ARCHIVE_DIR Dir::Cache::archives/d produces exactly:
+# APT_ARCHIVE_DIR='/var/cache/apt/archives/' -> the conventional cache budget.
+# Query the same -o/-c settings as execution; unfamiliar cache placement needs
+# separate filesystem planning rather than silently checking the default path.
+function apt_space_check_options() {
+  local output
+  local -a options=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -o|--option|-c|--config-file)
+        [ "$#" -gt 1 ] || return 1
+        options+=("$1" "$2"); shift;;
+      -o?*|-c?*|--option=*|--config-file=*) options+=("$1");;
+      --print-*|--sim*|--just-*|--dry-*|--recon*|--no-act*|--help*|--version*|--download-only|-d|-s|-h|-v)
+        echo 'dss:error: Peak transaction guard requires execution arguments, without print/simulation/download-only modes.' >&2; return 1;;
+      -[^-]*[dshv]*)
+        echo 'dss:error: Unsupported combined APT action mode for peak transaction planning.' >&2; return 1;;
+    esac
+    shift
+  done
+  output=$(LC_ALL=C apt-config "${options[@]}" shell APT_ARCHIVE_DIR Dir::Cache::archives/d) || return 1
+  case "$output" in
+    "APT_ARCHIVE_DIR='/var/cache/apt/archives/'"|"APT_ARCHIVE_DIR='/var/cache/apt/archives'") return 0;;
+    *) echo 'dss:error: APT cache placement is unknown or nonstandard; review its filesystem budget before package changes.' >&2; return 1;;
+  esac
+}
+
+# APT --simulate, LC_ALL=C:
+# Inst sample [1.0] (2.0 Debian:stable [amd64]) -> sample,2.0,amd64,1.0.
+# Inst sample:arm64 (2.0 Debian:stable [arm64]) -> sample:arm64,2.0,arm64,-.
+# Require the transaction summary as well as complete action lines; an empty or
+# unfamiliar planner output is not evidence that a transaction needs no space.
+function apt_space_output_plan_records() {
+  awk '
+    /^Inst / {
+      name=$2; old="-"; version=$0; arch=$0
+      if ($3 ~ /^\[/) { old=$3; sub(/^\[/,"",old); sub(/\]$/,"",old) }
+      if (version !~ /\([^ ]+ .*\[[a-z0-9-]+\]\)$/) { bad=1; next }
+      sub(/^[^(]*\(/,"",version); sub(/ .*/,"",version)
+      sub(/^.*\[/,"",arch); sub(/\]\)$/, "", arch)
+      if (name !~ /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/ ||
+          version !~ /^[A-Za-z0-9.+:~_-]+$/ || old !~ /^[-A-Za-z0-9.+:~_]+$/) { bad=1; next }
+      if (name ~ /:/) { suffix=name; sub(/^.*:/,"",suffix); if (suffix != arch) bad=1 }
+      if (seen[name ":" arch]++) bad=1
+      printf "%s\t%s\t%s\t%s\n", name,version,arch,old
+      count++; next
+    }
+    /^[0-9]+ upgraded, / {
+      if ($0 !~ / newly installed, .* to remove and [0-9]+ not upgraded[.]$/) { bad=1; next }
+      summaries++; total=0; parts=split($0,values,", ")
+      for (i=1;i<=parts;i++) {
+        if (values[i] ~ /^[0-9]+ (upgraded|newly installed|reinstalled|downgraded)$/) total+=values[i]+0
+        else if (values[i] !~ /^[0-9]+ to remove and [0-9]+ not upgraded[.]$/) bad=1
+      }
+    }
+    /^Inst[[:space:]]/ && !/^Inst / { bad=1 }
+    /^E:/ { bad=1 }
+    END { if (bad || summaries != 1 || count != total) exit 1 }
+  ' "$1"
+}
+
+# apt-cache show sample:amd64=2.0 is an RFC822-style record:
+# Package: sample / Version: 2.0 / Architecture: amd64 / Size: 4096 /
+# Installed-Size: 32 -> archive=4096 bytes, installed=32768 bytes.
+# Duplicate repository records are accepted only when these exact sizes agree.
+function apt_space_output_package_sizes() {
+  local package=$1 version=$2 arch=$3 metadata
+  metadata=$(LC_ALL=C apt-cache show "$package=$version") || return 1
+  printf '%s\n\n' "$metadata" | awk -v name="${package%%:*}" -v version="$version" -v arch="$arch" '
+    function record() {
+      if (!fields) return
+      if (p != name || v != version || a != arch || size !~ /^[0-9]+$/ || installed !~ /^[0-9]+$/ ||
+          length(size)>12 || length(installed)>9 || duplicates) bad=1
+      else if (found && (size+0 != first_size || installed+0 != first_installed)) bad=1
+      else { first_size=size+0; first_installed=installed+0; found=1 }
+      p=v=a=size=installed=""; fields=duplicates=0; delete seen
+    }
+    /^[^ \t][^:]*:/ {
+      key=$0; sub(/:.*/,"",key)
+      if (key ~ /^(Package|Version|Architecture|Size|Installed-Size)$/) {
+        value=$0; sub(/^[^:]*:[ \t]*/,"",value)
+        if (seen[key]++) duplicates=1
+        if (key=="Package") p=value
+        if (key=="Version") v=value
+        if (key=="Architecture") a=value
+        if (key=="Size") size=value
+        if (key=="Installed-Size") installed=value
+      }
+      fields++; next
+    }
+    /^$/ { record() }
+    END { record(); if (bad || !found) exit 1; printf "%.0f %.0f\n",first_size,first_installed*1024 }
+  '
+}
+
+# Estimate a conservative transaction peak from the exact selected APT plan.
+# Metadata has no per-file allocation, so reserve the complete growth+unpack
+# allowance once on every distinct payload filesystem. Never credit removals or
+# cached archives without proof that they free usable space before the peak.
+function apt_space_check_plan() {
+  local plan=$1 records package version arch old sizes archive installed current current_version current_kib status
+  local download=0 growth=0 unpack=0 count=0 payload boot minimum margin reserve path probe device output available row
+  local required extra boot_minimum floor seen=$'\n'
+  local -a paths=() devices=() free=() labels=() budgets=() floors=()
+  "${DR_SKIP_DISK_SPACE_CHECK:-false}" && return 0
+  minimum=${DR_MIN_FREE_DISK_MIB:-2048}
+  shift
+  apt_space_check_options "$@" || return 1
+  boot_minimum=${DR_MIN_FREE_BOOT_MIB:-128}
+  margin=${DR_DISK_SAFETY_PERCENT:-20}
+  reserve=${DR_KERNEL_INITRAMFS_RESERVE_MIB:-512}
+  for row in "$minimum" "$boot_minimum" "$margin" "$reserve"; do
+    case "$row" in ''|*[!0-9]*) echo 'dss:error: Invalid disk-space planning setting.' >&2; return 1;; esac
+    if ! [ "$row" -gt 0 ] 2>/dev/null || ! [ "$row" -le 1048576 ] 2>/dev/null; then
+      echo 'dss:error: Disk-space planning settings must be between 1 and 1048576.' >&2; return 1
+    fi
+  done
+  if [ "$margin" -gt 1000 ]; then
+    echo 'dss:error: DR_DISK_SAFETY_PERCENT must not exceed 1000.' >&2; return 1
+  fi
+  records=$(apt_space_output_plan_records "$plan") || {
+    echo 'dss:error: Cannot establish a complete selected APT plan for peak disk-space review.' >&2; return 1;
+  }
+  if [ -n "$records" ]; then
+    while IFS=$'\t' read -r package version arch old; do
+      case "$package" in *:*) :;; *) package="$package:$arch";; esac
+      sizes=$(apt_space_output_package_sizes "$package" "$version" "$arch") || {
+        printf 'dss:error: Cannot establish exact download/installed sizes for %s=%s.\n' "$package" "$version" >&2; return 1;
+      }
+      read -r archive installed <<< "$sizes"
+      current=0
+      if [ "$old" != - ]; then
+        # dpkg-query: install ok installed<TAB>1.0<TAB>24 -> old payload=24576 bytes.
+        row=$(LC_ALL=C dpkg-query -W -f='${Status}\t${Version}\t${Installed-Size}\n' "$package") || return 1
+        IFS=$'\t' read -r status current_version current_kib extra <<< "$row"
+        case "$status" in 'install ok installed'|'install ok unpacked'|'install ok half-configured'|'install ok triggers-awaited'|'install ok triggers-pending') :;;
+          *) printf 'dss:error: Cannot size the current package state for %s.\n' "$package" >&2; return 1;; esac
+        case "$current_kib" in ''|*[!0-9]*) return 1;; esac
+        if [ "$current_version" != "$old" ] || [ -n "$extra" ] || [ "${#current_kib}" -gt 10 ]; then
+          printf 'dss:error: Selected and installed package states disagree for %s.\n' "$package" >&2; return 1
+        fi
+        current=$((10#$current_kib * 1024))
+      fi
+      if [ "$download" -gt 1000000000000000 ] || [ "$growth" -gt 1000000000000000 ]; then
+        echo 'dss:error: Package-space estimate exceeds the supported arithmetic range.' >&2; return 1
+      fi
+      download=$((download + archive))
+      [ "$installed" -le "$current" ] || growth=$((growth + installed - current))
+      # Keep the largest package payload for simultaneous old/new unpack staging.
+      [ "$installed" -le "$unpack" ] || unpack=$installed
+      count=$((count+1))
+    done <<< "$records"
+  fi
+  payload=$((growth + unpack))
+  # Configuration-only transactions may regenerate initramfs too.
+  boot=$((reserve * 1048576))
+  paths=(/ /usr /var /opt /lib /lib/modules /var/lib/dpkg /var/cache/apt/archives /boot)
+  for path in "${paths[@]}"; do
+    probe=$path
+    while [ ! -d "$probe" ]; do
+      [ "$probe" != / ] || return 1
+      probe=${probe%/*}; [ -n "$probe" ] || probe=/
+    done
+    device=$(stat -Lc %d -- "$probe") || return 1
+    case "$device" in ''|*[!0-9]*) echo 'dss:error: Cannot identify a package filesystem.' >&2; return 1;; esac
+    output=$(LC_ALL=C df -Pk -- "$probe") || {
+      printf 'dss:error: Cannot read disk space for %s.\n' "$probe" >&2; return 1;
+    }
+    # df -Pk: /dev/vda1 20971520 4194304 16777216 20% / -> free=17179869184 bytes.
+    # Reject shifted columns, duplicate data rows and unavailable/negative space.
+    available=$(printf '%s\n' "$output" | awk '
+      NR==2 && NF>=6 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ &&
+        length($4)<=13 && $5~/^[0-9]+%$/ { value=$4; valid=1 }
+      END { if (!valid || NR!=2) exit 1; printf "%.0f\n", value*1024 }
+    ') || { printf 'dss:error: Cannot parse disk space for %s.\n' "$probe" >&2; return 1; }
+    row=0
+    while [ "$row" -lt "${#devices[@]}" ] && [ "${devices[$row]}" != "$device" ]; do row=$((row+1)); done
+    if [ "$row" -eq "${#devices[@]}" ]; then
+      devices[row]=$device; free[row]=$available; labels[row]=$path; budgets[row]=0; floors[row]=0
+    elif [ "$available" -lt "${free[$row]}" ]; then
+      free[row]=$available
+    fi
+    floor=$minimum
+    if [ "$path" = /boot ]; then
+      floor=$boot_minimum
+      # A shared payload/cache filesystem retains its ordinary floor once.
+      [ "${floors[$row]}" -eq 0 ] || floor=${floors[$row]}
+    fi
+    [ "${floors[$row]}" -ge "$floor" ] || floors[row]=$floor
+    case "$path" in
+      /var/cache/apt/archives) budgets[row]=$((${budgets[$row]} + download));;
+      /boot) budgets[row]=$((${budgets[$row]} + boot));;
+      *)
+        case "$seen" in *$'\n'"$device"$'\n'*) :;;
+          *) budgets[row]=$((${budgets[$row]} + payload)); seen="$seen$device"$'\n';;
+        esac;;
+    esac
+  done
+  printf 'dss:info: APT peak-space plan: %s packages; downloads/cache %s bytes; positive installed growth %s bytes; unpack reserve %s bytes; kernel/initramfs reserve %s MiB; safety %s%%; retained floor %s MiB (separate boot %s MiB).\n' "$count" "$download" "$growth" "$unpack" "$reserve" "$margin" "$minimum" "$boot_minimum" >&2
+  for ((row=0; row<${#devices[@]}; row++)); do
+    extra=${budgets[$row]}
+    required=$((floors[row] * 1048576 + extra + (extra * margin + 99) / 100))
+    printf 'dss:info: Peak-space filesystem %s (device %s): available %s bytes; required %s bytes.\n' "${labels[$row]}" "${devices[$row]}" "${free[$row]}" "$required" >&2
+    if [ "${free[$row]}" -lt "$required" ]; then
+      printf 'dss:error: Insufficient peak transaction space on %s. Free space or resize this filesystem, then regenerate/review the package plan.\n' "${labels[$row]}" >&2
+      return 1
+    fi
+  done
+}
+
+# Direct specialized APT paths use the same fresh selected-plan check without
+# routing their stdout or recovery behavior through the ordinary APT wrapper.
+function apt_space_check_arguments() {
+(
+  local directory status
+  "${DR_SKIP_DISK_SPACE_CHECK:-false}" && return 0
+  directory=$(mktemp -d) || return 1
+  trap 'rm -rf -- "$directory"' EXIT
+  LC_ALL=C apt-get "$@" --simulate > "$directory/plan" 2>&1
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    cat "$directory/plan" >&2
+    echo 'dss:error: Cannot establish a selected package plan; no APT mutation attempted.' >&2
+    return "$status"
+  fi
+  apt_space_check_plan "$directory/plan" "$@"
+)
+}
+
+# Native debug mode applies the installed version's include/taboo/script rules.
+# It neither rotates files, runs scripts, nor updates its state file. Configuration
+# remains within the existing approved conventional-configuration read scope.
+function upgrade_logrotate_review() {
+  local root=${1:-} output status
+  [ -f "$root/etc/logrotate.conf" ] || return 0
+  if ! command -v logrotate >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
+    echo 'dss:warn: Native logrotate configuration review unavailable; include/taboo coverage is unknown.' >&2
+    return 0
+  fi
+  output=$(LC_ALL=C timeout 20 logrotate --debug --state /dev/null "$root/etc/logrotate.conf" 2>&1)
+  status=$?
+  # logrotate --debug: "error: example:3 duplicate log entry for /var/log/example.log"
+  # -> duplicate_log_path; do not infer duplicates from files native includes ignore.
+  case "$output" in *'duplicate log entry for '*) echo 'dss:warn: Configuration review: duplicate_log_path reported by native logrotate.' >&2;; esac
+  if [ "$status" -ne 0 ]; then
+    printf 'dss:warn: Native logrotate review failed (status %s); configuration coverage is incomplete. Review logrotate --debug --state /dev/null /etc/logrotate.conf locally.\n' "$status" >&2
+  fi
+}
+
 # Read conventional configuration as data. Findings require review; never repair
 # service identities, monitoring, filesystem policy or database grants implicitly.
 function upgrade_configuration_review() {
   local root=${1:-} findings kind path line detail file size resolved seen=$'\n' count=0
   local -a files=()
   root=${root%/}
-  for file in "$root/etc/network/interfaces" "$root/etc/fstab" "$root/etc/logrotate.conf" \
-      "$root"/etc/logrotate.d/* "$root/etc/monit/monitrc" "$root"/etc/monit/conf.d/* "$root"/etc/monit/conf-enabled/*; do
+  upgrade_logrotate_review "$root"
+  for file in "$root/etc/network/interfaces" "$root/etc/fstab" \
+      "$root/etc/monit/monitrc" "$root"/etc/monit/conf.d/* "$root"/etc/monit/conf-enabled/*; do
     [ -f "$file" ] || continue
     resolved=$(readlink -f -- "$file" 2>/dev/null) || resolved=$file
     case "$seen" in *$'\n'"$resolved"$'\n'*) continue;; esac
@@ -1363,21 +1620,6 @@ function upgrade_configuration_review() {
       key=$2 " " $3 " " $4
       if (key in seen) printf "duplicate_interface\t%s\t%d\tprevious line %d\n", FILENAME, FNR, seen[key]
       else seen[key]=FNR
-    }
-    # logrotate: "/var/log/example.log {" in two files -> duplicate_log_path.
-    # Only literal unquoted paths are compared; wildcard overlap is unknown.
-    FILENAME ~ /\/logrotate([.]conf|[.]d\/)/ {
-      if (FNR == 1) script=0
-      if ($1 ~ /^(prerotate|postrotate|firstaction|lastaction|preremove)$/) { script=1; next }
-      if ($1 == "endscript") { script=0; next }
-      if (!script && $0 ~ /^[ \t]*\//) {
-        for (i=1; i<=NF && $i != "{"; i++) {
-          path=$i; sub(/\{$/, "", path)
-          if (path !~ /^\// || path ~ /[*?\[\]"\047]/) continue
-          if (path in logs) printf "duplicate_log_path\t%s\t%d\tprevious header %s\n", FILENAME, FNR, logs[path]
-          else logs[path]=FILENAME ":" FNR
-        }
-      }
     }
     # Monit: "if failed port 808080 then restart" -> invalid_monitor_port.
     # start program = "service nginx start" -> relative_monitor_program.
@@ -2414,13 +2656,14 @@ function apt_get_apply() {
   for attempt in 1 2; do
     umask 077
     dpkg-query -W -f='${Status}\t${Package}\n' > "$directory/packages" || return 1
+    (umask "$package_umask" && LC_ALL=C apt-get "$@" --simulate) > "$directory/plan" 2>&1 || { status=$?; cat "$directory/plan" >&2; return "$status"; }
+    apt_space_check_plan "$directory/plan" "$@" || return 1
     if awk -F '\t' '
       $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ &&
         ($2 ~ /^(apache2|apache2[.]2-common|apache2-mpm-.*)(:[a-z0-9-]+)?$/ || $2 ~ /^libapache2-mod-php/) { found=1 }
       END { exit !found }
     ' "$directory/packages"; then :
     else
-      (umask "$package_umask" && LC_ALL=C apt-get "$@" --simulate) > "$directory/plan" 2>&1 || { status=$?; cat "$directory/plan" >&2; return "$status"; }
       additions=$(upgrade_php_output_new_apache_packages "$directory/packages" "$directory/plan") || return 1
       if [ -n "$additions" ]; then
         printf 'dss:error: APT would add an Apache web server/PHP handler to a host without that role: %s. No package changes attempted; review PHP-FPM/CGI dependency alternatives.\n' "${additions//$'\n'/, }" >&2
@@ -3204,6 +3447,7 @@ function upgrade_migrate_php_packages() {
       return 1
     fi
   fi
+  apt_space_check_arguments "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --reinstall install "${arguments[@]}" || return 1
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --download-only --reinstall install "${arguments[@]}") || return 1
   : > "$directory/started" || return 1
   if [ -f "$directory/apache.handoff" ]; then
@@ -3216,6 +3460,7 @@ function upgrade_migrate_php_packages() {
   fi
   echo "dss:stage: Updating installed PHP packages to the distribution's default PHP version ($default); configs/inventory: $directory" >&2
   if [ -f "$directory/apache.handoff" ] && [ "${#handoff_removals[@]}" -gt 0 ] && ! $apache_combined; then
+    apt_space_check_arguments "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false remove "${handoff_removals[@]}" || return 1
     (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false remove "${handoff_removals[@]}") || return 1
     # Removing the old handler can also remove its no-conffile PHP metapackage.
     packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
@@ -3229,6 +3474,7 @@ function upgrade_migrate_php_packages() {
     echo 'dss:error: Combined PHP transaction requires a verified persistent Apache mask and inactive service; package changes stopped.' >&2
     return 1
   fi
+  apt_space_check_arguments "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --reinstall install "${arguments[@]}" || return 1
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --no-download --reinstall install "${arguments[@]}") || return 1
   for package in "${installs[@]}" "$apache"; do
     [ -n "$package" ] || continue
@@ -3711,6 +3957,10 @@ function upgrade_services_is_active() {
   local -a bounded=()
   command -v timeout >/dev/null 2>&1 && bounded=(timeout 20)
   case "$family" in
+    ssh)
+      upgrade_ssh_socket_is_listening
+      status=$?
+      case "$status" in 0) return 0;; 2) return 2;; esac;;
     postfix)
       if [ "$selector" = postfix ]; then
         command -v postfix >/dev/null 2>&1 || return 2
@@ -3744,6 +3994,34 @@ function upgrade_services_is_active() {
     esac
   fi
   return 0
+}
+
+# An idle, socket-activated ssh.service is healthy only when its own socket is
+# loaded, active and listening. A failed service still fails even if a listener exists.
+function upgrade_ssh_socket_is_listening() {
+  local properties
+  [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 || return 1
+  case "$(readlink /proc/1/exe)" in */systemd|*/'systemd (deleted)') :;; *) return 1;; esac
+  command -v timeout >/dev/null 2>&1 || return 2
+  properties=$(LC_ALL=C timeout 20 systemctl show -p LoadState -p ActiveState -p SubState -p Result ssh.service 2>/dev/null) || return 2
+  # systemctl show: LoadState=loaded, ActiveState=inactive, SubState=dead,
+  # Result=success -> an idle service eligible for the separate socket check.
+  printf '%s\n' "$properties" | awk -F= '
+    $1 == "LoadState" { load=$2; l++ } $1 == "ActiveState" { active=$2; a++ }
+    $1 == "SubState" { substate=$2; s++ } $1 == "Result" { result=$2; r++ }
+    END { exit !(l==1 && a==1 && s==1 && r==1 && load=="loaded" &&
+                 active=="inactive" && substate=="dead" && result=="success") }
+  ' || return 1
+  properties=$(LC_ALL=C timeout 20 systemctl show -p LoadState -p ActiveState -p SubState -p Triggers -p Listen ssh.socket 2>/dev/null) || return 2
+  # ssh.socket: Triggers=ssh.service, Listen=[::]:22 (Stream) with
+  # LoadState=loaded/ActiveState=active/SubState=listening -> listening.
+  printf '%s\n' "$properties" | awk -F= '
+    $1 == "LoadState" { load=$2; l++ } $1 == "ActiveState" { active=$2; a++ }
+    $1 == "SubState" { substate=$2; s++ } $1 == "Triggers" { triggers=$2; t++ }
+    $1 == "Listen" { listen=$2; n++ }
+    END { exit !(l==1 && a==1 && s==1 && t==1 && n==1 && load=="loaded" && active=="active" &&
+                 substate=="listening" && triggers=="ssh.service" && listen ~ / [(]Stream[)]$/) }
+  '
 }
 
 # The caller creates the root-private sibling of its original preupgrade baseline.
@@ -3802,6 +4080,34 @@ function upgrade_services_package_was_purged() {
   return 1
 }
 
+# Receipts record approved removals separately from incompatible-package purges.
+function upgrade_services_package_was_retired() {
+  local baseline=$1 package=$2 directory="$1.service-retirements" file="$1.service-retirements/packages.removed" status state
+  [ -e "$file" ] || [ -L "$file" ] || return 1
+  if [ -L "$directory" ] || [ ! -d "$directory" ] ||
+      [ "$(stat -c '%u:%a' -- "$directory" 2>/dev/null)" != 0:700 ] ||
+      [ -L "$file" ] || [ ! -f "$file" ] ||
+      [ "$(stat -c '%u:%a:%h' -- "$file" 2>/dev/null)" != 0:600:1 ]; then return 2; fi
+  # Approved package-removal receipt: "bind9" on one line -> matches package bind9.
+  # "bind9 extra" or a comment is malformed; never reinterpret it as an approval.
+  awk -v package="$package" '
+    $0 !~ /^[a-z0-9][a-z0-9+.-]*$/ { bad=1 }
+    $0 == package { found=1 }
+    END { exit bad ? 2 : !found }
+  ' "$file"
+  status=$?
+  [ "$status" -eq 0 ] || return "$status"
+  # dpkg-query -W -f='${Status}': deinstall ok config-files -> removed.
+  # install ok installed -> unfulfilled receipt; exit 1 with no value -> absent.
+  state=$(dpkg-query -W -f='${Status}' -- "$package" 2>/dev/null)
+  status=$?
+  case "$status:$state" in
+    0:*' config-files'|0:*' not-installed'|1:) return 0;;
+    0:*) return 2;;
+    *) return 2;;
+  esac
+}
+
 # Exempt missing packages only when baseline records confirm their purge.
 function upgrade_services_check_legacy() {
   local baseline=$1 roles selector=postfix status
@@ -3838,6 +4144,21 @@ function upgrade_services_check() {
   while IFS=$'\t' read -r family selector package state; do
     [ -n "$family" ] || continue
     case "$state" in inactive) continue;; active) :;; *) [ "$status" -eq 1 ] || status=2; continue;; esac
+    if upgrade_services_package_was_retired "$baseline" "$package"; then
+      if upgrade_services_is_active "$family" "$selector"; then
+        echo "dss:error: Approved retired service $family ($selector) is still running." >&2
+        status=1
+      else
+        result=$?
+        if [ "$result" -eq 1 ]; then
+          echo "dss:info: Approved retired service $family ($selector) is inactive; removed package $package retained in the original inventory." >&2
+        else [ "$status" -eq 1 ] || status=2; fi
+      fi
+      continue
+    else
+      result=$?
+      if [ "$result" -ne 1 ]; then [ "$status" -eq 1 ] || status=2; continue; fi
+    fi
     if upgrade_services_package_was_purged "$baseline" "$package"; then continue
     else result=$?; if [ "$result" -ne 1 ]; then [ "$status" -eq 1 ] || status=2; continue; fi; fi
     if awk -F '\t' -v family="$family" '$1 == family { found=1 } END { exit !found }' <<< "$roles"; then :
@@ -3871,11 +4192,451 @@ function upgrade_services_check() {
   return "$status"
 }
 
+# Acceptance contracts are operator-approved data, never sourced or evaluated.
+# Private parent directories bind them to the selected original baseline.
+function upgrade_workload_private_file() {
+  local file=$1 parent
+  case "$file" in /*) :;; *) return 1;; esac
+  parent=${file%/*}; parent=${parent:-/}
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  [ "$(stat -c '%u:%a' -- "$file")" = 0:600 ] && [ "$(stat -c '%u:%a' -- "$parent")" = 0:700 ] || return 1
+  [ "$(stat -c '%s' -- "$file")" -le 1048576 ] 2>/dev/null
+}
+
+function upgrade_workload_validate_contract() {
+  local contract=$1
+  upgrade_workload_private_file "$contract" || return 1
+  # Contract TSV, exactly five nonempty fields per row:
+  # service<TAB>ssh-access<TAB>ssh<TAB>active<TAB>-
+  # database-info<TAB>db-schema-info<TAB>schema<TAB>example-schema-v3<TAB>-
+  # database-check<TAB>db-schema<TAB>schema<TAB>/root/job/check-schema<TAB><sha256>
+  # -> service expectation, recorded schema version, and approved bounded check.
+  LC_ALL=C awk -F '\t' '
+    function axis(v) { return v ~ /^(engine|topology|schema|clients|maintenance|tables)$/ }
+    function digest(v) { return length(v)==64 && v !~ /[^a-f0-9]/ }
+    NF != 5 || NR > 200 || /\r/ { bad=1; next }
+    { for (i=1;i<=5;i++) if ($i=="") bad=1; if ($2 !~ /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/ || length($2)>80 || ids[$2]++) bad=1 }
+    $1=="service" { if ($3 !~ /^[a-zA-Z0-9][a-zA-Z0-9_.@-]*$/ || $4 !~ /^(active|inactive)$/ || $5!="-") bad=1; next }
+    $1=="socket" || $1=="path" { if ($3 !~ /^\// || $4 !~ /^[0-9]+:[0-9]+:[0-7]+$/ || $5!="-") bad=1; next }
+    $1=="account" { if ($3 !~ /^[a-z_][a-z0-9_-]*[$]?$/ || $4 !~ /^[0-9]+:[0-9]+$/ || $5!="-") bad=1; next }
+    $1=="functional" { if ($3 !~ /^\// || !digest($4) || $5!="-") bad=1; next }
+    $1=="database-info" { database=1; if (!axis($3) || $4=="-" || $5!="-" || info[$3]++) bad=1; next }
+    $1=="database-check" { database=1; if (!axis($3) || $4 !~ /^\// || !digest($5)) bad=1; checks[$3]++; next }
+    { bad=1 }
+    END {
+      if (database) { n=split("engine topology schema clients maintenance tables", axes, " "); for (i=1;i<=n;i++) if (!info[axes[i]] || !checks[axes[i]]) bad=1 }
+      exit (bad || NR==0)
+    }
+  ' "$contract"
+}
+
+function upgrade_workload_run_script() {
+  local script=$1 expected=$2 phase=$3 digest path mode owner
+  [ -f "$script" ] && [ ! -L "$script" ] && [ -x "$script" ] || return 2
+  # No writable ancestor can redirect an approved script after its hash check.
+  path=$script
+  while :; do
+    [ ! -L "$path" ] || return 2
+    owner=$(stat -c '%u' -- "$path") && mode=$(stat -c '%a' -- "$path") || return 2
+    [ "$owner" = 0 ] && [[ "$mode" =~ ^[0-7]+$ ]] || return 2
+    (( (8#$mode & 022) == 0 )) || return 2
+    [ "$path" != / ] || break
+    path=${path%/*}; path=${path:-/}
+  done
+  digest=$(sha256sum -- "$script") || return 2
+  [ "${digest%% *}" = "$expected" ] || return 2
+  command -v timeout >/dev/null 2>&1 || return 2
+  # The contract author approves this executable and its exact bytes. No shell
+  # strings, arguments, configuration values or database SQL are interpreted here.
+  DR_ACCEPTANCE_PHASE=$phase timeout --kill-after=5 30 "$script" >/dev/null 2>&1
+}
+
+function upgrade_workload_has_exception() {
+  local id=$1 baseline_digest=$2 contract_digest=$3 file=${DR_WORKLOAD_EXCEPTIONS:-}
+  [ -n "$file" ] && upgrade_workload_private_file "$file" || return 1
+  # exception<TAB>app-home<TAB><baseline-sha256><TAB><contract-sha256><TAB>APPROVAL-7: reason
+  # -> a specific failed check may be accepted for this original and this contract only.
+  LC_ALL=C awk -F '\t' -v id="$id" -v baseline="$baseline_digest" -v contract="$contract_digest" '
+    NF!=5 || $1!="exception" || $2=="" || $5=="" || $5=="-" || /\r/ { bad=1 }
+    $2==id { count++; if ($3==baseline && $4==contract) accepted++ }
+    END { exit (bad || count!=1 || accepted!=1) }
+  ' "$file"
+}
+
+function upgrade_workload_check_service() {
+  local selector=$1 expected=$2 properties status
+  if [ "$selector:$expected" = ssh:active ]; then upgrade_services_is_active ssh ssh; return $?; fi
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    case "$(readlink /proc/1/exe)" in */systemd|*/'systemd (deleted)')
+      command -v timeout >/dev/null 2>&1 || return 2
+      properties=$(LC_ALL=C timeout 20 systemctl show -p LoadState -p ActiveState -p Result "$selector.service" 2>/dev/null) || return 2
+      # LoadState=loaded/ActiveState=inactive/Result=success -> intentionally inactive.
+      # A failed unit or a missing unit cannot satisfy an inactive expectation.
+      printf '%s\n' "$properties" | awk -F= -v expected="$expected" '
+        $1=="LoadState" { load=$2; l++ } $1=="ActiveState" { active=$2; a++ }
+        $1=="Result" { result=$2; r++ }
+        END {
+          if(l!=1 || a!=1 || r!=1 || load!="loaded") exit 2
+          exit !(active==expected && result=="success")
+        }
+      '
+      return $?;;
+    esac
+  fi
+  # Legacy init status codes often conflate stopped and failed; do not invent an
+  # inactive assertion. An approved functional check can establish that contract.
+  [ "$expected" = active ] || return 2
+  upgrade_php_runtime_service_is_active "$selector"
+}
+
+function upgrade_workload_check() {
+(
+  umask 077
+  local baseline=$1 phase=$2 contract="$1.workload/contract.tsv" baseline_digest contract_digest kind id subject expected last result state status=0 report=''
+  case "$phase" in before|after) :;; *) return 1;; esac
+  if [ ! -f "$contract" ]; then
+    echo 'dss:warn: Workload acceptance is not recorded; application completion remains unverified.' >&2
+    return 2
+  fi
+  upgrade_workload_validate_contract "$contract" || { echo 'dss:error: Invalid or unprotected workload acceptance contract.' >&2; return 1; }
+  baseline_digest=$(sha256sum -- "$baseline") && contract_digest=$(sha256sum -- "$contract") || return 1
+  baseline_digest=${baseline_digest%% *}; contract_digest=${contract_digest%% *}
+  if [ -n "${DR_RUN_DIRECTORY:-}" ]; then
+    report="$DR_RUN_DIRECTORY/workload.$phase.tsv"
+    [ -d "$DR_RUN_DIRECTORY" ] && [ ! -L "$DR_RUN_DIRECTORY" ] && [ ! -L "$report" ] || return 1
+    : > "$report" && chmod u=rw,go= -- "$report" || return 1
+  fi
+  while IFS=$'\t' read -r kind id subject expected last || [ -n "$kind$id$subject$expected$last" ]; do
+    result=2
+    case "$kind" in
+      database-info) continue;;
+      service) upgrade_workload_check_service "$subject" "$expected"; result=$?;;
+      socket|path)
+        if [ "$kind" = socket ] && [ ! -S "$subject" ]; then result=1
+        elif [ ! -e "$subject" ] || [ -L "$subject" ]; then result=1
+        elif state=$(stat -c '%u:%g:%a' -- "$subject"); then
+          result=1; [ "$state" != "$expected" ] || result=0
+        fi;;
+      account)
+        if command -v timeout >/dev/null 2>&1 && state=$(timeout --kill-after=5 20 getent passwd "$subject"); then
+          # getent passwd: example:x:1001:1001:... -> uid:gid=1001:1001.
+          state=$(printf '%s\n' "$state" | awk -F: 'NF==7 { n++; value=$3 ":" $4 } END { if(n!=1) exit 1; print value }') || state=unknown
+          result=1; [ "$state" != "$expected" ] || result=0
+        fi;;
+      functional) upgrade_workload_run_script "$subject" "$expected" "$phase"; result=$?;;
+      database-check) upgrade_workload_run_script "$expected" "$last" "$phase"; result=$?;;
+    esac
+    state=passed
+    if [ "$result" -ne 0 ]; then
+      if [ "$phase" = after ] && upgrade_workload_has_exception "$id" "$baseline_digest" "$contract_digest"; then state=accepted_exception
+      else state=failed_or_unknown; status=1; fi
+    fi
+    printf 'dss:stage: Workload check %s (%s): %s.\n' "$id" "$phase" "$state" >&2
+    if [ -n "$report" ]; then printf '%s\t%s\t%s\n' "$id" "$state" "$result" >> "$report" || return 1; fi
+  done < "$contract"
+  return "$status"
+)
+}
+
+function upgrade_workload_prepare() {
+(
+  umask 077
+  local baseline directory contract=${DR_WORKLOAD_CONTRACT:-}
+  if [ -z "$contract" ]; then
+    if baseline=$(config_state_output_baseline) && [ -f "$baseline.workload/contract.tsv" ]; then
+      upgrade_workload_check "$baseline" before
+      return $?
+    fi
+    return 0
+  fi
+  upgrade_workload_validate_contract "$contract" || { echo 'dss:error: Prepare a valid private root-owned workload contract before changing services.' >&2; return 1; }
+  baseline=$(config_state_output_baseline) || { record_config_state || return 1; baseline=$(config_state_output_baseline) || return 1; }
+  directory="$baseline.workload"
+  [ ! -L "$directory" ] && mkdir -p -- "$directory" && chmod u=rwx,go= -- "$directory" || return 1
+  [ "$(stat -c '%u:%a' -- "$directory")" = 0:700 ] || return 1
+  if [ -e "$directory/contract.tsv" ] || [ -L "$directory/contract.tsv" ]; then
+    if ! upgrade_workload_private_file "$directory/contract.tsv" || ! cmp -s -- "$contract" "$directory/contract.tsv"; then
+      echo 'dss:error: Acceptance contract changed since original capture; retain it and record an explicit exception or start a newly approved plan.' >&2
+      return 1
+    fi
+  else
+    cp -- "$contract" "$directory/contract.tsv" && chmod u=rw,go= -- "$directory/contract.tsv" || return 1
+  fi
+  upgrade_workload_check "$baseline" before
+)
+}
+
 function upgrade_services_verify() {
   local baseline status
   if baseline=$(config_state_output_baseline); then upgrade_services_check "$baseline.services" "$baseline"; status=$?
   else status=2; fi
   case "$status" in 0) return 0;; 1) return 1;; *) echo 'dss:warn: Common-service verification is incomplete; review service status before treating the upgrade as fully verified.' >&2; return 0;; esac
+}
+
+# A selected original also selects one durable, source-local release checkpoint.
+# Stage records are data: no record content is evaluated or sourced as shell code.
+function upgrade_stage_output_source() {
+  local identity='' file host filesystem digest
+  for file in /etc/machine-id /var/lib/dbus/machine-id; do
+    [ -r "$file" ] || continue
+    identity=$(head -c 129 -- "$file") || return 1
+    case "$identity" in *[!0-9a-fA-F]*|'') identity='';; esac
+    [ "${#identity}" -ne 32 ] || break
+    identity=''
+  done
+  if [ -n "$identity" ]; then
+    digest=$(printf 'machine-id\n%s\n' "$identity" | sha256sum) || return 1
+  else
+    # Older hosts may predate machine-id. The root filesystem ID survives reboot;
+    # a hostname/filesystem change requires a fresh operator-reviewed checkpoint.
+    host=$(hostname) && filesystem=$(stat -f -c '%i' /) || return 1
+    [ -n "$host" ] && [ -n "$filesystem" ] || return 1
+    digest=$(printf 'hostname-root-filesystem\n%s\n%s\n' "$host" "$filesystem" | sha256sum) || return 1
+  fi
+  printf '%s\n' "${digest%% *}"
+}
+
+function upgrade_stage_check_path() {
+  local path=$1 directory canonical
+  case "$path" in /*) :;; *) return 1;; esac
+  case "$path" in */|*$'\t'*|*$'\r'*|*$'\n'*) return 1;; esac
+  if [ -n "${DR_CONFIG_BASELINE:-}" ] && [ "$path" = "$DR_CONFIG_BASELINE.incomplete" ]; then
+    echo 'dss:error: A stage record cannot replace the original capture failure marker.' >&2
+    return 1
+  fi
+  directory=${path%/*}; directory=${directory:-/}
+  canonical=$(readlink -f -- "$directory") || return 1
+  if [ "$canonical" != "$directory" ] || [ ! -d "$directory" ] ||
+      [ "$(stat -c '%u:%a' -- "$directory")" != 0:700 ]; then
+    echo 'dss:error: Stage records need a canonical, private root-owned directory with mode u=rwx,go=.' >&2
+    return 1
+  fi
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] &&
+      [ "$(stat -c '%u:%a:%h' -- "$path")" = 0:600:1 ] || return 1
+  fi
+}
+
+function upgrade_stage_check_pair() {
+  local family=$1 from=$2 target=$3 release next='' found=false
+  case "$family" in
+    debian)
+      for release in $ALL_DEBIAN; do
+        if $found; then next=$release; break; fi
+        [ "$release" != "$from" ] || found=true
+      done;;
+    ubuntu) next=$(ubuntu_output_next_release "$from") || return 1;;
+    *) return 1;;
+  esac
+  [ -n "$next" ] && [ "$next" = "$target" ]
+}
+
+# upgrade_stage_write produces these literal tab-delimited records, for example:
+# family	debian -> family=debian; from	bullseye -> from=bullseye;
+# baseline	/root/job/original state -> baseline=/root/job/original state.
+# There is exactly one tab per record and no empty, duplicate or unknown keys.
+# A literal value $(touch /tmp/example) stays data and fails schema validation.
+function upgrade_stage_load() {
+  local path=$1 line key value seen='|' size source baseline_digest
+  upgrade_stage_check_path "$path" || return 1
+  [ -f "$path" ] || return 1
+  size=$(stat -c '%s' -- "$path") || return 1
+  case "$size" in ''|*[!0-9]*) return 1;; esac
+  [ "$size" -gt 0 ] && [ "$size" -le 16384 ] || return 1
+  upgrade_stage_source='' upgrade_stage_baseline='' upgrade_stage_baseline_sha256=''
+  upgrade_stage_family='' upgrade_stage_from='' upgrade_stage_target='' upgrade_stage_action=''
+  upgrade_stage_crossgrade='' upgrade_stage_last_step='' upgrade_stage_outcome='' upgrade_stage_updated_utc=''
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *$'\t'*) key=${line%%$'\t'*}; value=${line#*$'\t'};; *) return 1;; esac
+    case "$value" in ''|*$'\t'*|*$'\r'*) return 1;; esac
+    case "$seen" in *"|$key|"*) return 1;; esac
+    seen="$seen$key|"
+    case "$key" in
+      format) [ "$value" = 1 ] || return 1;;
+      source) upgrade_stage_source=$value;;
+      baseline) upgrade_stage_baseline=$value;;
+      baseline_sha256) upgrade_stage_baseline_sha256=$value;;
+      family) upgrade_stage_family=$value;;
+      from) upgrade_stage_from=$value;;
+      target) upgrade_stage_target=$value;;
+      action) upgrade_stage_action=$value;;
+      crossgrade) upgrade_stage_crossgrade=$value;;
+      last_step) upgrade_stage_last_step=$value;;
+      outcome) upgrade_stage_outcome=$value;;
+      updated_utc) upgrade_stage_updated_utc=$value;;
+      *) return 1;;
+    esac
+  done < "$path"
+  for key in format source baseline baseline_sha256 family from target action crossgrade last_step outcome updated_utc; do
+    case "$seen" in *"|$key|"*) :;; *) return 1;; esac
+  done
+  case "$upgrade_stage_source" in *[!0-9a-f]*|'') return 1;; esac
+  case "$upgrade_stage_baseline_sha256" in *[!0-9a-f]*|'') return 1;; esac
+  [ "${#upgrade_stage_source}" -eq 64 ] && [ "${#upgrade_stage_baseline_sha256}" -eq 64 ] || return 1
+  [ "$upgrade_stage_action" = release-hop ] || return 1
+  case "$upgrade_stage_crossgrade" in true|false) :;; *) return 1;; esac
+  case "$upgrade_stage_last_step" in original-recorded|preflight-checked|sources-selected|packages-applied|hop-complete) :;; *) return 1;; esac
+  case "$upgrade_stage_outcome" in
+    pending|incomplete) :;;
+    release-packages-verified|verified) [ "$upgrade_stage_last_step" = hop-complete ] || return 1;;
+    *) return 1;;
+  esac
+  # UTC produced by date -u '+%Y-%m-%dT%H:%M:%SZ': 2026-11-04T12:00:00Z.
+  [[ "$upgrade_stage_updated_utc" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  upgrade_stage_check_pair "$upgrade_stage_family" "$upgrade_stage_from" "$upgrade_stage_target" || return 1
+  source=$(upgrade_stage_output_source) || return 1
+  [ "$source" = "$upgrade_stage_source" ] || { echo 'dss:error: Stage record belongs to another source identity.' >&2; return 1; }
+  if [ -n "${DR_CONFIG_BASELINE:-}" ] && [ "$DR_CONFIG_BASELINE" != "$upgrade_stage_baseline" ]; then
+    echo 'dss:error: Stage record does not match the selected original baseline.' >&2; return 1
+  fi
+  # Reuse the original's normal completeness/incomplete-marker checks before hashing.
+  if ! baseline_digest=$(DR_CONFIG_BASELINE=$upgrade_stage_baseline config_state_output_baseline); then return 1; fi
+  [ "$baseline_digest" = "$upgrade_stage_baseline" ] || return 1
+  baseline_digest=$(sha256sum -- "$upgrade_stage_baseline") || return 1
+  [ "${baseline_digest%% *}" = "$upgrade_stage_baseline_sha256" ] || {
+    echo 'dss:error: The original baseline has changed; stage resume refused.' >&2; return 1;
+  }
+}
+
+function upgrade_stage_write() {
+(
+  umask 077
+  local path=$1 temporary directory updated
+  upgrade_stage_check_path "$path" || return 1
+  directory=${path%/*}; directory=${directory:-/}
+  updated=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 1
+  temporary=$(mktemp "$directory/.distrorejuve-stage.XXXXXXXX") || return 1
+  trap 'rm -f -- "$temporary"' EXIT
+  chmod u=rw,go= -- "$temporary" || return 1
+  {
+    printf 'format\t1\nsource\t%s\nbaseline\t%s\nbaseline_sha256\t%s\n' "$upgrade_stage_source" "$upgrade_stage_baseline" "$upgrade_stage_baseline_sha256"
+    printf 'family\t%s\nfrom\t%s\ntarget\t%s\naction\trelease-hop\ncrossgrade\t%s\n' "$upgrade_stage_family" "$upgrade_stage_from" "$upgrade_stage_target" "$upgrade_stage_crossgrade"
+    printf 'last_step\t%s\noutcome\t%s\nupdated_utc\t%s\n' "$upgrade_stage_last_step" "$upgrade_stage_outcome" "$updated"
+  } > "$temporary" || return 1
+  # Validate the complete candidate with the same reader before atomic replacement.
+  upgrade_stage_load "$temporary" || return 1
+  mv -f -- "$temporary" "$path" || return 1
+)
+}
+
+function upgrade_stage_guard_command() {
+  local path=${DR_STAGE_RECORD:-${DR_CONFIG_BASELINE:+$DR_CONFIG_BASELINE.stage}}
+  [ -n "$path" ] || return 0
+  [ -n "${DR_CONFIG_BASELINE:-}" ] || { echo 'dss:error: DR_STAGE_RECORD requires a selected DR_CONFIG_BASELINE.' >&2; return 1; }
+  upgrade_stage_check_path "$path" || return 1
+  if [ -e "$path" ]; then
+    upgrade_stage_load "$path" || { echo 'dss:error: Cannot validate the selected stage record.' >&2; return 1; }
+    if [ "$upgrade_stage_outcome" != verified ]; then
+      printf 'dss:error: A recorded release stage is unfinished or unverified. Resume that exact target with: bash %q --resume-stage %q\n' "$0" "$path" >&2
+      return 1
+    fi
+  fi
+}
+
+# Called after resolving the requested release but before preparation can mutate packages.
+function upgrade_stage_prepare_target() {
+  local family=$1 current=$2 requested=$3 next='' release found=false
+  [ -n "${DR_CONFIG_BASELINE:-}${DR_STAGE_RECORD:-}" ] || return 0
+  if [ "${upgrade_stage_active:-false}" = true ] && [ "$upgrade_stage_last_step" != hop-complete ]; then
+    [ "$upgrade_stage_family" = "$family" ] || return 1
+    case "$current" in "$upgrade_stage_from"|"$upgrade_stage_target") :;; *) return 1;; esac
+    [ "$requested" = "$upgrade_stage_target" ] || is_distro_name_older "$upgrade_stage_target" "$requested" || return 1
+    return 0
+  fi
+  is_distro_name_older "$current" "$requested" || return 0
+  if [ "$family" = debian ]; then
+    for release in $ALL_DEBIAN; do
+      if $found; then next=$release; break; fi
+      [ "$release" != "$current" ] || found=true
+    done
+  else next=$(ubuntu_output_next_release "$current") || return 1; fi
+  [ -n "$next" ] || return 1
+  upgrade_stage_begin "$family" "$current" "$next"
+}
+
+function upgrade_stage_begin() {
+  local family=$1 from=$2 target=$3 path digest
+  # Legacy unpinned runs retain their behavior. A selected original enables durable stages.
+  [ -n "${DR_CONFIG_BASELINE:-}${DR_STAGE_RECORD:-}" ] || return 0
+  [ -n "${DR_CONFIG_BASELINE:-}" ] || return 1
+  path=${DR_STAGE_RECORD:-$DR_CONFIG_BASELINE.stage}
+  upgrade_stage_check_path "$path" || return 1
+  upgrade_stage_check_pair "$family" "$from" "$target" || return 1
+  record_config_state "$DR_CONFIG_BASELINE" || return 1
+  if [ -e "$path" ]; then
+    upgrade_stage_load "$path" || return 1
+    [ "$upgrade_stage_crossgrade" = "${UPGRADE_CROSSGRADE:-false}" ] || return 1
+    if [ "$upgrade_stage_family:$upgrade_stage_from:$upgrade_stage_target" = "$family:$from:$target" ]; then
+      upgrade_stage_active=true
+      return 0
+    fi
+    if [ "$upgrade_stage_family:$upgrade_stage_target:$upgrade_stage_last_step" != "$family:$from:hop-complete" ]; then
+      echo 'dss:error: Another unfinished release hop owns the selected stage record; use --resume-stage.' >&2; return 1
+    fi
+  fi
+  upgrade_stage_source=$(upgrade_stage_output_source) || return 1
+  upgrade_stage_baseline=$DR_CONFIG_BASELINE
+  digest=$(sha256sum -- "$DR_CONFIG_BASELINE") || return 1
+  upgrade_stage_baseline_sha256=${digest%% *}
+  upgrade_stage_family=$family upgrade_stage_from=$from upgrade_stage_target=$target
+  upgrade_stage_action=release-hop upgrade_stage_crossgrade=${UPGRADE_CROSSGRADE:-false}
+  upgrade_stage_last_step=original-recorded upgrade_stage_outcome=pending
+  upgrade_stage_write "$path" || return 1
+  upgrade_stage_active=true
+  printf 'dss:stage: Durable release checkpoint: %s\n' "$path" >&2
+}
+
+function upgrade_stage_record_step() {
+  local step=$1 outcome=${2:-pending} path=${DR_STAGE_RECORD:-${DR_CONFIG_BASELINE:+$DR_CONFIG_BASELINE.stage}}
+  [ "${upgrade_stage_active:-false}" = true ] || return 0
+  [ -n "$path" ] || return 1
+  # These values describe completed operations; a replay can safely repeat normal guards.
+  upgrade_stage_last_step=$step upgrade_stage_outcome=$outcome
+  upgrade_stage_write "$path"
+}
+
+# Call only after the normal final outcome AND the workload gate are known.
+# A completed package hop can still have an incomplete workload outcome.
+function upgrade_stage_finish() {
+  local status=$1 release=$2 packages=$3 services=$4 workload=$5 path=${DR_STAGE_RECORD:-${DR_CONFIG_BASELINE:+$DR_CONFIG_BASELINE.stage}}
+  [ "${upgrade_stage_active:-false}" = true ] || return 0
+  if [ "$status" = 0 ] && [ "$release" = "verified ($upgrade_stage_target)" ] &&
+      [ "$packages" = "verified ($upgrade_stage_target)" ] && [ "$services" = verified ] &&
+      [ "$workload" = verified ] && [ "$upgrade_stage_last_step" = hop-complete ]; then
+    upgrade_stage_outcome=verified
+  else upgrade_stage_outcome=incomplete; fi
+  upgrade_stage_write "$path"
+}
+
+function upgrade_stage_resume() {
+  local path=${1:-} current
+  if [ "$#" -ne 1 ] || [ -z "$path" ]; then
+    echo 'dss:error: Use --resume-stage STAGE_RECORD.' >&2; return 1
+  fi
+  local DR_STAGE_RECORD=$path DR_CONFIG_BASELINE=${DR_CONFIG_BASELINE:-}
+  upgrade_stage_load "$path" || { echo 'dss:error: Cannot validate the source, original baseline or release stage; no resume started.' >&2; return 1; }
+  DR_CONFIG_BASELINE=$upgrade_stage_baseline
+  [ "${UPGRADE_CROSSGRADE:-false}" != true ] || [ "$upgrade_stage_crossgrade" = true ] || return 1
+  local UPGRADE_CROSSGRADE=$upgrade_stage_crossgrade
+  current=$(distro_output_codename) || return 1
+  case "$current" in "$upgrade_stage_from"|"$upgrade_stage_target") :;; *)
+    echo 'dss:error: Installed release is outside the recorded hop; no next release was selected.' >&2; return 1;;
+  esac
+  # A generic stage is never authority to enter a newly detected vendor workflow.
+  [ -z "${DR_PANEL_UPGRADE:-}" ] || return 1
+  upgrade_panel_refuse_generic || return 1
+  upgrade_stage_active=true
+  if [ "$upgrade_stage_last_step" = hop-complete ]; then
+    if [ "$upgrade_stage_family" = debian ]; then debian_check_release_completion "$upgrade_stage_target"
+    else upgrade_check_crossgrade_checkpoint ubuntu "$upgrade_stage_target"; fi
+    return $?
+  fi
+  if [ "$upgrade_stage_family" = debian ]; then
+    # The existing Debian hop reads these dynamically scoped release variables.
+    # shellcheck disable=SC2034
+    local old_distro=$upgrade_stage_from old_ver='' new_distro=$upgrade_stage_target new_ver=''
+    dist_upgrade_x_to_y
+  else dist_upgrade_ubuntu_to_latest 1; fi
 }
 
 # Only the current private logging directory receives these short machine records.
@@ -3919,7 +4680,7 @@ function upgrade_finish_run() {
   fi
   if [ -f /etc/redhat-release ]; then rpm_packages_finish_run "$@"; return $?; fi
   local action_status=$1 logfile=$2 baseline='' services=2 web_failed=false status category state detail reason audit='' plan=''
-  local findings='' web_complete=false comparison_status
+  local findings='' web_complete=false comparison_status workload_status=2 workload=unknown
   local release='not verified' packages='not verified' cleanup='' php_removals='' service_summary='unknown' package_verified=false
   local directory=${DR_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0 autoremove_skipped=''
   local none=false obsolete_none=false cleanup_done=false missing_provenance=false cleanup_failed=false cleanup_deferred=false
@@ -4035,6 +4796,23 @@ function upgrade_finish_run() {
     print_pkg_to_modified_diff review "$baseline" ||
       echo 'dss:warn: Configuration replacement review is incomplete; inspect the private change report before handoff.' >&2
   fi
+  if [ -n "$baseline" ] && declare -F upgrade_workload_check >/dev/null; then
+    upgrade_workload_check "$baseline" after; workload_status=$?
+  fi
+  case "$workload_status" in
+    0) workload=verified;;
+    1) [ "$status" -ne 0 ] || status=1;;
+  esac
+  if [ "$workload" != verified ] && [ -n "$directory" ]; then
+    if [ -L "$directory/outcome.incomplete" ] || ! (umask 077; : > "$directory/outcome.incomplete"); then
+      [ "$status" -ne 0 ] || status=1
+    fi
+  fi
+  if ! upgrade_stage_finish "$status" "$release" "$packages" "$service_summary" "$workload"; then
+    echo 'dss:error: Cannot save final release-stage outcome.' >&2
+    [ "$status" -ne 0 ] || status=1
+  fi
+  printf 'dss:stage: Workload acceptance: %s.\n' "$workload" >&2
   printf 'dss:stage: Detailed run log: %s\n' "$logfile" >&2
   return "$status"
 }
@@ -4633,6 +5411,7 @@ function upgrade_preflight_action() {
       done
     fi
   fi
+  upgrade_stage_prepare_target "$family" "$current" "$target" || return 1
   if [ "$family" = debian ]; then crossgrade_bookworm_recover_bootstrap || return $?; fi
   upgrade_check_path "$family" "$current" "$target"
 }
@@ -4722,6 +5501,9 @@ function upgrade_check_incompatible_packages() {
   fi
   apt_state_invalidate_packages
   (umask 077; : > "$backup/purge.log") || return 1
+  # The existing APT_GET_INSTALL_OPTIONS contract is a whitespace-separated option list.
+  # shellcheck disable=SC2086
+  apt_space_check_arguments $APT_GET_INSTALL_OPTIONS -o APT::Get::AutomaticRemove=false purge "${packages[@]}" || return 1
   LC_ALL=C apt-get $APT_GET_INSTALL_OPTIONS -o APT::Get::AutomaticRemove=false purge "${packages[@]}" 2>&1 | tee "$backup/purge.log"
   local -a result=("${PIPESTATUS[@]}")
   if [ "${result[0]}" -ne 0 ] || [ "${result[1]}" -ne 0 ]; then
@@ -5677,6 +6459,13 @@ function check_systemd_install_matches_init() {
   [ -f "/etc/debian_version" ] || return 0
   local running selected running_family selected_family
   running=$(readlink "/proc/1/exe") || { echo 'dss:error: Cannot read the running PID 1 executable; inspect init before crossgrading.' >&2; return 1; }
+  case "$running" in
+    '/lib~~delete~usrmerge~~/systemd/systemd (deleted)')
+      if systemd_verify_stale_usrmerge_init; then
+        echo 'dss:error: Verified stale PID 1 path after usrmerge. During approved execution run: sudo bash distrorejuve.sh --refresh-stale-systemd; then repeat readiness checks. This check did not change PID 1.' >&2
+      else echo 'dss:error: Stale usrmerge PID 1 could not be independently verified; inspect binaries and package health before continuing.' >&2; fi
+      return 1;;
+  esac
   # Package upgrades can unlink the running binary; its old path still identifies the init family.
   running=${running%" (deleted)"}
   selected=$(readlink -f "/sbin/init") || { echo 'dss:error: Cannot resolve /sbin/init; inspect the selected init before crossgrading.' >&2; return 1; }
@@ -5698,6 +6487,48 @@ function check_systemd_install_matches_init() {
     return 1
   fi
   return 0
+}
+
+# Recognise only usrmerge's documented temporary rename, not arbitrary deleted
+# paths. Match the live executable bytes to the configured package's canonical
+# executable. readlink /proc/1/exe -> /lib~~delete~usrmerge~~/systemd/systemd (deleted).
+function systemd_verify_stale_usrmerge_init() {
+  local selected running_hash selected_hash owner audit path owned=false resolved
+  [ "$(readlink /proc/1/exe)" = '/lib~~delete~usrmerge~~/systemd/systemd (deleted)' ] || return 1
+  selected=$(readlink -f /sbin/init) || return 1
+  case "$selected" in /usr/lib/systemd/systemd|/lib/systemd/systemd) :;; *) return 1;; esac
+  [ -x "$selected" ] && [ -f "$selected" ] || return 1
+  [ "$(dpkg-query -W -f='${Status}' systemd)" = 'install ok installed' ] || return 1
+  # Debian's installed package database can still own /lib/systemd/systemd while
+  # usrmerge resolves it to /usr/lib/systemd/systemd. Accept only these verified
+  # aliases of the selected file, never an unrelated package-owned pathname.
+  for path in /usr/lib/systemd/systemd /lib/systemd/systemd; do
+    resolved=$(readlink -f -- "$path") || continue
+    [ "$resolved" = "$selected" ] || continue
+    owner=$(LC_ALL=C dpkg-query -S -- "$path" 2>/dev/null) || continue
+    # dpkg-query -S: "systemd: /lib/systemd/systemd" -> owner systemd.
+    case "$owner" in "systemd: $path"|"systemd:"*": $path") owned=true; break;; esac
+  done
+  $owned || return 1
+  running_hash=$(sha256sum /proc/1/exe) || return 1
+  selected_hash=$(sha256sum -- "$selected") || return 1
+  [ "${running_hash%% *}" = "${selected_hash%% *}" ] || return 1
+  audit=$(LC_ALL=C dpkg --audit) && [ -z "$audit" ]
+}
+
+function systemd_refresh_stale_usrmerge_init() {
+  local before after selected audit
+  [ "$#" -eq 0 ] && [ "$(id -u)" = 0 ] || return 1
+  command -v timeout >/dev/null 2>&1 || return 1
+  systemd_verify_stale_usrmerge_init || { echo 'dss:error: Refusing PID 1 refresh: the precise usrmerge state, executable identity or package health was not verified.' >&2; return 1; }
+  before=$(sha256sum /proc/1/exe) || return 1
+  LC_ALL=C timeout 30 systemctl daemon-reexec || return 1
+  selected=$(readlink -f /sbin/init) || return 1
+  [ "$(readlink /proc/1/exe)" = "$selected" ] || { echo 'dss:error: PID 1 did not refresh to the selected canonical path.' >&2; return 1; }
+  after=$(sha256sum /proc/1/exe) || return 1
+  [ "${before%% *}" = "${after%% *}" ] || return 1
+  audit=$(LC_ALL=C dpkg --audit) && [ -z "$audit" ] || return 1
+  check_systemd_install_matches_init
 }
 
 # shellcheck shell=bash
@@ -6684,6 +7515,9 @@ function crossgrade_debian() {
   apt_get_update || return 1
   #apt-get $APT_GET_INSTALL_OPTIONS autoremove
 
+  # The existing APT_GET_INSTALL_OPTIONS contract is a whitespace-separated option list.
+  # shellcheck disable=SC2086
+  apt_space_check_arguments $APT_GET_INSTALL_OPTIONS --allow-downgrades upgrade || return 1
   apt-get $APT_GET_INSTALL_OPTIONS --allow-downgrades upgrade
   [  ! -d /root/distrorejuveinfo/$$ ] && mkdir /root/distrorejuveinfo/$$
   debs="$(find /var/cache/apt/archives -type f  | egrep 'amd64.deb$|all.deb$')"
@@ -6777,6 +7611,9 @@ function crossgrade_debian() {
     # remove 'due to stuff' e.g.:
     #   dpkg:amd64 tar:amd64 (due to dpkg:amd64) perl-base:amd64
 
+    # The existing APT_GET_INSTALL_OPTIONS contract is a whitespace-separated option list.
+    # shellcheck disable=SC2086
+    apt_space_check_arguments $APT_GET_INSTALL_OPTIONS -f install || return 1
     local essentialtoinstall="$(apt-get $APT_GET_INSTALL_OPTIONS -f install 2>&1 | grep --after-context 50 'WARNING: The following essential packages will be removed.' | grep '^ ' | tr '\n' ' ' | sed  -r 's/\(due to +\S*?\)//g')"
     [  -z "$essentialtoinstall" ] && echo "dss:info: all essential packages appear to be installed." && break
     mkdir -p distrorejuveinfo/$$/essentialdebs
@@ -8150,7 +8987,10 @@ if baseline=$(config_state_output_baseline); then
 fi
 if [ "$current" != "$old_distro" ]; then
   # base-files can report the new release before its package work and cleanup finish.
-  if [ "$current" = "$new_distro" ] && [ -n "$checkpoint" ] && [ -f "$checkpoint/prepared" ] && [ ! -e "$checkpoint/completed" ]; then
+  if [ "$current" = "$new_distro" ] && {
+    { [ "${upgrade_stage_active:-false}" = true ] && [ "$upgrade_stage_family:$upgrade_stage_from:$upgrade_stage_target" = "debian:$old_distro:$new_distro" ] && [ "$upgrade_stage_last_step" != hop-complete ]; } ||
+    { [ -n "$checkpoint" ] && [ -f "$checkpoint/prepared" ] && [ ! -e "$checkpoint/completed" ]; }
+  }; then
     resuming=true
   else
     echo "dss:info: Installed release is $current; skipping $old_distro to $new_distro."
@@ -8158,12 +8998,14 @@ if [ "$current" != "$old_distro" ]; then
   fi
 fi
 
+upgrade_stage_begin debian "$old_distro" "$new_distro" || return 1
 if $resuming; then echo "dss:stage: Finishing interrupted Debian $old_distro -> $new_distro"
 else echo "dss:stage: Upgrading Debian $old_distro -> $new_distro"; fi
 check_disk_space || return 1
 upgrade_prepare_nss_lookup
 
 upgrade_check_path debian "$old_distro" "$new_distro" transition || return $?
+upgrade_stage_record_step preflight-checked || return 1
 if [ "$old_distro" = bookworm ] && [ "$new_distro" = trixie ]; then
   upgrade_crossgrade_before_release debian "$old_distro" "$new_distro" || return $?
 fi
@@ -8223,10 +9065,12 @@ if ! $upgrade_target_sources_selected; then
   fi
 fi
 
+upgrade_stage_record_step sources-selected || return 1
 echo "dss:trace:dist_upgrade_x_to_y:pre_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro"
 apt_get_dist_upgrade "to $new_distro"
 ret=$?
 if [ $ret -eq 0 ]; then
+  upgrade_stage_record_step packages-applied || return 1
   echo "dss:trace:dist_upgrade_x_to_y:post_apt_get_dist_upgrade::olddistro=$old_distro:oldver=$old_ver:newdistro=$new_distro:ret=$ret"
 	if lsb_release -a 2>/dev/null| egrep -qai "${new_distro}|${new_ver:-xxxxx}"; then
 	  # dist-upgrade returned ok, and lsb_release thinks we are wheezy
@@ -8243,6 +9087,7 @@ if [ $ret -eq 0 ]; then
 	  debian_check_release_completion "$new_distro" || return 1
 	  [ -d "$checkpoint" ] && [ ! -L "$checkpoint" ] && [ ! -L "$checkpoint/completed" ] || return 1
 	  (umask 077; : > "$checkpoint/completed") || return 1
+	  upgrade_stage_record_step hop-complete release-packages-verified || return 1
 	  echo "dss:info: Debian $new_distro package upgrade and post-cleanup checks passed."
 	  return 0;
 	else
@@ -8565,6 +9410,25 @@ function config_state_capture() {
 )
 }
 
+# Explicit original capture precedes approved preparatory service/configuration work.
+function config_state_capture_original() {
+  local parent
+  if [ "$#" -ne 0 ]; then
+    echo 'dss:error: --capture-baseline accepts no additional arguments.' >&2
+    return 1
+  fi
+  case "${DR_CONFIG_BASELINE:-}" in
+    /*) case "$DR_CONFIG_BASELINE" in */) return 1;; esac;;
+    *) echo 'dss:error: --capture-baseline requires an absolute DR_CONFIG_BASELINE file path.' >&2; return 1;;
+  esac
+  parent=${DR_CONFIG_BASELINE%/*}; parent=${parent:-/}
+  if [ ! -d "$parent" ] || [ -L "$parent" ] || [ "$(stat -c '%u:%a' -- "$parent" 2>/dev/null)" != 0:700 ]; then
+    echo 'dss:error: Prepare a private root-owned baseline directory with mode u=rwx,go=.' >&2
+    return 1
+  fi
+  record_config_state "$DR_CONFIG_BASELINE"
+}
+
 function record_config_state() {
   prepare_output_dir
   local file=$1 pinned=false original=false parent
@@ -8743,7 +9607,7 @@ function apt_get_autoremove() {
     *) echo 'dss:error: Internal autoremove policy must be true or false.' >&2; return 1;;
   esac
   local capabilities
-  capabilities=$(LC_ALL=C apt_get_apply --help) || return 1
+  capabilities=$(LC_ALL=C apt-get --help) || return 1
   case "$capabilities" in *autoremove*) :;; *) return 0;; esac
   apt_get_apply $APT_GET_INSTALL_OPTIONS autoremove
 }
@@ -9043,6 +9907,9 @@ function dist_upgrade_ubuntu_to_latest() {
   local remaining=${1:-1000} current next arch ret apt_sources_transition_target='' apt_defer_autoremove=true upgrade_php_runtime_defer_check=true
   current=$(distro_output_codename) || return 1
   case " $ALL_UBUNTU " in *" $current "*) :;; *) return 0;; esac
+  if [ "${upgrade_stage_active:-false}" = true ] && [ "$upgrade_stage_family" = ubuntu ] && [ "$upgrade_stage_last_step" != hop-complete ]; then
+    case "$current" in "$upgrade_stage_from"|"$upgrade_stage_target") current=$upgrade_stage_from;; *) return 1;; esac
+  fi
   local planned=$current steps=$remaining
   if [ -z "${1:-}" ]; then
     planned=$(ubuntu_output_latest_lts "$current") || return 1
@@ -9057,14 +9924,19 @@ function dist_upgrade_ubuntu_to_latest() {
   upgrade_check_path ubuntu "$current" "$planned" || return $?
   while [ "$remaining" -gt 0 ]; do
     current=$(distro_output_codename) || return 1
+    if [ "${upgrade_stage_active:-false}" = true ] && [ "$upgrade_stage_family" = ubuntu ] && [ "$upgrade_stage_last_step" != hop-complete ]; then
+      case "$current" in "$upgrade_stage_from"|"$upgrade_stage_target") current=$upgrade_stage_from;; *) return 1;; esac
+    fi
     if [ "$current" = "$planned" ]; then upgrade_php_runtime_verify; return $?; fi
     next=$(ubuntu_output_next_release "$current") || return 1
     if [ -z "$next" ]; then
       echo "dss:error: Ubuntu upgrade stopped at $current before reaching $planned." >&2
       return 1
     fi
+    upgrade_stage_begin ubuntu "$current" "$next" || return 1
     check_disk_space || return 1
     upgrade_check_path ubuntu "$current" "$next" transition || return $?
+    upgrade_stage_record_step preflight-checked || return 1
     if [ "$current" = bionic ]; then
       upgrade_crossgrade_before_release ubuntu "$current" "$next" || return $?
     fi
@@ -9090,12 +9962,14 @@ function dist_upgrade_ubuntu_to_latest() {
       apt_get_install dpkg || return 1
       upgrade_migrate_php_packages "$next" || return 1
     fi
+    upgrade_stage_record_step sources-selected || return 1
     apt_get_dist_upgrade "to $next"
     ret=$?
     if [ "$ret" -ne 0 ] || [ "$(distro_output_codename)" != "$next" ]; then
       echo "dss:error: Ubuntu upgrade from $current to $next failed." >&2
       return 1
     fi
+    upgrade_stage_record_step packages-applied || return 1
     upgrade_check_crossgrade_checkpoint ubuntu "$next" || {
       upgrade_outcome_record cleanup deferred "release verification did not complete"; return 1;
     }
@@ -9107,6 +9981,7 @@ function dist_upgrade_ubuntu_to_latest() {
       upgrade_outcome_record cleanup failed "guarded autoremove"; return 1;
     }
     upgrade_check_crossgrade_checkpoint ubuntu "$next" || return 1
+    upgrade_stage_record_step hop-complete release-packages-verified || return 1
     echo "dss:info: Ubuntu upgrade from $current to $next completed."
     remaining=$((remaining-1))
   done
@@ -10444,6 +11319,7 @@ function manifest_resolver_addresses() {
 
 function manifest_resolver() {
   local kind=absent records addresses address count=0 status failed=false parse_status=observed unparsed=0
+  local static_resolver=false resolved_state resolved_load resolved_active key value
   if [ -L "$manifest_root/etc/resolv.conf" ]; then kind=symlink
   elif [ -f "$manifest_root/etc/resolv.conf" ]; then kind=regular; fi
   manifest_emit resolver_config path /etc/resolv.conf kind "$kind"
@@ -10478,6 +11354,30 @@ function manifest_resolver() {
     records=$(set -o pipefail; LC_ALL=C manifest_run_bounded 3 resolvectl dns 2>/dev/null | head -c 65537)
     status=$?
     if [ "$status" -ne 0 ] || [ "${#records}" -gt 65536 ]; then
+      # A regular resolv.conf can work independently of an installed resolvectl.
+      # Require complete non-stub addresses and a successful inactive-unit query;
+      # timeouts, oversized output and failed/unknown service states remain failures.
+      if [ "$status" -eq 1 ] &&
+          [ "${#records}" -le 65536 ] && ! $failed && [ "$kind" = regular ] &&
+          [ "$count" -gt 0 ] && [ "$parse_status" = observed ]; then
+        static_resolver=true
+        while IFS= read -r address; do
+          case "$address" in 127.*|::1|0.0.0.0|::) static_resolver=false;; esac
+        done <<< "$addresses"
+        if $static_resolver && command -v systemctl >/dev/null 2>&1 &&
+            resolved_state=$(manifest_run_bounded 2 systemctl show -p LoadState -p ActiveState systemd-resolved.service 2>/dev/null); then
+          resolved_load=; resolved_active=
+          # systemctl show: LoadState=loaded, ActiveState=inactive -> optional service inactive.
+          # ActiveState=failed, activating, or missing -> retain the query failure.
+          while IFS='=' read -r key value; do
+            case "$key" in LoadState) resolved_load=$value;; ActiveState) resolved_active=$value;; esac
+          done <<< "$resolved_state"
+          if [ "$resolved_load:$resolved_active" = loaded:inactive ]; then
+            manifest_emit resolver_summary source resolvectl_dns status inactive query_status "$status" state_source systemctl
+            return 0
+          fi
+        fi
+      fi
       failed=true
       manifest_emit warning area resolver reason resolvectl_dns_failed_or_limit command_status "$status"
       manifest_emit resolver_summary source resolvectl_dns status query_failed
@@ -13018,7 +13918,7 @@ function logging_run() (
 	fi
 
 	case "$1:${DR_ACTION:-${2:-}}" in
-		distrorejuve_main:--upgrade|distrorejuve_main:--dist-update|distrorejuve_main:--to-*) logging_summarize=true;;
+		distrorejuve_main:--upgrade|distrorejuve_main:--dist-update|distrorejuve_main:--to-*|distrorejuve_main:--resume-stage) logging_summarize=true;;
 	esac
 	if $logging_summarize; then
 		# A partial copy must fail before package changes, not at completion.
@@ -13095,6 +13995,10 @@ function logging_run() (
 			set -x
 		fi
 		umask "$logging_original_umask"
+		if $logging_summarize && ! upgrade_workload_prepare; then
+			upgrade_preflight_blocked=true
+			exit 1
+		fi
 		"$@"
 	) 2>&1 | tee "$logging_log" | (
 		while IFS= read -r logging_line || [ -n "$logging_line" ]; do
@@ -13128,7 +14032,7 @@ function logging_run() (
 	elif [ -f "$logging_dir/panel.handoff" ]; then
 		printf 'dss:stage Vendor upgrade handoff; final completion is not verified. Details: %s\n' "$logging_log" >&2
 	elif [ -f "$logging_dir/outcome.incomplete" ]; then
-		printf 'dss:warn Action finished with incomplete service verification; details: %s\n' "$logging_log" >&2
+		printf 'dss:warn Action finished with incomplete service or workload verification; details: %s\n' "$logging_log" >&2
 	elif [ -f "$logging_dir/configuration-review.txt" ]; then
 		printf 'dss:warn Action complete; configuration review required: %s/configuration-review.txt; details: %s\n' "$logging_dir" "$logging_log" >&2
 	else
@@ -13160,6 +14064,22 @@ function logging_run() (
 
 function distrorejuve_main() {
 ret=0
+if [ "${DR_ACTION:-$1}" = --resume-stage ]; then
+  [ "$#" -eq 2 ] || { echo 'dss:error: Use --resume-stage STAGE_RECORD.' >&2; return 1; }
+  upgrade_stage_resume "$2"
+  return $?
+fi
+case "${DR_ACTION:-${1:-}}" in
+  --to-latest|--to-debian-release|--to-next-ubuntu) upgrade_stage_guard_command || return 1;;
+esac
+if [ "${DR_ACTION:-$1}" = --refresh-stale-systemd ]; then
+  systemd_refresh_stale_usrmerge_init "${@:2}"
+  return $?
+fi
+if [ "${DR_ACTION:-$1}" = --capture-baseline ]; then
+  config_state_capture_original "${@:2}"
+  return $?
+fi
 if [ "${DR_ACTION:-$1}" = --support-report ]; then
   [ "$#" -le 2 ] || { printf '%s\n' 'dss:error: Use --support-report [RUN_DIRECTORY].' >&2; return 1; }
   support_print_report "${2:-}"
@@ -13329,7 +14249,7 @@ function distrorejuve_run() {
     esac
   done
   action=${DR_ACTION:-${arguments[0]:-}}
-  case "${arguments[0]:-}" in --support-report|--check-upgrade) action=${arguments[0]};; esac
+  case "${arguments[0]:-}" in --support-report|--check-upgrade|--capture-baseline|--refresh-stale-systemd|--resume-stage) action=${arguments[0]};; esac
   if $MANIFEST_REDACT; then
     case "$action" in
       --manifest|--manifest-json) :;;
@@ -13342,26 +14262,34 @@ function distrorejuve_run() {
     distrorejuve_main "${arguments[@]}"
     return $?
   fi
-  # An explicit read-only check must not inherit an upgrade action.
-  if [ "${arguments[0]:-}" = --check-upgrade ]; then local DR_ACTION=--check-upgrade; fi
+  # Explicit checks and original capture must not inherit a package-changing action.
+  case "${arguments[0]:-}" in --check-upgrade|--capture-baseline|--refresh-stale-systemd|--resume-stage) local DR_ACTION=${arguments[0]};; esac
   environment_validate_settings || return 1
   [ "$(id -u)" = 0 ] || DR_UNPRIVILEGED=true
   if $DR_UNPRIVILEGED; then
     case "$action" in
-      --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages|--show-changes|--list-leftover-packages|--pause|--resume)
+      --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages|--show-changes|--capture-baseline|--refresh-stale-systemd|--list-leftover-packages|--pause|--resume|--resume-stage)
         printf 'dss:error: %s is not available in unprivileged mode. Run as root without --unprivileged or DR_UNPRIVILEGED=true; use sudo bash if needed.\n' "$action" >&2
         return 1;;
     esac
   fi
   if $UPGRADE_CROSSGRADE; then
     case "$action" in
-      --to-latest|--to-debian-release|--to-next-ubuntu) :;;
+      --to-latest|--to-debian-release|--to-next-ubuntu|--resume-stage) :;;
       *) echo 'dss:error: --crossgrade modifies a release-upgrade command; use --to-64bit for a standalone crossgrade.' >&2; return 1;;
     esac
   fi
+  if [ "$action" = --resume-stage ]; then
+    [ "${#arguments[@]}" -eq 2 ] || { echo 'dss:error: Use --resume-stage STAGE_RECORD.' >&2; return 1; }
+    upgrade_stage_load "${arguments[1]}" || { echo 'dss:error: Invalid source-local stage record.' >&2; return 1; }
+    [ "$UPGRADE_CROSSGRADE" != true ] || [ "$upgrade_stage_crossgrade" = true ] || return 1
+    local DR_CONFIG_BASELINE=$upgrade_stage_baseline DR_STAGE_RECORD=${arguments[1]}
+    UPGRADE_CROSSGRADE=$upgrade_stage_crossgrade
+  fi
   case "$action" in
-    --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages)
+    --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages|--resume-stage)
       logging_run distrorejuve_main "${arguments[@]}";;
+    --refresh-stale-systemd) logging_run distrorejuve_main "${arguments[@]}";;
     *)
       if $LOG_VERBOSE || $LOG_TRACE; then
         echo 'dss:error: --verbose and --trace apply to commands that change the system.' >&2

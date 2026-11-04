@@ -40,6 +40,12 @@ and `--list-leftover-packages` (which can install a helper) require root outside
 DNS checks report each configured hostname's addresses and whether they match
 this server. Different addresses can identify another destination or a proxy.
 
+Resolver inventory accepts a regular `/etc/resolv.conf` with completely parsed
+non-loopback nameservers when an installed `resolvectl` fails and a bounded
+unit-state check proves `systemd-resolved` inactive. It records the inactive
+service and failed query status. Stub, incomplete, timed-out and ambiguous
+resolver observations still require review.
+
 DNS website observations distinguish missing prerequisites from network results:
 `resolver_client_unavailable` means neither `getent` nor `host` is available;
 `timeout_facility_unavailable` means neither `timeout` nor the Perl fallback is

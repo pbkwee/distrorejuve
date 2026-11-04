@@ -311,6 +311,7 @@ Offline regression checks (no production operations):
 bash -n distrorejuve.sh
 python3 tests/test-upgrade-review.py
 python3 tests/test-run-lessons.py
+python3 tests/test-capture-baseline.py
 python3 tests/test-manifest-firstpass.py
 python3 tests/test-manifest-upgrade-assets.py
 python3 tests/test-manifest-packaged-wordpress.py
@@ -428,3 +429,11 @@ older helper stops the action. The tool retains a pinned prerequisite simulation
 and status for review; it does not execute that separate proposal. This catches
 transitions where target package scripts use newer helper syntax while their
 unversioned dependencies still permit the installed helper.
+
+## Workload and native readiness
+
+Use the [workload acceptance contract](workload-acceptance.md) before service
+changes and at final completion. Database engine, schema, clients, topology and
+maintenance checks stay separate. Read [native readiness](native-readiness.md)
+for SSH socket activation, logrotate semantics and the verified usrmerge remedy.
+Peak package space is checked for the [selected transaction](transaction-space.md).

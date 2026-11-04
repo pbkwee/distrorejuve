@@ -94,3 +94,23 @@ Virtualmin, ISPConfig and standalone Webmin use normal distro upgrade checks.
 Other detected hosting panels use a separate vendor upgrade procedure.
 See [hosting-panel upgrades](hosting-panels.md) for supported Plesk/cPanel paths and
 manual upgrade or migration guidance for other detected panels.
+
+## Transaction and workload controls
+
+`DR_MIN_FREE_BOOT_MIB` (128), `DR_DISK_SAFETY_PERCENT` (20), and
+`DR_KERNEL_INITRAMFS_RESERVE_MIB` (512) complement `DR_MIN_FREE_DISK_MIB`
+for [per-filesystem transaction space](transaction-space.md). Unknown package
+metadata or nonstandard cache placement stops execution rather than guessing.
+
+`DR_WORKLOAD_CONTRACT` selects the private approved TSV
+[acceptance contract](workload-acceptance.md). `DR_WORKLOAD_EXCEPTIONS` selects
+explicit final exceptions bound to the original and frozen contract digests.
+Missing contracts leave workload completion unknown.
+
+## Durable release-stage resume
+
+Pin `DR_CONFIG_BASELINE` before changes. Its `<original>.stage` record preserves
+the exact interrupted target despite an advanced release label. `DR_STAGE_RECORD`
+selects another private absolute file. Use `--resume-stage RECORD` to finish that
+hop through normal guards; existing `--resume` only removes the pause file.
+See [release-stage records](release-stage-records.md).

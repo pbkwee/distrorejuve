@@ -17,9 +17,9 @@ that service's scope, identity, approval and handoff rules.
 Read and follow [sensitive-data access](../../../docs/sensitive-data.md) before
 discovery or execution. Prefer sanitized evidence and necessary non-secret
 metadata. Configuration, `.env`, logs and archives can contain secrets; reviewed
-collectors also need permission for their sensitive inputs. Reduced privileges
-and read-only actions do not establish permission. Check existing approval,
-then seek only missing file/category, purpose and output scope before access.
+collectors also need permission for their sensitive inputs. Check existing
+approval, then seek only missing file/category, purpose and output scope before
+access.
 Use approved credentials through their tool without reading or printing values.
 Keep independent assessment moving while access is unresolved.
 
@@ -49,14 +49,19 @@ where installed when access ends.
 Follow [job records and email matching](../../../docs/job-records.md). Assign a
 unique `job_id` once, or reuse the existing one, and put it in the durable log,
 reports, plans and handoffs. Compare incoming correspondence with that record's
-ID, customer and server before incorporating it. Resolve missing/conflicting IDs;
-an ID alone does not authorize work.
+ID, customer and server before incorporating it. Resolve missing or conflicting
+IDs before assigning correspondence to a job.
 
 Maintain private, durable `job.md`, evidence and approval references outside Git.
 Record source/destination identities, tools, report/plan revisions, findings,
 current verified state and next permitted action. Keep credentials out of prompts,
-reports and version control. A source address in a manifest does not authorize
-connection. Credentials do not authorize every operation they permit.
+reports and version control. Verify the agreed target and operation before
+connecting or using credentials.
+
+If access is unavailable or lost, use the [rescue access procedure](../../../docs/rescue-access.md)
+within the recorded recovery plan. Verify rescue identity, target mounts and
+normal boot before resuming. Collect the installed system's manifest after
+returning to normal boot.
 
 ## Return a readable recommendation first
 

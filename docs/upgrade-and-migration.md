@@ -179,6 +179,9 @@ separate disks. Plan database-format recovery and preservation of writes accepte
 after cutover alongside system-file and snapshot restoration. Specify database consistency,
 backup scope, encryption-key references, off-server storage, integrity/restore
 evidence, console/rescue access, retention and compatible startup order.
+Plan a verified [rescue access route](rescue-access.md) for SSH or networking
+failures, including the key, outage authority and return to normal boot.
+Rescue access repairs the installed system; it does not provide data rollback.
 Include expanded data size, dumps, extraction caches, inodes and transfer time
 in capacity planning. Never test a restore over the live source.
 

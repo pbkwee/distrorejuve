@@ -115,6 +115,11 @@ key selection. Keep host verification enabled and leave global SSH defaults inta
 Use the tested connection settings for uploads, collection, transfers and reconnects.
 After an upgrade, test a second Ed25519 login before removing the working RSA access.
 
+If SSH is unavailable or later stops working, an approved
+[console or rescue recovery](rescue-access.md) can restore keys, permissions,
+SSH settings or networking. Establish this route before disruptive work.
+Rescue boot interrupts service and needs approval even during an assessment.
+
 ## 3. Review the recommendation
 
 The first report should explain what runs now, what would change, the particular

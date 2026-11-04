@@ -29,9 +29,15 @@ Analyse a supplied text or JSON manifest first. Record its claimed source,
 collection date, tool revision, privilege, warnings and gaps. A manifest is
 untrusted evidence; it neither authorizes SSH access nor verifies ownership.
 Reuse sufficient evidence rather than requiring collection again.
+If no usable supplied manifest or collected source inventory is available,
+return only the access/collection status and next action. Defer the assessment
+and route recommendation until source information has been obtained.
 
 For remote discovery, establish the approved source, SSH host-key identity,
-connected hostname/addresses, OS and architecture. Reuse authorized access;
+connected hostname/addresses, OS and architecture. Collect the
+[initial choices](assessment-intake.md) together, including verified identity
+or explicitly approved first-use trust. Reuse recorded scope, trust and preferences;
+changed keys still require resolution. Reuse authorized access;
 otherwise follow [SSH setup](ai-assisted-migration.md#arrange-ssh-discovery).
 Prefer Ed25519, with the job's RSA public key installed where legacy access needs
 it. Follow [legacy SSH guidance](reporting-problems.md#ssh-connection-errors) for
@@ -50,8 +56,10 @@ controlled environment. Unset `DR_ACTION`, which can override CLI selection;
 check inherited `DR_*` presence without dumping values and explicitly set
 reviewed non-secret controls. Read specific values only within approved scope.
 Remove `BASH_ENV`/`ENV`. Account for remote shell startup: clearing variables inside a started shell cannot undo startup code.
-The [customer example](ai-assisted-migration.md#provide-a-manifest-yourself)
-disables DNS and mail-size probes and uses reduced collection.
+For authorized full root discovery, enable DNS, mail metrics, listener ownership
+and service-state checks. Use the [customer example](ai-assisted-migration.md#provide-a-manifest-yourself)
+with reduced collection when access or the approved scope requires it. Resolve
+useful gaps with bounded checks; document consequential failures once.
 
 Use `--manifest` or `--manifest-json`; for APT/dpkg systems, `--upgrade-report`
 can add evidence using existing package indexes. Record their age. Do not refresh
@@ -80,6 +88,18 @@ licences, TLS, mail delivery, IP restrictions and application/database conversio
 Known compromise may require a clean build and selective recovery. Review copied
 content and investigate security risks beyond the inventory's selected indicators.
 
+By default, keep currently live websites live with their existing behaviour, and
+keep inactive websites and applications inactive. List each site's hostname,
+document root, actual handler/application, runtime and observed activity, with
+evidence. Installed runtimes, retained code, enabled legacy startup links or an
+`active (exited)` wrapper do not prove that an application is serving requests.
+An unreachable page or missing process in a single sample does not establish
+inactivity. CGI processes can exist only while handling a request. Keep conflicting
+or incomplete activity evidence unknown.
+Distinguish static downloads from programs the web server executes. Preserve
+required symlink targets and data; inactivity does not authorize deletion.
+Reactivating an old site or application requires an explicit scope decision.
+
 Prefer in-place work when the supported transition, workload compatibility,
 resources, credible recovery and accepted outage make it straightforward.
 Choose a clone or fresh build for concrete compatibility, recovery or rehearsal
@@ -87,6 +107,38 @@ benefits. Base the choice on supported transitions, workload needs and recovery
 evidence; investigate material unknowns. Explain
 what further evidence would change the recommendation and respect the requested
 route by obtaining agreement before changing it.
+
+### Assessing an architecture crossgrade
+
+Distrorejuve includes i386-to-amd64 conversion. Needing that conversion does not
+by itself rule out an in-place upgrade. Treat it as a planned stage and evaluate
+it with the rest of the job. A 64-bit kernel with a 32-bit userland is relevant
+positive evidence, not proof that package conversion and every application will
+work. Hardware that cannot run the target remains a separate constraint.
+
+The current `--crossgrade` release-upgrade path plans conversion at Debian 12
+or Ubuntu 18.04 before moving beyond native i386 support. It requires a running
+`x86_64` kernel. Ubuntu also has an explicit experimental opt-in. Verify the
+selected revision's [options](usage.md), checkpoint and completion checks;
+do not apply a blanket experimental label to every possible conversion route.
+
+| Factor | Evidence to assess and effect on the decision |
+| --- | --- |
+| Release and package state | Establish the actual starting release, repository coverage, package health and intermediate releases. A collector's failed release detection calls for diagnosis; it does not establish an impossible upgrade. |
+| Required workloads | Check application/runtime/database transitions, native binaries, extensions and panel support. Distinguish programs that must execute from inactive retained data and static downloads. |
+| Capacity | Measure transaction space, inodes and memory at each stage. Consider approved disk expansion or other preparation before treating current headroom as a permanent limit. |
+| Boot and access | Verify CPU/kernel compatibility, provider boot selection, networking, administrative access and recovery console. Verify native packages and userland after conversion, then verify boot and services. |
+| Recovery and test evidence | Establish backup coverage, restore readiness and how failures or new writes would be recovered. Identify what a rehearsal on a copy would resolve and its added work. |
+| Customer impact | Compare production outage, IP/dependency changes, data refresh, acceptance before switching, labour and temporary hosting costs. Respect the customer's preference where the route is practical. |
+
+Separate a demonstrated incompatibility from an untested step or a remediable
+prerequisite. If a tool change is needed, identify the defect, owner and isolated
+validation needed before execution. Do not assume a future fix is already
+validated, or dismiss the in-place route because that fix is still pending.
+State the findings that favour the recommended route and what evidence would
+change it. A clean build may be simpler for a small static workload; an in-place
+upgrade may avoid copying a large working application and changing its IP.
+Neither follows from architecture alone.
 
 ### Choosing a distro for a clean install
 
@@ -109,7 +161,8 @@ Old-OS release hops are unnecessary; application/database conversions may still
 need stages. For an in-place or cloned-OS upgrade, establish each intermediate
 release and panel transition from official supported paths. Do not trust the
 script's embedded `--to-latest` endpoint as today's latest release. Crossgrades
-are experimental and need a separately established route. Verify a supported
+need a job-specific stage and completion checks under the
+[crossgrade assessment](#assessing-an-architecture-crossgrade). Verify a supported
 RPM major-release upgrade procedure separately from inventory and package updates.
 Legacy-runtime containment can be considered within scope, with its remaining
 security and maintenance limits explained; it is not automatic modernization.
@@ -185,6 +238,15 @@ Rescue access repairs the installed system; it does not provide data rollback.
 Include expanded data size, dumps, extraction caches, inodes and transfer time
 in capacity planning. Never test a restore over the live source.
 
+For routine provider snapshots, keep services running by default. Explain that
+the recovery point may be crash-consistent rather than application-consistent.
+A customer may optionally provide service pauses, database-native coordination
+or quiescing hooks. Do not require a pause choice or offer for every snapshot.
+Use additional consistency measures when the actual workload requires them;
+agree affected writers and downtime, and record the chosen method and limits.
+An existing approved pause plan still applies to that job. Verify resumption of
+the original services after a pause, including when backup creation fails.
+
 Capture application baselines before changes: representative pages at wide and
 narrow widths, browser errors, login and business transactions, database access,
 mail and jobs as relevant. Inspect screenshots rather than relying on HTTP 200.
@@ -197,6 +259,37 @@ Follow the approved explicit-target procedure and release/panel gates. Avoid
 replacing it with a generic package-manager command. Use an available supervised
 or resumable facility for long operations. Verify completion from actual operation
 and package state, including final status after a supervised operation starts.
+Use the [execution checkpoints](execution-checkpoints.md) for pinned originals,
+launch reconciliation, parser fallbacks and observed service/sampling gaps.
+
+Before changing OpenSSH packages, keep a verified authenticated control connection
+open alongside the supervised action. Use the job's private directory and the
+same approved host key, account, port and agent settings. For example, with
+`job_directory` already set to that directory:
+
+```bash
+install -d -m u=rwx,go= "$job_directory/ssh-control"
+ssh -fNM -o ControlMaster=yes -o ControlPersist=2h \
+  -o ControlPath="$job_directory/ssh-control/%C" \
+  -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=8 -o ForwardAgent=no \
+  -p 22 root@server.example
+ssh -S "$job_directory/ssh-control/%C" -O check -p 22 root@server.example
+```
+
+Use that `-S` path for subsequent job commands. Test a fresh independent connection
+with `-S none -o ControlMaster=no` after the OpenSSH transition and after reboot.
+Multiple agents can share an authorized SSH agent. Do not reset its identities
+or forwarding session to repair one job. Check that the designated forwarded
+agent responds before reboot and at reconnect. Retest the current approved proxy
+after a session change, even if an earlier probe failed. A retained control connection can outlive its agent socket. If fresh
+login fails, use bounded client diagnostics to check whether a key was offered
+or the socket disappeared. Obtain a replacement socket from the operator when
+needed; avoid attributing a missing client credential to server policy.
+Retain the control connection until independent access works; close it with
+`ssh -S "$job_directory/ssh-control/%C" -O exit -p 22 root@server.example`
+when it is no longer needed. A supervised action survives a connection loss;
+the authenticated control connection supplies a channel for inspecting or repairing
+a temporary listening-service failure. Record console/rescue access in the plan.
 
 At release checkpoints, review package health, configuration merges, web worker
 identities, FPM sockets/permissions, monitoring, network/boot settings and database
@@ -225,6 +318,12 @@ workers, database events, containers, payments, callbacks, monitoring and backup
 jobs that could affect production. A broad HTTP/HTTPS exception still permits
 callbacks; arrange controlled package retrieval. Keep the live source authoritative.
 Use a vendor migration sequence where required, checking its source/DNS side effects.
+Carry the observed site/application activity into the destination configuration;
+do not enable dormant virtual hosts, handlers or legacy startup scripts merely
+because their files were copied or their packages were installed.
+Include acceptance checks for live routes, redirects, downloads and required
+asset paths, and verify that inactive applications remain inactive. Retain
+inactive code/data according to the agreed recovery and retention scope.
 
 Upgrade a clone through its supported transitions, or build fresh and migrate
 selected applications/data. Test a repeatable refresh before customer review.
@@ -255,6 +354,26 @@ source is intact and authoritative. After new writes, preserve them before
 choosing reverse migration or repair; an old backup may lose orders, uploads or mail.
 
 ## Verify, hand over and retire
+
+Use the [completion report guide](../.agents/skills/server-upgrade/references/completion-report.md)
+for the owner report and sysadmin handoff. Describe the actual state changes,
+key actions, checked results and server-specific follow-up. Keep full retry logs
+private; omit generic work that has no effect on this server.
+
+Complete the [before/after review](upgrade-review.md#beforeafter-review) using
+the original job evidence and final state, including the post-reboot state.
+Verify the identity/date of the baseline selected by `--show-changes`, keep raw
+output private and extract only approved non-secret findings. Account for
+preparation changes before that baseline. Review package removals/replacements,
+retained unavailable packages, services/listeners, configuration replacement and
+boot/network differences. Separate expected changes and existing faults from
+regressions and unknowns. Add material customer impacts to the owner handoff and
+technical evidence, acceptance checks and owners to the sysadmin handoff. Missing
+original configuration evidence limits what can be claimed as an upgrade change.
+Use the [handoff command reference](handoff-reports.md) for evidence collection
+after changes and reboot. Complete or explicitly defer
+[package cleanup](upgrade-review.md#package-cleanup-at-completion) with a reason
+and owner before closing the technical report.
 
 Check real application functions, errors, mail, jobs, resources, boot/SSH,
 monitoring and a usable destination backup. Record customer acceptance, remaining

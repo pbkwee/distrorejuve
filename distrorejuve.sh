@@ -6,7 +6,8 @@
 function environment_validate_settings() {
   local name value
   for name in DR_ALLOW_BACKPORTS DR_ALLOW_CROSSGRADE_BLOCKERS DR_ALLOW_UNAUTHENTICATED_ARCHIVES \
-      DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_MAIL_METRICS DR_PREFER_PACKAGED_USRMERGE_FILES \
+      DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_HTTP DR_MANIFEST_MAIL_METRICS \
+      DR_UPGRADE_MANIFEST DR_PRECOMPILED_LOCALES DR_PREFER_PACKAGED_USRMERGE_FILES \
       DR_PURGE_INCOMPATIBLE_PACKAGES DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES DR_REMOVE_X11_PACKAGES \
       DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK DR_SKIP_DISK_SPACE_CHECK DR_SKIP_DOVECOT_MIGRATION_CHECK \
       DR_SKIP_KERNEL_CHECK DR_SKIP_OLD_PACKAGE_CHECK DR_SKIP_X11_CHECK DR_UNPRIVILEGED; do
@@ -24,6 +25,16 @@ function environment_validate_settings() {
       *) [ "$value" -gt 0 ] 2>/dev/null && continue;;
     esac
     printf 'dss:error: %s must be a positive integer.\n' "$name" >&2
+    return 1
+  done
+  for name in DR_CONFIG_BASELINE DR_DATABASE_DEFAULTS_FILE; do
+    value=${!name}
+    case "$value" in
+      '') :;;
+      /*) case "$value" in */) ;; *) continue;; esac;;
+    esac
+    [ -z "$value" ] && continue
+    printf 'dss:error: %s must be an absolute file path.\n' "$name" >&2
     return 1
   done
   case "${DR_RPM_MIGRATION_TARGET:-}" in
@@ -141,6 +152,12 @@ Add --redact to --manifest or --manifest-json to replace server/website identifi
 Software versions, service state and website records remain visible; review before posting.
 DNS checks are enabled by default; DR_MANIFEST_DNS=false skips them.
 DR_MANIFEST_MAIL_METRICS=false skips mail size scans and spool counts.
+HTTP/HTTPS HEAD probes run in full collection; DR_MANIFEST_HTTP=false skips them.
+Probes discard headers/body, do not follow redirects, and use bounded connection/total times.
+DR_UPGRADE_MANIFEST=false skips optional automatic application inventories and comparisons during upgrades.
+Required service/runtime checks still read configuration; explicit manifest/report actions are unchanged.
+Debian upgrades prepare locales-all for 100 or more standard configured locales.
+DR_PRECOMPILED_LOCALES=false skips this preparation.
 Website records include the primary configured URL and local certificate-file presence.
 Missing names, indirect configuration and automatically managed certificates may remain unknown.
 Potential compromise indicators include suspicious process commands, kernel-thread name masquerading,
@@ -157,18 +174,21 @@ Run with --list-leftover-packages to see packages that do not belong to the curr
 
 Run with --remove-leftover-packages to remove old packages and 32 bit applications on 64 bit distros.
 
-Run with --remove-deprecated-packages to remove old packages
+Run with --remove-deprecated-packages for guarded obsolete-package cleanup and autoremove.
+Unknown-origin, protected and residual-config packages remain for review; configurations are not purged.
 
 Package authentication is required by default. DR_ALLOW_UNAUTHENTICATED_ARCHIVES=true permits
 unauthenticated installs only while every binary source is an official archived repository.
 It does not repair signing keys or change APT's handling of repository indexes.
 
 Add --crossgrade to a release-upgrade command to permit i386 to amd64 conversion at the last
-release supporting native i386 (Debian 12 or Ubuntu 18.04), then continue to the requested target.
+LTS supporting native i386 (Debian 12 or Ubuntu 18.04), then continue to the requested target.
 A running x86_64 kernel is required. Ubuntu also requires DR_ENABLE_UBUNTU_CROSSGRADE=true.
 Set DR_ALLOW_CROSSGRADE_BLOCKERS=true to attempt despite known package blockers; final native amd64 verification remains required.
 
-Run with --to-64bit to convert a 32 bit distro to 64 bit.  Works OK with Debian.  May work for Ubuntu < 18.04.
+Run with --to-64bit to attempt a standalone i386 to amd64 conversion on the current release.
+It requires a running x86_64 kernel; Ubuntu also requires DR_ENABLE_UBUNTU_CROSSGRADE=true.
+For a release upgrade, use --crossgrade to convert at the checkpoint above.
 
 Run with --to-debian-release VERSION to upgrade Debian to the specified major version
 
@@ -185,10 +205,12 @@ Skip controls accept true/false: DR_SKIP_KERNEL_CHECK, DR_SKIP_X11_CHECK, DR_ALL
 DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK (current-release only), DR_SKIP_OLD_PACKAGE_CHECK, DR_SKIP_DOVECOT_MIGRATION_CHECK (2.4 migration only).
 DR_REMOVE_X11_PACKAGES enables X11 removal; DR_ENABLE_UBUNTU_CROSSGRADE permits experimental Ubuntu crossgrading.
 DR_CONFIGURATION_HISTORY_DAYS sets the configuration-history lookback (default 7 days).
+DR_CONFIG_BASELINE pins the original pre-upgrade snapshot to an absolute file path across runs and release hops.
+DR_DATABASE_DEFAULTS_FILE selects an authorized database maintenance client option file; no credentials are printed.
 DR_PURGE_INCOMPATIBLE_PACKAGES=false blocks known config-breaking packages before release upgrades.
 Set it to literal true to back them up and purge them; reinstall and configure them manually afterward.
-DR_PREFER_PACKAGED_USRMERGE_FILES=false stops on known executable collisions before a required /usr merge.
-Set it to literal true to privately archive only an unowned conflicting file and retain its packaged counterpart.
+DR_PREFER_PACKAGED_USRMERGE_FILES=true archives an unowned executable collision and keeps its verified packaged counterpart.
+Set it to literal false to require manual resolution. Modified or ambiguous packaged files always stop the merge.
 DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=true removes verified obsolete crossgrade packages after backup.
 Set it to literal false to require their manual removal before starting.
 
@@ -1385,14 +1407,29 @@ function upgrade_configuration_review() {
 }
 
 # This query returns fixed labels only, never authentication strings. Test local
-# root maintenance access separately from daemon activity; table upgrades need their own checks.
+# maintenance access separately from daemon activity; table upgrades need their own checks.
 function upgrade_database_verify() {
-  local client result memory buffer target=${1:-}
+  local client result memory buffer target=${1:-} defaults_file=${DR_DATABASE_DEFAULTS_FILE:-}
   local -a auth_options=(--no-defaults --protocol=socket --user=root)
   if command -v mariadb >/dev/null 2>&1; then client=mariadb
   elif command -v mysql >/dev/null 2>&1; then client=mysql
   else echo 'dss:error: Database client unavailable; authenticated maintenance is unverified.' >&2; return 1; fi
+  if [ -n "$defaults_file" ]; then
+    case "$defaults_file" in /*) :;; *) echo 'dss:error: DR_DATABASE_DEFAULTS_FILE must be an absolute file path.' >&2; return 1;; esac
+    if [ ! -f "$defaults_file" ] || [ ! -r "$defaults_file" ]; then
+      echo 'dss:error: Designated database client option file is unavailable; authenticated maintenance is unverified.' >&2
+      return 1
+    fi
+    # --defaults-file must be the first client option. Keep its account/socket
+    # selection; never read credentials into the shell or try another identity.
+    # An empty --init-command is a query on some MariaDB clients; omit it.
+    auth_options=("--defaults-file=$defaults_file")
+  fi
   if ! result=$(manifest_run_bounded 10 "$client" "${auth_options[@]}" --batch --skip-column-names --execute='SELECT 1' 2>/dev/null) || [ "$result" != 1 ]; then
+    if [ -n "$defaults_file" ]; then
+      echo 'dss:error: Designated database maintenance authentication failed; no alternate credentials tried.' >&2
+      return 1
+    fi
     # Older servers often configure a local administrative password in root's
     # option file. Read it through the client; never copy it into argv or logs.
     auth_options=(--protocol=socket --user=root)
@@ -1424,7 +1461,7 @@ function upgrade_database_verify() {
       echo 'dss:warn: Socket identity compatibility query unavailable (older grant layout or permissions); manually review before MariaDB 11.6 or newer.' >&2
     fi
   fi
-  echo 'dss:info: Local root socket maintenance succeeded. Review database startup/upgrade logs and table-upgrade completion separately.' >&2
+  echo 'dss:info: Authenticated database maintenance succeeded. Review database startup/upgrade logs and table-upgrade completion separately.' >&2
 }
 
 function upgrade_precondition_checks() {
@@ -1478,6 +1515,87 @@ function upgrade_precondition_checks() {
 
 # Archive-keyring packages maintain distro trust; never import unrelated keyserver keys.
 # https://www.debian.org/doc/manuals/debian-handbook/sect.package-authentication.en.html
+function apt_debian_archive_key_install() {
+(
+  local name=$1 fingerprint=$2 destination=$3 temporary exported stage='' gpg_command
+  case "$name" in archive-key-10|archive-key-10-security|archive-key-11|archive-key-11-security|archive-key-12|archive-key-12-security|archive-key-13|archive-key-13-security) :;; *) return 1;; esac
+  case "$fingerprint" in *[!0-9A-F]*|'') return 1;; esac
+  [ "${#fingerprint}" -eq 40 ] && [ "${destination#/}" != "$destination" ] && [ ! -L "$destination" ] || return 1
+  if command -v gpg >/dev/null 2>&1; then gpg_command=gpg
+  elif command -v gpg2 >/dev/null 2>&1; then gpg_command=gpg2
+  else echo 'dss:error: GnuPG is required to verify missing Debian archive keys; authentication was not weakened.' >&2; return 1; fi
+  temporary=$(mktemp -d "${TMPDIR:-/tmp}/distrorejuve-key.XXXXXXXX") || return 1
+  trap 'if command -v gpgconf >/dev/null 2>&1; then gpgconf --homedir "$temporary" --kill gpg-agent >/dev/null 2>&1 || :; fi; [ -z "$stage" ] || rm -f -- "$stage"; rm -rf -- "$temporary"' EXIT
+  chmod u=rwx,go= -- "$temporary" || return 1
+  # HTTPS authenticates the publisher; the full primary fingerprint pins the key.
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --silent --show-error --connect-timeout 15 --max-time 45 \
+      --output "$temporary/key.asc" "https://ftp-master.debian.org/keys/$name.asc" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    wget --quiet --timeout=45 --tries=1 --max-redirect=0 --output-document="$temporary/key.asc" \
+      "https://ftp-master.debian.org/keys/$name.asc" || return 1
+  else echo 'dss:error: curl or wget with working HTTPS is required to repair Debian archive keys.' >&2; return 1; fi
+  [ -s "$temporary/key.asc" ] && [ "$(wc -c < "$temporary/key.asc")" -le 1048576 ] || return 1
+  "$gpg_command" --no-options --homedir "$temporary" --batch --import "$temporary/key.asc" > "$temporary/import.log" 2>&1 || return 1
+  exported=$("$gpg_command" --no-options --homedir "$temporary" --batch --with-colons --fingerprint --list-keys "$fingerprint" 2>/dev/null) || return 1
+  # GnuPG colon records: "pub:..." then
+  # "fpr:::::::::80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE:" -> that primary fingerprint.
+  # Require one primary key with the pinned fingerprint, not a signing subkey.
+  printf '%s\n' "$exported" | awk -F: -v expected="$fingerprint" '
+    $1 == "pub" { primary++; next_fingerprint=1; if ($2 == "r" || $2 == "e") bad=1 }
+    $1 == "sub" { next_fingerprint=0 }
+    $1 == "fpr" && next_fingerprint { if ($10 != expected) bad=1; found++; next_fingerprint=0 }
+    END { exit (bad || primary != 1 || found != 1) }
+  ' || { echo 'dss:error: Downloaded Debian key is expired, revoked or does not match its pinned primary fingerprint.' >&2; return 1; }
+  # Export only the pinned primary and its verified subkeys; never trust extra keys in a download.
+  "$gpg_command" --no-options --homedir "$temporary" --batch --export "$fingerprint" > "$temporary/key.gpg" || return 1
+  [ -s "$temporary/key.gpg" ] || return 1
+  mkdir -p -m u=rwx,go=rx -- "${destination%/*}" || return 1
+  stage=$(mktemp "$destination.tmp.XXXXXXXX") || return 1
+  install -m u=rw,go=r -- "$temporary/key.gpg" "$stage" && mv -f -- "$stage" "$destination" || return 1
+  stage=''
+  printf 'dss:info: Installed verified Debian archive key %s (%s).\n' "$name" "$fingerprint" >&2
+)
+}
+
+# Repair known missing official signers, including newer signatures on old archives.
+# Unknown/vendor keys and genuinely expired-only signatures keep their existing failure.
+function apt_repair_debian_signing_keys() {
+  local logfile=$1 missing config records official=false provider type name fingerprint ids key selected found=false _
+  [ -f /etc/debian_version ] || return 0
+  # APT/GPG output "NO_PUBKEY 112695A0E562B32A" -> that public signing ID only.
+  missing=$(LC_ALL=C awk '{ for (i=1;i<NF;i++) if ($i == "NO_PUBKEY" && $(i+1) ~ /^[0-9A-Fa-f]+$/ && length($(i+1)) == 16) print toupper($(i+1)) }' "$logfile" | LC_ALL=C sort -u) || return 1
+  [ -n "$missing" ] || return 0
+  records=$(apt_sources_list) || return 1
+  while IFS=$'\t' read -r _ _ provider type _ _ _ _; do
+    [ "$provider:$type" != debian:deb ] || official=true
+  done <<< "$records"
+  $official || return 0
+  [ -z "${APT_CONFIG:-}${DPKG_ADMINDIR:-}${DPKG_ROOT:-}" ] || return 1
+  config=$(apt-config dump) || return 1
+  apt_config_has_standard_paths "$config" || return 1
+  # Public primary and signing-subkey IDs from Debian's published keys; full fingerprints
+  # are pinned independently of any key IDs supplied by an untrusted repository error.
+  while IFS='|' read -r name fingerprint ids; do
+    selected=false
+    for key in $missing; do case " $ids " in *" $key "*) selected=true;; esac; done
+    $selected || continue
+    found=true
+    apt_debian_archive_key_install "$name" "$fingerprint" "/etc/apt/trusted.gpg.d/distrorejuve-$name.gpg" || return 1
+  done <<'DEBIAN_KEYS'
+archive-key-10|80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE|DC30D7C23CBBABEE 648ACFD622F3D138
+archive-key-10-security|5E61B217265DA9807A23C5FF4DFAB270CAA96DFA|4DFAB270CAA96DFA 112695A0E562B32A
+archive-key-11|1F89983E0081FDE018F3CC9673A4F27B8DD47936|73A4F27B8DD47936 0E98404D386FA1D9
+archive-key-11-security|AC530D520F2F3269F5E98313A48449044AAD5C5D|A48449044AAD5C5D 54404762BBB6E853
+archive-key-12|B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8|B7C5D7D6350947F8 6ED0E7B82643E131
+archive-key-12-security|05AB90340C0C5E797F44A8C8254CF3B5AEC0A8F0|254CF3B5AEC0A8F0 BDE6D2B9216EC7A8
+archive-key-13|04B54C3CDCA79751B16BC6B5225629DF75B188BD|225629DF75B188BD 78DBA3BC47EF2265
+archive-key-13-security|5E04A1E3223A19A20706E20F9904613D4CCE68C6|9904613D4CCE68C6 8E9F831205B4BA95
+DEBIAN_KEYS
+  if $found; then echo 'dss:info: Missing Debian archive signers repaired; retrying authenticated index refresh.' >&2; fi
+  return 0
+}
+
 function apt_ensure_archive_keyring() {
   local package=$1 info status
   if info=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null); then
@@ -1569,9 +1687,12 @@ function upgrade_compatibility_config_matches() {
   for file in "$@"; do
     [ -e "$file" ] || [ -L "$file" ] || continue
     [ -f "$file" ] && [ -r "$file" ] || return 2
-    awk -v pattern="$pattern" '
+    # awk -v decodes string escapes: preserve the caller regex literally through ENVIRON.
+    # auth [success=ok default=die] pam_lastlog.so matches \[...\] and pam_lastlog\.so;
+    # pam_lastlogXso must stay clear. The configuration is inspected as text only.
+    UPGRADE_COMPATIBILITY_PATTERN="$pattern" awk '
       # Original mawk lacks named classes; preserve ASCII whitespace in caller patterns.
-      BEGIN { gsub(/\[:space:\]/, " \t\r\f\013", pattern) }
+      BEGIN { pattern=ENVIRON["UPGRADE_COMPATIBILITY_PATTERN"]; gsub(/\[:space:\]/, " \t\r\f\013", pattern) }
       { sub(/#.*/, ""); gsub(/["\047]/, ""); if (tolower($0) ~ pattern) matched=1 }
       END { exit !matched }
     ' "$file"
@@ -1784,8 +1905,14 @@ function upgrade_output_incompatible_packages() {
 # dependencies to find the target default PHP branch; the currently installed php CLI can differ.
 # Follow Debian's default PHP packages; package maintscripts own Apache module changes.
 function upgrade_php_output_default_branch() {
-  local package dependencies branch
+  local package dependencies branch status runtime
   for package in php-cli libapache2-mod-php; do
+    if upgrade_php_has_candidate "$package"; then :
+    else
+      status=$?
+      [ "$status" -eq 1 ] || { echo 'dss:error: Cannot verify target PHP selector archive metadata.' >&2; return 1; }
+      continue
+    fi
     dependencies=$(LC_ALL=C apt-cache depends "$package") || return 1
     # Depends: php8.4-cli or Depends: libapache2-mod-php8.4 -> branch=8.4.
     branch=$(printf '%s\n' "$dependencies" | awk '
@@ -1795,10 +1922,344 @@ function upgrade_php_output_default_branch() {
       }
       END { if (found && !bad) print found; else exit 1 }
     ')
-    if [ -n "$branch" ]; then printf '%s\n' "$branch"; return 0; fi
+    if [ -n "$branch" ]; then
+      case "$package" in php-cli) runtime=php"$branch"-cli;; *) runtime=libapache2-mod-php"$branch";; esac
+      if upgrade_php_has_candidate "$runtime"; then printf '%s\n' "$branch"; return 0
+      else
+        status=$?
+        [ "$status" -eq 1 ] || { echo 'dss:error: Cannot verify target PHP runtime archive metadata.' >&2; return 1; }
+      fi
+    fi
   done
   echo 'dss:error: No unique default PHP branch found in target APT dependencies.' >&2
   return 1
+}
+
+# APT simulation can reject a valid final selection while replaying a package
+# split's temporary Breaks relationship (for example, Ubuntu 26.04 coreutils/sudo).
+# Python is used only for python3-apt's libapt dependency checks; reproducing those
+# checks in Bash would require a second dependency implementation. See
+# docs/upgrade-review.md, "APT simulation of package splits", for the reproducer.
+# The caller first requires APT status 100, install/configure records and only
+# Conf Broken errors. This helper validates that exact selection in memory.
+# Never fetch, install prerequisites or commit package changes from this helper.
+function upgrade_php_native_normal_upgrade_plan() {
+  local directory=$1 tool
+  shift
+  for tool in python3 timeout; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "dss:error: Native dependency validation requires $tool; failed APT simulation retained for review." >&2
+      return 1
+    fi
+  done
+  LC_ALL=C timeout --kill-after=5s 120s python3 -I - "$directory" "$@" <<'PY_NATIVE_PLAN'
+import sys
+
+def fail(message):
+    raise RuntimeError(message)
+
+def command(arguments):
+    result = subprocess.run(arguments, text=True, capture_output=True, check=True, timeout=30)
+    return result.stdout
+
+def main():
+    try:
+        import apt, apt_pkg
+    except (ImportError, OSError):
+        fail('matching system python3-apt is required; review its standard prerequisite install plan')
+    if (not callable(getattr(apt, 'Cache', None)) or
+            not all(callable(getattr(apt.Cache, name, None)) for name in ('actiongroup', 'get_changes')) or
+            not all(callable(getattr(apt_pkg, name, None)) for name in
+                    ('init_config', 'init_system', 'parse_depends', 'check_dep', 'version_compare'))):
+        fail('python3-apt lacks required native validation APIs; review its standard prerequisite install plan')
+    # Check the interpreter/bindings before reading package state or opening a cache.
+    version = command(['apt-get', '--version']).splitlines()[0].split()
+    if len(version) < 2 or version[1] != apt_pkg.VERSION:
+        fail('APT CLI and native library versions differ; review the matching python3-apt prerequisite install plan')
+    directory = pathlib.Path(sys.argv[1])
+    diagnostic = directory / 'normal-dist-upgrade.native-mismatch.json'
+    if diagnostic.exists():
+        diagnostic.unlink()
+    options = sys.argv[2:]
+    apt_pkg.init_config()
+    if apt_pkg.config.exists('Binary::apt-get'):
+        fail('binary-specific APT configuration is outside native planner scope')
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option in ('-y', '--yes', '--assume-yes'):
+            apt_pkg.config.set('APT::Get::Assume-Yes', 'true')
+        elif option in ('-o', '--option'):
+            index += 1
+            if index >= len(options) or '=' not in options[index]:
+                fail('invalid APT option')
+            key, value = options[index].split('=', 1)
+            if not key or key.lower().startswith('dir'):
+                fail('unsupported native-planner APT option')
+            apt_pkg.config.set(key, value)
+        else:
+            fail('unsupported native-planner command-line option')
+        index += 1
+    apt_pkg.config.set('APT::Get::Purge', 'false')
+    apt_pkg.config.set('APT::Get::AutomaticRemove', 'false')
+    if apt_pkg.config.find_b('APT::Get::AllowUnauthenticated', False):
+        fail('native planner requires authenticated archives')
+    apt_pkg.init_system()
+    apt_pkg.config.set('Dir::Cache::pkgcache', '')
+    apt_pkg.config.set('Dir::Cache::srcpkgcache', '')
+    config_digest = hashlib.sha256(apt_pkg.config.dump().encode()).hexdigest()
+    status = pathlib.Path(apt_pkg.config.find_file('Dir::State::status'))
+    before = hashlib.sha256(status.read_bytes()).hexdigest()
+    lists = pathlib.Path(apt_pkg.config.find_dir('Dir::State::lists'))
+    def index_snapshot():
+        return sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns)
+                      for p in lists.iterdir() if p.is_file() and p.name != 'lock')
+    indexes_before = index_snapshot()
+    # apt-get -s producers, literal examples -> exact selected version and arch:
+    # Inst example [1.0] (2.0 Ubuntu:26.04/resolute [amd64]) -> example,1.0,2.0,amd64
+    # Inst example-provider (1.0 Ubuntu:26.04/resolute [all]) -> new all package
+    # Remv example-old [1.0] -> removal of installed version 1.0
+    # Conf example-provider:amd64 broken / E: Conf Broken ... are replay diagnostics;
+    # the complete Inst/Remv selection must pass native dependency validation.
+    transcript_path = directory / 'normal-dist-upgrade.plan.new'
+    if transcript_path.stat().st_size > 16 * 1024 * 1024:
+        fail('simulation transcript exceeds native planner bound')
+    transcript = transcript_path.read_text()
+    cli = {}
+    conf = []
+    replay_errors = set()
+    broken_configures = set()
+    for line in transcript.splitlines():
+        if line.startswith('E:'):
+            match = re.fullmatch(r'E: Conf Broken ([a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?)', line)
+            if not match:
+                fail('failure is outside package-configuration replay')
+            replay_errors.add(match.group(1))
+            continue
+        if line.startswith('Purg '):
+            fail('purge is outside native planner scope')
+        if line.startswith('Inst '):
+            match = re.fullmatch(r'Inst ([a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?) (?:\[([^\]\s]+)\] )?\(([^\s()]+) (.+)\)(?: \[.*\])*', line)
+            if not match:
+                fail('incomplete or malformed simulated install')
+            name, old, new, origin = match.groups()
+            architecture = re.search(r'\[([a-z0-9-]+)\]$', origin)
+            if not architecture:
+                fail('simulated install lacks architecture')
+            action = ('install', old, new, architecture.group(1))
+        elif line.startswith('Remv '):
+            match = re.fullmatch(r'Remv ([a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?) \[([^\]\s]+)\](?: \[.*\])*', line)
+            if not match:
+                fail('incomplete or malformed simulated removal')
+            name, old = match.groups()
+            action = ('remove', old, None, None)
+        elif line.startswith('Conf '):
+            match = re.match(r'Conf ([a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?)(?: |$)', line)
+            if not match:
+                fail('malformed simulated configure')
+            if not (line == 'Conf ' + match.group(1) + ' broken' or
+                    re.fullmatch(r'Conf [a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)? \([^\s()]+ .+\[[a-z0-9-]+\]\)(?: \[.*\])*', line)):
+                fail('malformed simulated configure detail')
+            conf.append(match.group(1))
+            if line == 'Conf ' + match.group(1) + ' broken':
+                broken_configures.add(match.group(1))
+            continue
+        else:
+            continue
+        if name in cli:
+            fail('duplicate simulated action')
+        cli[name] = action
+    if not cli or not replay_errors or replay_errors != broken_configures:
+        fail('simulation has no complete selection and matching configuration failures')
+    cache = apt.Cache(memonly=True)
+    # Validate exactly the CLI proposal, without asking a second resolver to
+    # choose another solution. Candidate assignment and non-automatic marking
+    # are in-memory only; ActionGroup defers dependency accounting until the
+    # complete proposed transaction has been marked. No resolver/fetch/commit.
+    with cache.actiongroup():
+        for name, action in cli.items():
+            if name not in cache:
+                fail('simulated package is absent from native cache')
+            package = cache[name]
+            observed_old = package.installed.version if package.installed else None
+            if observed_old != action[1]:
+                fail('simulated installed version differs from native status')
+            if action[0] == 'install':
+                versions = [version for version in package.versions
+                            if version.version == action[2] and version.architecture == action[3]]
+                if len(versions) != 1:
+                    fail('simulated exact version/architecture is unavailable or ambiguous')
+                package.candidate = versions[0]
+        for name, action in cli.items():
+            package = cache[name]
+            if action[0] == 'install':
+                package.mark_install(auto_fix=False, auto_inst=False, from_user=False)
+            else:
+                package.mark_delete(auto_fix=False, purge=False)
+    if cache.broken_count:
+        fail('native validation of the complete CLI dependency selection is broken')
+    # Independent dpkg desired-state observation, not Python marking semantics.
+    holds = set()
+    for line in command(['dpkg', '--get-selections']).splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            fail('malformed dpkg selection')
+        if fields[1] == 'hold':
+            holds.add(fields[0])
+    native = {}
+    records = []
+    for package in cache.get_changes():
+        name = package.fullname
+        base = name.split(':')[0]
+        if name in holds or base in holds:
+            fail('native plan changes a held package')
+        old = package.installed.version if package.installed else None
+        if package.marked_downgrade or package.marked_reinstall:
+            fail('downgrade or reinstall is outside native planner scope')
+        protected = package.essential or (package.installed and package.installed.record.get('Protected', '').lower() == 'yes')
+        if package.marked_delete:
+            if not old or protected:
+                fail('native plan removes an essential/protected or absent package')
+            action = ('remove', old, None, None)
+        else:
+            candidate = package.candidate
+            if not (package.marked_install or package.marked_upgrade) or not candidate:
+                fail('unsupported native package action')
+            if not candidate.downloadable or not any(origin.trusted for origin in candidate.origins):
+                fail('native candidate has no trusted downloadable archive')
+            if old and apt_pkg.version_compare(candidate.version, old) <= 0:
+                fail('native candidate does not advance installed version')
+            action = ('install', old, candidate.version, candidate.architecture)
+        if name in native:
+            fail('duplicate native action')
+        native[name] = action
+        records.append(dict(name=name, action=action[0], old=old, new=action[2], archive_architecture=action[3]))
+    normalized_cli = {}
+    for name, action in cli.items():
+        if name not in cache:
+            fail('simulated package is absent from native cache')
+        package = cache[name]
+        qualified = package.fullname
+        if qualified in normalized_cli:
+            fail('duplicate qualified simulated action')
+        normalized_cli[qualified] = action
+    if normalized_cli != native:
+        mismatches = sorted(name for name in set(normalized_cli) | set(native)
+                            if normalized_cli.get(name) != native.get(name))
+        def describe(action):
+            if action is None:
+                return None
+            return dict(zip(('action', 'old', 'new', 'archive_architecture'),
+                            (str(value)[:200] if value is not None else None for value in action)))
+        differences = [dict(name=name[:200], cli=describe(normalized_cli.get(name)),
+                            native=describe(native.get(name))) for name in mismatches[:100]]
+        detail = dict(backend='python-apt-native-selection-validator', apt_version=apt_pkg.VERSION,
+                      config_sha256=config_digest, status_sha256=before,
+                      failed_simulation_sha256=hashlib.sha256(transcript.encode()).hexdigest(),
+                      cli_action_count=len(normalized_cli), native_action_count=len(native),
+                      mismatch_count=len(mismatches), truncated=len(mismatches) > 100,
+                      differences=differences)
+        diagnostic.write_text(json.dumps(detail, sort_keys=True, indent=2) + '\n')
+        for difference in differences[:20]:
+            print('dss:error: Native selection mismatch: ' + json.dumps(difference, sort_keys=True), file=sys.stderr)
+        fail('simulated/native complete package selections differ; bounded details: ' + str(diagnostic))
+    for name in conf:
+        if name not in cache or cache[name].fullname not in native or native[cache[name].fullname][0] != 'install':
+            fail('configure record has no matching install')
+    relations = []
+    for name in sorted(replay_errors):
+        package = cache[name]
+        candidate = package.candidate
+        resolved = []
+        # Signed Debian control producer: Breaks: predecessor (<< 2.0).
+        # With predecessor installed1.0 and planned2.0, the final solution resolves
+        # this temporary Breaks edge; missing/unversioned/unresolved edges reject.
+        for alternatives in apt_pkg.parse_depends(candidate.record.get('Breaks', '')):
+            for target, threshold, comparison in alternatives:
+                if not threshold or not comparison or target not in cache:
+                    continue
+                predecessor = cache[target]
+                change = native.get(predecessor.fullname)
+                if (predecessor.installed and change and change[0] == 'install'
+                        and apt_pkg.check_dep(predecessor.installed.version, comparison, threshold)
+                        and not apt_pkg.check_dep(change[2], comparison, threshold)):
+                    resolved.append(dict(package=predecessor.fullname, old=change[1], new=change[2],
+                                         comparison=comparison, threshold=threshold))
+        if not resolved:
+            fail('configuration replay failure has no verified resolved Breaks transition')
+        relations.append(dict(package=package.fullname, resolved_breaks=resolved))
+    if index_snapshot() != indexes_before:
+        fail('APT indexes changed during native planning')
+    if hashlib.sha256(status.read_bytes()).hexdigest() != before:
+        fail('package status changed during native planning')
+    proof = dict(backend='python-apt-native-selection-validator', apt_version=apt_pkg.VERSION,
+                 config_sha256=config_digest, status_sha256=before, indexes=indexes_before,
+                 failed_simulation_sha256=hashlib.sha256(transcript.encode()).hexdigest(), actions=records, relationships=relations)
+    (directory / 'normal-dist-upgrade.native.json.new').write_text(json.dumps(proof, sort_keys=True, indent=2) + '\n')
+    lines = []
+    for record in records:
+        if record['action'] == 'remove':
+            lines.append('Remv %s [%s]' % (record['name'], record['old']))
+        else:
+            old = '[%s] ' % record['old'] if record['old'] else ''
+            lines.append('Inst %s %s(%s native-planner [%s])' % (record['name'], old, record['new'], record['archive_architecture']))
+    (directory / 'normal-dist-upgrade.native.plan.new').write_text('\n'.join(lines) + '\n')
+
+try:
+    # subprocess.run(text=True, capture_output=True) requires Python 3.7 or newer.
+    if sys.version_info < (3, 7):
+        fail('Python 3.7 or newer is required; review the system Python prerequisite install plan')
+    import hashlib, json, pathlib, re, subprocess
+    main()
+except Exception as error:
+    print('dss:error: Native dependency planning rejected: ' + str(error), file=sys.stderr)
+    sys.exit(1)
+PY_NATIVE_PLAN
+}
+
+# Retain failed simulations as actionable evidence instead of silently aborting.
+function upgrade_php_prepare_normal_upgrade_plan() {
+  local directory=$1 status
+  shift
+  # Invalidate both halves before revalidation; a failed retry cannot leave a
+  # normalized fallback plan that a later invocation mistakes for CLI success.
+  if [ -f "$directory/normal-dist-upgrade.native.json" ]; then
+    rm -f -- "$directory/normal-dist-upgrade.plan" || return 1
+    rm -f -- "$directory/normal-dist-upgrade.native.json" || return 1
+  fi
+  (LC_ALL=C apt-get "$@" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate dist-upgrade) > "$directory/normal-dist-upgrade.plan.new" 2>&1
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    tail -n 30 -- "$directory/normal-dist-upgrade.plan.new" >&2
+    echo "dss:warn: Target full-upgrade simulation failed (APT status $status). Review $directory/normal-dist-upgrade.plan.new." >&2
+    if [ "$status" -ne 100 ]; then return "$status"; fi
+    # Cheap eligibility check before starting Python; full parsing stays in the validator.
+    # LC_ALL=C apt-get --simulate dist-upgrade, literal records:
+    # Inst example-provider (1.0 Ubuntu:26.04/resolute [all])
+    # Conf example-provider:amd64 broken
+    # E: Conf Broken example-provider:amd64
+    # -> try native validation; any other E: diagnostic or missing record stops here.
+    if ! LC_ALL=C awk '
+      /^Inst / { install=1 }
+      /^Conf [a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)? broken$/ { configure=1 }
+      /^E:/ {
+        if ($0 ~ /^E: Conf Broken [a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/) replay=1
+        else bad=1
+      }
+      END { exit !(install && configure && replay && !bad) }
+    ' "$directory/normal-dist-upgrade.plan.new"; then return "$status"; fi
+    echo 'dss:warn: APT configuration replay failed; checking native validation prerequisites and exact package selection.' >&2
+    if ! upgrade_php_native_normal_upgrade_plan "$directory" "$@"; then
+      echo "dss:error: Native dependency validation failed; retain APT status $status and inspect $directory/normal-dist-upgrade.plan.new." >&2
+      return "$status"
+    fi
+    mv "$directory/normal-dist-upgrade.native.json.new" "$directory/normal-dist-upgrade.native.json" || return 1
+    mv "$directory/normal-dist-upgrade.native.plan.new" "$directory/normal-dist-upgrade.plan" || return 1
+    echo "dss:warn: APT proposal passed native dependency validation; failed simulation retained at $directory/normal-dist-upgrade.plan.new; provenance $directory/normal-dist-upgrade.native.json." >&2
+    return 0
+  fi
+  rm -f -- "$directory/normal-dist-upgrade.native.json" || return 1
+  mv "$directory/normal-dist-upgrade.plan.new" "$directory/normal-dist-upgrade.plan"
 }
 
 # 0 genuine archive candidate, 1 unavailable, 2 failed query. Never use status-only versions.
@@ -2055,6 +2516,96 @@ function upgrade_php_check_apache_removal_plan() {
   return 0
 }
 
+# A separate removal can remove applications or pull in the target runtime.
+# Use the checked combined transaction under the Apache mask in either case;
+# retain applications and never widen removal approval.
+function upgrade_php_apache_combined_plan_is_safe() {
+  local directory=$1 native=$2 packages=$3 extras package changes old_version new_version
+  upgrade_php_check_plan "$directory/install.allowed-removals" "$directory/install.plan" false "$native" || return 1
+  # APT simulation producers:
+  # Inst php8.5-cli (8.5.0 Ubuntu:26.04/resolute [amd64]) -> new,8.5.0,amd64
+  # Inst php-common [2:93] (2:99 Ubuntu:26.04/resolute [all]) -> 2:93,2:99,all
+  # Remv wordpress [5.8.3] -> must remain installed in the combined transaction.
+  # Every separate Inst must match the checked combined name/old/new/archive arch;
+  # Conf must refer to that same separate Inst, and Purg is always rejected.
+  changes=$(awk -v native="$native" '
+    function key(name) { sub(":" native "$", "", name); sub(/:all$/, "", name); return name }
+    function parse(line, fields, count, old, version, arch) {
+      count=split(line, fields, /[ \t\r\f\013]+/)
+      parsed_name=key(fields[2]); old=""; version=fields[3]
+      if (version ~ /^\[[^]]+\]$/) {
+        old=version; sub(/^\[/, "", old); sub(/\]$/, "", old); version=fields[4]
+      }
+      if (fields[2] !~ /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/ || version !~ /^\([0-9A-Za-z.+:~_-]+$/) return ""
+      sub(/^\(/, "", version)
+      if (!match(line, /\[[a-z0-9-]+\]\)/)) return ""
+      arch=substr(line, RSTART+1, RLENGTH-3)
+      if (fields[2] ~ /:all$/ && arch != "all") return ""
+      if (fields[2] !~ /:/ && arch != "all" && arch != native) return ""
+      if (fields[2] ~ /:/ && fields[2] !~ (":" native "$") && fields[2] !~ /:all$/ && fields[2] !~ (":" arch "$")) return ""
+      parsed_old=old; parsed_new=version; parsed_arch=arch
+      return parsed_name " " old " " version " " arch
+    }
+    FILENAME == ARGV[1] {
+      if ($1 == "Purg") bad=1
+      if ($1 == "Inst") { signature=parse($0); if (signature == "" || (signature in approved)) bad=1; else approved[signature]=1 }
+      next
+    }
+    /^Purg / { bad=1 }
+    /^Inst / {
+      signature=parse($0)
+      if (signature == "" || !(signature in approved)) { bad=1; next }
+      entry=parsed_name " " parsed_new " " parsed_arch
+      if (entry in selected) { bad=1; next }
+      selected[entry]=1
+      print (parsed_old == "" ? "-" : parsed_old) "\t" parsed_new
+    }
+    /^Conf / {
+      if (parse($0) == "") bad=1
+      else {
+        entry=parsed_name " " parsed_new " " parsed_arch
+        if (entry in configured) bad=1
+        configured[entry]=1
+      }
+    }
+    /^(Inst|Conf|Remv|Purg)$/ { bad=1 }
+    /^[A-Z][a-z][a-z][a-z] .*\[/ {
+      if ($1 !~ /^(Inst|Conf|Remv|Purg)$/) bad=1
+    }
+    END {
+      for (entry in configured) if (!(entry in selected)) bad=1
+      exit bad
+    }
+  ' "$directory/install.plan" "$directory/remove.plan") || return 1
+  while IFS=$'\t' read -r old_version new_version; do
+    [ -n "$old_version$new_version" ] || continue
+    [ "$old_version" != - ] || continue
+    [ -n "$new_version" ] || return 1
+    dpkg --compare-versions "$new_version" ge "$old_version" || return 1
+  done <<< "$changes"
+  extras=$(upgrade_php_output_preserved_packages "$directory/apache.allowed-removals" "$directory/remove.plan" "$packages" "$native") || return 1
+  [ -n "$extras" ] || [ -n "$changes" ] || return 1
+  while IFS= read -r package; do
+    [ -n "$package" ] || continue
+    # Retain the application name across native/all spelling, including wordpress-l10n:all.
+    awk -v package="$package" '
+      function key(name) { sub(/:.*/, "", name); return name }
+      /^(Remv|Purg) / { if (key($2) == key(package)) bad=1 }
+      END { exit bad }
+    ' "$directory/install.plan" || return 1
+  done <<< "$extras"
+}
+
+# Recheck immediately before the combined mutation; a saved state alone is insufficient.
+function upgrade_php_apache_combined_guard_is_active() {
+  local directory=$1 state persistent=/etc/systemd/system/apache2.service
+  [ -f "$directory/apache.state" ] || return 1
+  [ -L "$persistent" ] && [ "$(readlink "$persistent")" = /dev/null ] || return 1
+  state=$(systemctl show -p LoadState -p ActiveState apache2.service) || return 1
+  printf '%s\n' "$state" | grep -qx 'LoadState=masked' || return 1
+  printf '%s\n' "$state" | grep -qx 'ActiveState=inactive'
+}
+
 function upgrade_php_output_pending_directory() {
   local file directory found=''
   for file in /root/distrorejuveinfo/*.php-migration/*/started /root/deghostinfo/*.php-migration/*/started; do
@@ -2258,6 +2809,64 @@ function upgrade_php_output_preserved_packages() {
   ' "$allowed" <(printf '%s\n' "$packages") "$plan"
 }
 
+# Accept only the archive's exact same-architecture t64 library replacement.
+# 0 outputs package:architecture=version, 1 is not a verified transition, 2 is a query failure.
+function upgrade_php_output_t64_replacement() {
+  local old=$1 plan=$2 native=$3 name arch replacement records version policy candidate metadata
+  name=${old%%:*}; arch=$native
+  case "$old" in *:*) arch=${old##*:};; esac
+  case "$name" in lib[0-9a-z]*t64) return 1;; lib[0-9a-z]*) :;; *) return 1;; esac
+  case "$name:$arch" in *[!a-z0-9+.:_-]*) return 1;; esac
+  [ "$arch" = "$native" ] || return 1
+  replacement="${name}t64"
+  # APT simulation: Remv libzip4 [1.7.3-1ubuntu2]
+  # Inst libzip4t64 (1.7.3-1.1ubuntu2 Ubuntu:24.04/noble [amd64])
+  # -> planned replacement libzip4t64:amd64=1.7.3-1.1ubuntu2, only for this exact removal.
+  records=$(awk -v old="$name" -v replacement="$replacement" -v arch="$arch" '
+    /^Remv / { package=$2; sub(":" arch "$", "", package); if (package == old) removed=1 }
+    /^Inst / {
+      package=$2; sub(":" arch "$", "", package)
+      if (package != replacement) next
+      if (index($0, "[" arch "]") == 0) { bad=1; next }
+      value=($3 ~ /^\[/ ? $4 : $3)
+      sub(/^[(]/, "", value); sub(/[)]$/, "", value)
+      if (value !~ /^[0-9A-Za-z.+:~_-]+$/ || (version != "" && version != value)) bad=1
+      version=value
+    }
+    END { if (removed && version != "" && !bad) print version; else exit 1 }
+  ' "$plan") || return 1
+  version=$records
+  if upgrade_php_has_candidate "$replacement:$arch"; then :
+  else candidate=$?; [ "$candidate" -ne 2 ] || return 2; return 1; fi
+  policy=$(LC_ALL=C apt-cache policy "$replacement:$arch") || return 2
+  candidate=$(printf '%s\n' "$policy" | awk '$1 == "Candidate:" { print $2; exit }')
+  [ "$candidate" = "$version" ] || return 1
+  metadata=$(LC_ALL=C apt-cache show "$replacement:$arch=$version") || return 2
+  [ "${#metadata}" -le 1048576 ] || return 1
+  # Signed APT index control stanza: Package: libzip4t64; Version: 1.7.3-1.1ubuntu2;
+  # Architecture: amd64; Provides: libzip4 (= 1.7.3-1.1ubuntu2); Replaces: libzip4.
+  # Both exact relationship names are required; libzip40 and another version/architecture are rejected.
+  printf '%s\n' "$metadata" | awk -v package="$replacement" -v version="$version" -v arch="$arch" -v old="$name" '
+    function finish( n, i, words, token, provides_old, replaces_old) {
+      if (p != package || v != version || a != arch) return
+      n=split(provides, words, ",")
+      for (i=1; i<=n; i++) { token=words[i]; sub(/^[ \t]+/, "", token); sub(/[ \t(].*$/, "", token); if (token == old) provides_old=1 }
+      n=split(replaces, words, ",")
+      for (i=1; i<=n; i++) { token=words[i]; sub(/^[ \t]+/, "", token); sub(/[ \t(].*$/, "", token); if (token == old) replaces_old=1 }
+      if (provides_old && replaces_old) found++
+    }
+    /^[ \t]*$/ { finish(); p=v=a=provides=replaces=field=""; next }
+    /^Package:/ { p=$2; field=""; next }
+    /^Version:/ { v=$2; field=""; next }
+    /^Architecture:/ { a=$2; field=""; next }
+    /^(Provides|Replaces):/ { field=$1; value=$0; sub(/^[^:]+:[ \t]*/, "", value); if (field == "Provides:") provides=value; else replaces=value; next }
+    /^[ \t]/ { if (field == "Provides:") provides=provides " " $0; else if (field == "Replaces:") replaces=replaces " " $0; next }
+    { field="" }
+    END { finish(); exit !(found == 1) }
+  ' || return 1
+  printf '%s:%s=%s\n' "$replacement" "$arch" "$version"
+}
+
 # Only documentation-only dependency packages for explicitly unavailable extensions qualify.
 function upgrade_php_is_obsolete_extension_meta() {
   local package=${1%%:*} mapping=$2 packages=$3 files
@@ -2284,13 +2893,14 @@ function upgrade_migrate_php_packages() {
   package_umask=$(umask) || return 1
   umask 077
   local target=$1 packages default baseline directory status package arch branch suffix replacement mode concrete
-  local apache='' audit file pending=false listed native preserved requested attempt additions original_packages apache_inventory
+  local apache='' audit file pending=false apache_combined=false listed native preserved requested attempt additions original_packages apache_inventory
   local -a installs=()
   local -a removals=()
   local -a handoff_removals=()
   local -a arguments=()
   local -a apt_options=()
   local -a backups=()
+  local -a t64_installs=()
   case "$target" in ''|*[!a-z0-9]*) return 1;; esac
   [ "$(id -u)" = 0 ] || return 1
   read -r -a apt_options <<< "$APT_GET_INSTALL_OPTIONS"
@@ -2487,10 +3097,20 @@ function upgrade_migrate_php_packages() {
   for package in "${removals[@]}"; do arguments+=("$package-"); done
   native=$(dpkg --print-architecture) || return 1
   [[ "$native" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+  # Resume exact replacements already selected by this migration, without widening removal approval.
+  if [ -f "$directory/t64.replacements" ]; then
+    while IFS=$'\t' read -r package replacement requested; do
+      [ -n "$package" ] && [ -z "$requested" ] || return 1
+      case "$package" in lib*:"$native") :;; *) return 1;; esac
+      [ "${replacement%%=*}" = "${package%%:*}t64:$native" ] || return 1
+      [[ "${replacement#*=}" =~ ^[0-9A-Za-z.+:~_-]+$ ]] || return 1
+      t64_installs+=("$replacement")
+      arguments+=("$replacement")
+    done < "$directory/t64.replacements"
+  fi
   echo "dss:stage: Checking package changes for PHP $default" >&2
-  if [ ! -f "$directory/normal-dist-upgrade.plan" ]; then
-    (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate dist-upgrade) > "$directory/normal-dist-upgrade.plan.new" 2>&1 || return 1
-    mv "$directory/normal-dist-upgrade.plan.new" "$directory/normal-dist-upgrade.plan" || return 1
+  if [ ! -f "$directory/normal-dist-upgrade.plan" ] || [ -f "$directory/normal-dist-upgrade.native.json" ]; then
+    (umask "$package_umask" && upgrade_php_prepare_normal_upgrade_plan "$directory" "${apt_options[@]}") || return 1
   fi
   cat "$directory/remove.packages" > "$directory/install.allowed-removals.new" || return 1
   awk '
@@ -2535,6 +3155,21 @@ function upgrade_migrate_php_packages() {
       if (umask "$package_umask" && upgrade_php_has_candidate "$package"); then :
       else
         status=$?
+        if [ "$status" -eq 1 ]; then
+          if replacement=$(umask "$package_umask" && upgrade_php_output_t64_replacement "$package" "$directory/install.plan" "$native"); then
+            printf '%s\n' "$package" >> "$directory/install.allowed-removals" || return 1
+            printf '%s\n' "${replacement%%=*}" >> "$directory/install.packages" || return 1
+            printf '%s\t%s\n' "$package" "$replacement" >> "$directory/t64.replacements" || return 1
+            installs+=("${replacement%%=*}")
+            t64_installs+=("$replacement")
+            arguments+=("$replacement")
+            echo "dss:info: Preserving $package through verified archive replacement $replacement" >&2
+            continue
+          else
+            status=$?
+            [ "$status" -ne 2 ] || { echo 'dss:error: Failed to verify t64 replacement archive metadata.' >&2; return 1; }
+          fi
+        fi
         if [ "$status" -eq 1 ] && upgrade_php_is_obsolete_extension_meta "$package" "$directory/mapping" "$packages"; then
           printf '%s:all\n' "${package%%:*}" >> "$directory/remove.packages" || return 1
           printf '%s:all\n' "${package%%:*}" >> "$directory/install.allowed-removals" || return 1
@@ -2557,10 +3192,17 @@ function upgrade_migrate_php_packages() {
     handoff_removals=()
     while IFS= read -r package; do [ -z "$package" ] || handoff_removals+=("$package"); done <<< "$listed"
     (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate remove "${handoff_removals[@]}") > "$directory/remove.plan" 2>&1 || return 1
-    upgrade_php_check_apache_removal_plan "$directory" "$native" || {
+    if upgrade_php_check_apache_removal_plan "$directory" "$native" 2> "$directory/apache.remove.rejection"; then
+      printf '%s\n' separate > "$directory/apache.transaction" || return 1
+    elif upgrade_php_apache_combined_plan_is_safe "$directory" "$native" "$packages"; then
+      apache_combined=true
+      printf '%s\n' combined > "$directory/apache.transaction" || return 1
+      echo 'dss:info: Using the checked combined PHP transaction to retain applications and control runtime replacement under a persistent Apache mask.' >&2
+    else
+      cat "$directory/apache.remove.rejection" >&2
       echo "dss:error: Apache/PHP removal plan was rejected; only approved removals and checked existing-package upgrades are allowed. Review $directory/remove.plan, $directory/apache.allowed-removals and $directory/install.plan before retrying." >&2
       return 1
-    }
+    fi
   fi
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --download-only --reinstall install "${arguments[@]}") || return 1
   : > "$directory/started" || return 1
@@ -2573,15 +3215,19 @@ function upgrade_migrate_php_packages() {
     }
   fi
   echo "dss:stage: Updating installed PHP packages to the distribution's default PHP version ($default); configs/inventory: $directory" >&2
-  if [ -f "$directory/apache.handoff" ] && [ "${#handoff_removals[@]}" -gt 0 ]; then
+  if [ -f "$directory/apache.handoff" ] && [ "${#handoff_removals[@]}" -gt 0 ] && ! $apache_combined; then
     (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false remove "${handoff_removals[@]}") || return 1
     # Removing the old handler can also remove its no-conffile PHP metapackage.
     packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
     listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
-    arguments=("${installs[@]}")
+    arguments=("${installs[@]}" "${t64_installs[@]}")
     [ -z "$apache" ] || arguments+=("$apache")
     while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done <<< "$listed"
     while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done < "$directory/apache.excluded"
+  fi
+  if $apache_combined && ! upgrade_php_apache_combined_guard_is_active "$directory"; then
+    echo 'dss:error: Combined PHP transaction requires a verified persistent Apache mask and inactive service; package changes stopped.' >&2
+    return 1
   fi
   (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --no-download --reinstall install "${arguments[@]}") || return 1
   for package in "${installs[@]}" "$apache"; do
@@ -3273,7 +3919,7 @@ function upgrade_finish_run() {
   fi
   if [ -f /etc/redhat-release ]; then rpm_packages_finish_run "$@"; return $?; fi
   local action_status=$1 logfile=$2 baseline='' services=2 web_failed=false status category state detail reason audit='' plan=''
-  local findings='' web_complete=false
+  local findings='' web_complete=false comparison_status
   local release='not verified' packages='not verified' cleanup='' php_removals='' service_summary='unknown' package_verified=false
   local directory=${DR_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0 autoremove_skipped=''
   local none=false obsolete_none=false cleanup_done=false missing_provenance=false cleanup_failed=false cleanup_deferred=false
@@ -3299,7 +3945,12 @@ function upgrade_finish_run() {
   if $package_verified; then
     if audit=$(LC_ALL=C dpkg --audit 2>&1) && [ -z "$audit" ] &&
         plan=$(LC_ALL=C apt-get -s dist-upgrade 2>&1) &&
-        awk '/^(Inst|Remv|Purg|Conf) / { bad=1 } END { exit bad }' <<< "$plan"; then :
+        awk '/^(Inst|Remv|Purg|Conf) / { bad=1 } END { exit bad }' <<< "$plan"; then
+      # Keep the operation's existing completion/exit policy. Recovery wording also
+      # requires a complete zero-work summary, including packages held back by APT.
+      if is_complete_package_plan <<< "$plan"; then
+        echo 'dss:trace: Package recovery health: verified.' >&2
+      else echo 'dss:trace: Package recovery health: unverified.' >&2; fi
     else
       [ -z "$audit$plan" ] || printf '%s\n' "$audit" "$plan" >&2
       echo 'dss:error: Final package state is incomplete or could not be verified; review package repair and the detailed log before continuing.' >&2
@@ -3376,7 +4027,14 @@ function upgrade_finish_run() {
   fi
   printf 'dss:stage: Cleanup: %s.\n' "${cleanup:-not run (no release transition reached cleanup in this run)}" >&2
   # Inventory changes are observations; package/service checks determine operational success.
-  manifest_compare_baseline "$baseline" || :
+  comparison_status=0
+  manifest_compare_baseline "$baseline" || comparison_status=$?
+  # Application inventory can be excluded or unavailable. Replaced system
+  # conffiles still need a path-only review under the approved config scope.
+  if [ "$comparison_status" -eq 2 ] && [ -n "$baseline" ]; then
+    print_pkg_to_modified_diff review "$baseline" ||
+      echo 'dss:warn: Configuration replacement review is incomplete; inspect the private change report before handoff.' >&2
+  fi
   printf 'dss:stage: Detailed run log: %s\n' "$logfile" >&2
   return "$status"
 }
@@ -3658,6 +4316,8 @@ function upgrade_output_crossgrade_release() {
   case "$enabled" in true|false) :;; *) echo 'dss:error: Internal crossgrade permission must be true or false.' >&2; return 1;; esac
   case "$family" in
     debian) releases=$ALL_DEBIAN; boundary=bookworm;;
+    # Ubuntu dropped i386 hosts in 19.10; convert on the preceding LTS.
+    # https://documentation.ubuntu.com/release-notes/20.04/#upgrades-on-i386
     ubuntu) releases=$ALL_UBUNTU; boundary=bionic;;
     *) return 0;;
   esac
@@ -4360,6 +5020,26 @@ function usrmerge_is_complete() {
   done
 }
 
+# A package name alone does not establish which copy is safe to retain.
+# Require unchanged package bytes and root-controlled regular files on both sides.
+function usrmerge_collision_is_repairable() {
+  local source=$1 target=$2 owner=$3 current status origin file metadata uid mode
+  [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$target" ] && [ ! -L "$target" ] || return 1
+  current=$(packages_output_file_owner "$source"); status=$?
+  [ "$status" -eq 1 ] || return 1
+  current=$(packages_output_file_owner "$target") && [ "$current" = "$owner" ] || return 1
+  origin=$(packages_output_file_origin "$target" dpkg) || return 1
+  [ "$origin" = "packaged"$'\t'"$owner" ] || return 1
+  for file in "$source" "$target"; do
+    # stat -c '%u %a': "0 755" -> root, no group/other write bits.
+    metadata=$(stat -c '%u %a' -- "$file") || return 1
+    read -r uid mode <<< "$metadata"
+    [ "$uid" = 0 ] || return 1
+    case "$mode" in ''|*[!0-7]*) return 1;; esac
+    [ "$((8#$mode & 0022))" -eq 0 ] || return 1
+  done
+}
+
 # Tab records: archive/manual, unowned/source path, packaged/destination path, owner/reason.
 # shortcut: inspect top-level /bin and /sbin only; library/nested collisions need manual converter recovery.
 function usrmerge_output_collisions() {
@@ -4387,15 +5067,18 @@ function usrmerge_output_collisions() {
       fi
       left=$(packages_output_file_owner "$source"); left_status=$?
       right=$(packages_output_file_owner "$target"); right_status=$?
-      if [ "$left_status:$right_status" = 1:0 ]; then printf 'archive\t%s\t%s\t%s\n' "$source" "$target" "$right"
-      elif [ "$left_status:$right_status" = 0:1 ]; then printf 'archive\t%s\t%s\t%s\n' "$target" "$source" "$left"
-      else printf 'manual\t%s\t%s\townership ambiguous or neither/existing package-owned copies\n' "$source" "$target"; fi
+      if [ "$left_status:$right_status" = 1:0 ] && usrmerge_collision_is_repairable "$source" "$target" "$right"; then
+        printf 'archive\t%s\t%s\t%s\n' "$source" "$target" "$right"
+      elif [ "$left_status:$right_status" = 0:1 ] && usrmerge_collision_is_repairable "$target" "$source" "$left"; then
+        printf 'archive\t%s\t%s\t%s\n' "$target" "$source" "$left"
+      else printf 'manual\t%s\t%s\tunverified ownership, content or permissions\n' "$source" "$target"; fi
     done
   done
 }
 
 function usrmerge_check_collisions() {
-  local prefer=${DR_PREFER_PACKAGED_USRMERGE_FILES:-false} collisions action source target owner blocked=false
+  local prefer=${DR_PREFER_PACKAGED_USRMERGE_FILES:-true} collisions action source target owner blocked=false
+  case "$prefer" in true|false) :;; *) echo 'dss:error: DR_PREFER_PACKAGED_USRMERGE_FILES must be true or false.' >&2; return 1;; esac
   collisions=$(usrmerge_output_collisions) || return 1
   while IFS=$'\t' read -r action source target owner; do
     [ -n "$action" ] || continue
@@ -4404,7 +5087,7 @@ function usrmerge_check_collisions() {
     else
       echo "dss:error: usrmerge collision: $source and $target ($owner)." >&2
       if [ "$action" = archive ]; then
-        echo 'dss:error: Review the unowned executable; DR_PREFER_PACKAGED_USRMERGE_FILES=true explicitly archives it and keeps the packaged counterpart.' >&2
+        echo 'dss:error: DR_PREFER_PACKAGED_USRMERGE_FILES=false requires manual resolution; true archives the unowned executable and keeps the verified packaged counterpart.' >&2
         usrmerge_preference_needed=true
       fi
       blocked=true
@@ -4429,8 +5112,9 @@ function usrmerge_check_upgrade_path() {
 function usrmerge_archive_collisions() {
 (
   umask 077
-  local collisions=$1 baseline parent directory action source target owner relative current status
+  local collisions=$1 baseline parent directory action source target owner relative
   [ -n "$collisions" ] || return 0
+  [ "${DR_PREFER_PACKAGED_USRMERGE_FILES:-true}" = true ] || return 1
   record_config_state >&2 || return 1
   baseline=$(config_state_output_baseline) || return 1
   parent="$baseline.usrmerge"
@@ -4442,15 +5126,19 @@ function usrmerge_archive_collisions() {
   dpkg-query -W -f='${Package}\t${Architecture}\t${Status}\t${Version}\n' > "$directory/packages.before" || return 1
   while IFS=$'\t' read -r action source target owner; do
     [ "$action" = archive ] || return 1
+    usrmerge_collision_is_repairable "$source" "$target" "$owner" || return 1
     relative=${source#/}
     printf '%s\0' "$relative" >> "$directory/archive-paths" || return 1
+    relative=${target#/}
+    printf '%s\0' "$relative" >> "$directory/archive-paths" || return 1
+    sha256sum -- "$source" "$target" >> "$directory/files.sha256" || return 1
   done <<< "$collisions"
   tar --acls --xattrs -C / -cpf "$directory/files.tar" --null -T "$directory/archive-paths" || return 1
+  # Verify the recoverable copies and reject changes before moving any original.
+  tar --compare --acls --xattrs -C / -f "$directory/files.tar" || return 1
+  sha256sum --check --status "$directory/files.sha256" || return 1
   while IFS=$'\t' read -r action source target owner; do
-    [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$target" ] && [ ! -L "$target" ] || return 1
-    current=$(packages_output_file_owner "$source"); status=$?
-    [ "$status" -eq 1 ] || return 1
-    current=$(packages_output_file_owner "$target") && [ "$current" = "$owner" ] || return 1
+    usrmerge_collision_is_repairable "$source" "$target" "$owner" || return 1
     relative=${source#/}
     mkdir -p -- "$directory/originals/${relative%/*}" || return 1
     mv --no-clobber -- "$source" "$directory/originals/$relative" || return 1
@@ -4476,6 +5164,8 @@ function check_usrmerge() {
   collisions=$(usrmerge_output_collisions) || return 1
   if [ -n "$collisions" ]; then
     usrmerge_archive_collisions "$collisions" || { echo 'dss:error: usrmerge collision backup/move failed; no converter or APT operation attempted. Review the reported backup directory.' >&2; return 1; }
+    collisions=$(usrmerge_output_collisions) || return 1
+    [ -z "$collisions" ] || { echo 'dss:error: New usrmerge collisions appeared; no converter or APT operation attempted. Review the saved attempt before retrying.' >&2; return 1; }
   fi
   if [ -x "/usr/lib/usrmerge/convert-usrmerge" ]; then
     # Retry the packaged converter before APT can configure other packages on a partial merge.
@@ -4527,12 +5217,27 @@ function retain_etc_networking_naming_re_enX0() {
 
 
 # return 0 if a file or two was removed.  e.g. so you can to rm_overwrite_files $tmplog && retry
+function upgrade_database_has_mysql_server() {
+  local records
+  records=$(dpkg-query -W -f='${Package}\t${Status}\n' 2>/dev/null) || return 2
+  # dpkg-query records: "mysql-server-5.0:i386<TAB>deinstall ok config-files"
+  # and "libmariadbclient18<TAB>install ok installed" -> no server.
+  # "mariadb-server-10.5<TAB>install ok half-configured" -> real pending server.
+  printf '%s\n' "$records" | awk -F '\t' '
+    $1 ~ /^(mysql|mariadb)-server(-[0-9]+([.][0-9]+)*)?(:[a-z0-9-]+)?$/ &&
+      $2 ~ / ok (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ { found=1 }
+    END { exit !found }
+  '
+}
+
 function rm_overwrite_files() {
    [  -z "$1" ] && return 1
    [  ! -f "$1" ] && return 1
    local tmplog="$1"
    grep -qF 'dss:error: Cannot capture APT output;' "$tmplog" && return 1
 
+  # Only diagnose real installed/pending servers, never dormant RC data or client libraries.
+  if upgrade_database_has_mysql_server; then
   if egrep -aqi 'mysql_upgrade: [ERROR] .*alter routine command denied to user ' $tmplog; then
     echo "dss:warn: mysql error.  Trying a mysql_upgrade to resolve."
     mysql_upgrade
@@ -4568,6 +5273,7 @@ function rm_overwrite_files() {
   fi
 
 
+  fi
   if egrep -qi "doveconf: Fatal: " "$tmplog"; then
     # e.g. doveconf: Fatal: Error in configuration file /etc/dovecot/dovecot.conf: ssl enabled, but ssl_cert not set
     echo "dss:error: issue with dovecot config.  Resolve (e.g. by removing dovecot for fixing the issue). $(egrep -i "doveconf: Fatal: " "$tmplog")"
@@ -4892,6 +5598,79 @@ function dpkg_install() {
   fi
   [  -f "$tmplog" ] && rm -f "$tmplog"
   return $ret
+}
+
+# Check release prerequisites before any target-package work, including non-PHP hosts.
+# This only plans: a kept-back init provider requires separately reviewed recovery.
+function upgrade_check_target_init_plan() {
+  local target=$1 running selected metadata installed architecture policy candidate rows holds baseline directory status
+  local -a options
+  [[ "$target" =~ ^[a-z][a-z0-9]*$ ]] || return 1
+  check_systemd_install_matches_init || return 1
+  running=$(readlink /proc/1/exe) || return 1
+  running=${running%" (deleted)"}
+  selected=$(readlink -f /sbin/init) || return 1
+  case "$running:$selected" in
+    /lib/systemd/systemd:/lib/systemd/systemd|/lib/systemd/systemd:/usr/lib/systemd/systemd|/usr/lib/systemd/systemd:/lib/systemd/systemd|/usr/lib/systemd/systemd:/usr/lib/systemd/systemd) :;;
+    *) return 0;;
+  esac
+  metadata=$(LC_ALL=C dpkg-query -W -f='${Status}\t${Version}\t${Architecture}\n' systemd) || {
+    echo 'dss:error: Cannot query the installed systemd provider before target package changes.' >&2; return 1;
+  }
+  # dpkg-query: install ok installed<TAB>255.4<TAB>amd64 -> installed255.4/nativeamd64.
+  # A hold is checked independently below; incomplete package states stop preflight.
+  [[ "$metadata" != *$'\n'* ]] || return 1
+  IFS=$'\t' read -r status installed architecture <<< "$metadata"
+  case "$status" in 'install ok installed'|'hold ok installed') :;; *) echo 'dss:error: systemd must be fully configured before target package changes.' >&2; return 1;; esac
+  [[ "$installed" =~ ^[0-9A-Za-z.+:~_-]+$ && "$architecture" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+  policy=$(LC_ALL=C apt-cache policy "systemd:$architecture") || return 1
+  # apt-cache policy: "  Candidate: 259.1-1ubuntu1" -> exactly259.1-1ubuntu1.
+  candidate=$(printf '%s\n' "$policy" | awk '$1 == "Candidate:" { value=$2; count++ } END { if (count == 1) print value; else exit 1 }') || return 1
+  [[ "$candidate" =~ ^[0-9A-Za-z.+:~_-]+$ ]] || { echo 'dss:error: No verified target systemd candidate is available.' >&2; return 1; }
+  dpkg --compare-versions "$candidate" gt "$installed"
+  status=$?
+  case "$status" in 0) :;; 1) return 0;; *) return 1;; esac
+  rows=$(LC_ALL=C apt-cache madison "systemd:$architecture") || return 1
+  # apt-cache madison: "systemd | 259.1-1ubuntu1 | http://archive.ubuntu.com/ubuntu resolute/main amd64 Packages"
+  # -> exact candidate version and archive architecture; dpkg-status-only versions reject.
+  printf '%s\n' "$rows" | awk -F '|' -v version="$candidate" -v architecture="$architecture" -v target="$target" '
+    { gsub(/^[ \t]+|[ \t]+$/, "", $2) }
+    $2 == version && $3 ~ ("[ \t]" target "(-updates|-security|-backports|-proposed)?/[^ \t]+[ \t]+" architecture "[ \t]+Packages[ \t]*$") { found=1 }
+    END { exit !found }
+  ' || { echo 'dss:error: Target systemd candidate has no matching archive record.' >&2; return 1; }
+  holds=$(LC_ALL=C dpkg --get-selections systemd) || return 1
+  # dpkg --get-selections: systemd<TAB>hold -> operator hold; never override it.
+  if ! printf '%s\n' "$holds" | awk -v qualified="systemd:$architecture" '
+    ($1 == "systemd" || $1 == qualified) && NF == 2 { count++; if ($2 != "install") bad=1 }
+    END { exit (count != 1 || bad) }
+  '; then
+    echo 'dss:error: Target systemd upgrade is held or its selection is unknown; review the hold before target package changes.' >&2
+    return 1
+  fi
+  baseline=$(config_state_output_baseline) || return 1
+  directory=$(umask 077; mktemp -d "$baseline.init-$target.XXXXXX") || return 1
+  read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
+  # The existing planner has no PHP inventory dependency; reuse its checked CLI
+  # replay fallback for the complete release plan on every systemd host.
+  if ! upgrade_php_prepare_normal_upgrade_plan "$directory" "${options[@]}"; then
+    echo "dss:error: Cannot verify target init selection; target package changes stopped. Review $directory." >&2
+    return 1
+  fi
+  # apt-get -s: Inst systemd [255.4] (259.1-1ubuntu1 Ubuntu:26.04/resolute [amd64])
+  # -> the installed provider is explicitly upgraded to the checked archive candidate.
+  if awk -v package="systemd:$architecture" -v old="[$installed]" -v target="($candidate" -v arch="[$architecture])" '
+    /^Purg / || /^Remv / { if ($2 == "systemd" || $2 == package) bad=1 }
+    /^Inst / && ($2 == "systemd" || $2 == package) {
+      count++
+      if ($3 != old || $4 != target || index($0,arch) == 0) bad=1
+    }
+    END { exit (count != 1 || bad) }
+  ' "$directory/normal-dist-upgrade.plan"; then return 0; fi
+  (umask 077; LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate install "systemd:$architecture=$candidate") > "$directory/systemd-prerequisite.plan" 2>&1
+  status=$?
+  printf '%s\n' "$status" > "$directory/systemd-prerequisite.status" || return 1
+  echo "dss:error: The target full-upgrade plan retains systemd $installed instead of archive candidate $candidate. Target package changes stopped. Review $directory/systemd-prerequisite.plan (simulation status $status) and its removals/holds/application impact; approve and complete that standard prerequisite separately before retrying." >&2
+  return 1
 }
 
 function check_systemd_install_matches_init() {
@@ -6647,6 +7426,11 @@ function upgrade_cleanup_output_safe_package() {
     fi
   fi
   while IFS= read -r file; do
+    # dpkg-query -L dnsutils: /usr/bin/dig -> preserve this DNS capability,
+    # even when its package name differs from the protected bind9* family.
+    case "$file" in /bin/dig|/bin/host|/bin/nslookup|/usr/bin/dig|/usr/bin/host|/usr/bin/nslookup)
+      echo "dss:warn: Preserving $package because it supplies DNS diagnostic client $file." >&2; return 3;;
+    esac
     case "$file" in /etc/init.d/?*|/etc/init/?*|/etc/cron*|/etc/systemd/system/?*|/etc/systemd/user/?*|/lib/systemd/system/?*|/lib/systemd/user/?*|/usr/lib/systemd/system/?*|/usr/lib/systemd/user/?*|/etc/network/?*|/etc/netplan/?*|/etc/NetworkManager/?*|/etc/kernel/?*|/boot/?*|/var/lib/?*|/var/spool/?*|/srv/?*|/home/?*|/var/www/?*)
       echo "dss:warn: Preserving $package because it owns service/data path $file." >&2; return 3;;
     esac
@@ -6663,6 +7447,21 @@ function upgrade_cleanup_record() {
   [ ! -e "$file" ] || [ -f "$file" ] || return 1
   [ "$#" -gt 0 ] || return 0
   (umask 077; printf '%s\t%s\t%s\t%s\n' "$1" "$2" "${3:--}" "${4:-}" >> "$file")
+}
+
+# APT status 100 can represent dependency conflicts or index/access failures.
+# Recognize only fixed resolver diagnostics; unrelated errors remain fatal.
+function upgrade_cleanup_plan_has_dependency_conflict() {
+  # LC_ALL=C apt-get --simulate: E: Error, pkgProblemResolver::Resolve generated breaks, this may be caused by held packages.
+  # This permits protected-subset planning; E: Could not open lock file does not.
+  awk '
+    /^E:/ {
+      if ($0 == "E: Error, pkgProblemResolver::Resolve generated breaks, this may be caused by held packages." ||
+          $0 == "E: Unable to correct problems, you have held broken packages.") found=1
+      else bad=1
+    }
+    END { exit !(found && !bad) }
+  ' "$1"
 }
 
 function upgrade_remove_retired_packages() {
@@ -6767,7 +7566,22 @@ function upgrade_remove_retired_packages() {
     selected=()
     rejection=
     LC_ALL=C apt-get "${options[@]}" "${planning_options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
-      -o APT::Get::AutomaticRemove="$planning_automatic" --simulate remove "${planning_packages[@]}" > "$plan" 2>&1 || return 1
+      -o APT::Get::AutomaticRemove="$planning_automatic" --simulate remove "${planning_packages[@]}" > "$plan" 2>&1
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      cat "$plan" >&2
+      if [ "$status" -eq 100 ] && upgrade_cleanup_plan_has_dependency_conflict "$plan"; then
+        if $direct_plan; then
+          echo "dss:warn: Direct obsolete cleanup conflicts with retained package dependencies (APT status $status); trying a protected subset. Review $plan." >&2
+          continue
+        fi
+        upgrade_cleanup_record obsolete deferred - 'protected dependency conflict; preserving retained packages and their dependencies' || return 1
+        echo "dss:warn: Obsolete cleanup deferred: protected dependency conflict (APT status $status); no cleanup attempted. Review $plan." >&2
+        return 0
+      fi
+      echo "dss:error: Obsolete cleanup simulation failed (APT status $status); no cleanup attempted. Review $plan." >&2
+      return 1
+    fi
     if removals=$(upgrade_cleanup_output_removals "$plan" "$allowed" "$native"); then :
     else
       status=$?
@@ -6953,7 +7767,7 @@ function upgrade_autoremove_packages() {
 )
 }
 
-function apt_packages_print_review() {
+function apt_packages_output_review() {
 (
   [ -f /etc/debian_version ] || return 0
   umask 077
@@ -6983,6 +7797,13 @@ function apt_packages_print_review() {
   fi
   apt_packages_output_classifications "$directory/status" "$native" "$directory/available" "$directory/previous" "$directory/current" \
     > "$directory/classifications" || return 1
+  cat -- "$directory/classifications"
+)
+}
+
+function apt_packages_print_review() {
+  local records
+  records=$(apt_packages_output_review) || return 1
   awk -F '\t' '
     $4 == "obsolete" || $4 == "unavailable" {
       print "dss:warn: Installed package " $1 ":" $2 " (" $3 ") has no versions in active APT indexes. Classification: " $4 ". " $5 ". Review manually and migrate if needed; package preserved."
@@ -6990,8 +7811,50 @@ function apt_packages_print_review() {
     $4 == "transitional" {
       print "dss:info: Transitional package " $1 ":" $2 " (" $3 "). " $5 "; package preserved."
     }
-  ' "$directory/classifications"
-)
+  ' <<< "$records"
+}
+
+# Reuse release-hop cleanup, never the broad apt-show-versions removal helper.
+# Only the recorded transition ending at the current release supplies provenance.
+function upgrade_cleanup_deprecated_packages() {
+  local current family baseline directory from name found=false audit
+  local DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK=false apt_sources_transition_target=''
+  [ -f /etc/debian_version ] || { echo 'dss:error: Guarded deprecated-package cleanup requires APT/dpkg.' >&2; return 1; }
+  current=$(distro_output_codename) || return 1
+  case " $ALL_DEBIAN " in
+    *" $current "*) family=debian;;
+    *) case " $ALL_UBUNTU " in
+      *" $current "*) family=ubuntu;;
+      *) echo 'dss:error: Unknown distro; no cleanup attempted.' >&2; return 1;;
+    esac;;
+  esac
+  audit=$(LC_ALL=C dpkg --audit 2>&1) || return 1
+  [ -z "$audit" ] || { echo 'dss:error: Incomplete package work; finish repair before cleanup.' >&2; return 1; }
+  apt_sources_check_releases_and_vendors || return 1
+  apt_get_update 'before guarded package cleanup' || return $?
+  if baseline=$(config_state_output_baseline); then
+    for directory in "$baseline.obsolete-packages/$family-"*"-to-$current"; do
+      [ -d "$directory" ] && [ ! -L "$directory" ] && [ -f "$directory/prepared" ] || continue
+      name=${directory##*/}; from=${name#"$family-"}; from=${from%"-to-$current"}
+      # Directory "debian-bookworm-to-trixie" -> from=bookworm;
+      # empty, equal or non-release tokens cannot select a cleanup transition.
+      case "$from" in ''|*[!a-z0-9]*) return 1;; esac
+      [ "$from" != "$current" ] || return 1
+      if [ "$family" = debian ]; then
+        case " $ALL_DEBIAN " in *" $from "*) :;; *) return 1;; esac
+      else
+        case " $ALL_UBUNTU " in *" $from "*) :;; *) return 1;; esac
+      fi
+      upgrade_remove_retired_packages "$family" "$from" "$current" || return $?
+      found=true
+    done
+  fi
+  if ! $found; then
+    echo 'dss:warn: No recorded transition to this release; unknown-origin obsolete packages are preserved.' >&2
+  fi
+  upgrade_autoremove_packages || return $?
+  apt_packages_print_review || return 1
+  echo 'dss:info: Guarded cleanup finished without purging configs. Review retained packages and residual configuration separately; custom software use is not proven by APT dependencies.' >&2
 }
 
 function print_no_available_versions() {
@@ -7144,47 +8007,9 @@ function tweak_broken_configs() {
   # => mkdir /var/run/sshd
   # FIXME: https://wiki.debian.org/ReleaseGoals/RunDirectory
   # => do we need to if -d /var/run; then mv -f /var/run/* /run/; rm -rf /var/run; ln -s /run /var/run; fi
-  while true; do
-    # not debian-ish
-    if ! command -v dpkg >/dev/null 2>&1; then break; fi
-
-    # Install the server package for its service and upgrade scripts as well as core binaries.
-    if dpkg -l | egrep -qai '^ii[[:space:]]+(mysql|mariadb)-server(-[0-9]+([.][0-9]+)*)?(:[a-z0-9-]+)?[[:space:]]'; then break; fi
-
-    # skip if they never had a mysql server installed.  don't skip if they had an rc=removed,configured
-    # if they had mysql they'll have something like:
-    # rc  mysql-server-5.1                 5.1.73-1   ...
-    if ! dpkg -l | grep -qai '^rc.*mysql-server'; then break; fi
-
-    # if mysql or maria db something is installed, quit here.
-    # replaced by check above for ii.*mysql-server
-    # and otherwise you'd need to be wary of packages like libdbd-mysql;  mysql-commo; libmariadbclient
-    # if dpkg -l | egrep -v 'mysql-common|libmariad' | egrep -qai '^ii.*mysql-|^ii.*mariadb'; then break; fi
-
-    # no mysql conf dir, quit
-    if [ ! -d /etc/mysql ]; then break; fi
-
-    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:pre:" $0}'
-    local dbpkg=
-    local dbpkgret=0
-    if dpkg -l | egrep ii | egrep -qai 'mariadb'; then
-      dbpkg=mariadb-server
-    elif dpkg -l | egrep ii | egrep -qai 'mysql.*server'; then
-      dbpkg=mysql-server
-    fi
-    if [ ! -z "$dbpkg" ]; then
-      echo "dss:stage: Restoring missing database server package $dbpkg from the current release"
-      apt_get_install $dbpkg
-      dbpkgret=$?
-      if [ $dbpkgret -ne 0 ]; then
-        apt_get_install default-mysql-server
-        dbpkgret=$?
-      fi
-    fi
-    dpkg -l | egrep -i 'mysql|mariadb' | awk '{print "dss:mysqlrelatedpackages:post:" $0}'
-    [ "$dbpkgret" -eq 0 ] || return "$dbpkgret"
-    break
-  done
+  # Removed/configuration-only server records and installed client libraries do
+  # not establish a database workload. Never recreate a server from those clues;
+  # missing-server recovery needs the approved package/service provenance.
 
   #Failed because this line in /etc/mysql/my.cnf.migrated
   #log_slow_queries      = /var/log/mysql/mysql-slow.log
@@ -7193,7 +8018,7 @@ function tweak_broken_configs() {
   #slow_query_log_file             = /var/log/mysql/mysql-slow.log
   #find /var/log -type f | xargs --no-run-if-empty grep log_slow | grep ERROR
   #/var/log/daemon.log:Apr  6 19:14:44 examplehost mysqld_safe[13273]: 2020-04-06 19:14:44 3079187200 [ERROR] /usr/sbin/mysqld: unknown variable 'log_slow_queries=/var/log/mysql/mysql-slow.log'
-  if [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
+  if upgrade_database_has_mysql_server && [ -f /var/log/daemon.log ] && grep -qai "unknown variable 'log_slow" /var/log/daemon.log; then
     echo "dss:info: Disabling log_slow settings, they are now slow_query_log"
     [ -d /etc/mysql ] && for file in $(find /etc/mysql/ -type f | xargs --no-run-if-empty grep -l '^log_slow'); do
       sed -i 's/^log_slow/#log_slow/' "$file" || return $?
@@ -7227,7 +8052,13 @@ exit 0' > "$i" || return 1
     # dpkg -l | grep '/dev'
     # ii  makedev                          2.3.1-93                       all          creates device files in /dev
     # rc  udev                             232-25+deb9u1                  i386         /dev/ and hotplug management daemon
-    if dpkg -l | grep -qai '^ii.*udev-'; then break; fi
+    local udev_state udev_status
+    if udev_state=$(dpkg-query -W -f='${Status}' udev 2>/dev/null); then
+      case "$udev_state" in 'install ok installed'|'hold ok installed') break;; esac
+    else
+      udev_status=$?
+      [ "$udev_status" -eq 1 ] || return "$udev_status"
+    fi
 
     apt_get_install udev
     ret=$?
@@ -7298,6 +8129,7 @@ function upgrade_prepare_php_source_retry() {
   if ! $old_present; then upgrade_target_sources_selected=true; fi
   apt_get_update "with $target sources already present" || return 1
   record_config_state || return 1
+  upgrade_check_target_init_plan "$target" || return 1
   apt_get_f_install "before resuming package work on $target" || return 1
   apt_get_install dpkg || return 1
   upgrade_migrate_php_packages "$target"
@@ -7379,6 +8211,7 @@ fi
 if ! $upgrade_target_sources_selected; then
   apt_sources_upgrade debian "$old_distro" "$new_distro" || return 1
   apt_get_update "after switching sources to $new_distro" || return 1
+  upgrade_check_target_init_plan "$new_distro" || return 1
   if [ "$old_distro:$new_distro" = etch:lenny ]; then
     # Upgrade APT itself before asking Etch's resolver to perform Lenny's full upgrade.
     apt_get_install apt || return 1
@@ -7463,7 +8296,10 @@ function print_pkg_to_modified_diff() {
       '') continue;;
       *) echo 'dss:warn: Unrecognized package conffile metadata; configuration verification is incomplete.' >&2; report_status=1; continue;;
     esac
-    if [ "$mode" = review ]; then case "$package_status" in *' ok installed') :;; *) continue;; esac; fi
+    # dpkg-query can return both installed amd64 and removed i386 records for
+    # one path. "Package: libpam-modules:i386<TAB>deinstall ok config-files"
+    # carries an obsolete digest, not an active configuration to compare.
+    case "$package_status" in *' ok installed') :;; *) continue;; esac
     # Retired conffiles are not shipped, including newconffile remove-on-upgrade records.
     # " /etc/ssh/sshd_config 0123456789abcdef0123456789abcdef" -> absolute path plus trailing MD5.
     # A trailing obsolete or remove-on-upgrade marker skips the record before checksum extraction.
@@ -7545,7 +8381,7 @@ function print_minimal_config_diff() {
 }
 function print_config_state_changes() {
   prepare_output_dir
-  local availability_ret=0 report_status now fromfile=$1 file files post_recorded=false
+  local availability_ret=0 report_status now fromfile=$1 file files post_recorded=false comparison_status postfile
   local -a pipeline_status=()
   apt_packages_print_review || availability_ret=$?
   if ! now=$(date +%s); then
@@ -7553,28 +8389,37 @@ function print_config_state_changes() {
     [ "$availability_ret" -ne 0 ] || availability_ret=1
     return "$availability_ret"
   fi
-  if record_config_state "/root/distrorejuveinfo/postupgrade.dpkg.$now"; then post_recorded=true
+  postfile="/root/distrorejuveinfo/postupgrade.dpkg.$now"
+  [ -z "${DR_CONFIG_BASELINE:-}" ] || postfile="${DR_CONFIG_BASELINE%/*}/postupgrade.dpkg.$now.$$"
+  if record_config_state "$postfile"; then post_recorded=true
   else
     echo 'dss:error: Cannot record current configuration state; comparison is incomplete.' >&2
     [ "$availability_ret" -ne 0 ] || availability_ret=1
   fi
   if [ -z "$fromfile" ]; then fromfile=$(config_state_output_baseline) || fromfile=; fi
   if [ -z "$fromfile" ] || [ ! -f "$fromfile" ]; then
-    echo 'dss:warn: No recent pre-upgrade baseline; before/after comparison is unavailable.' >&2
+    echo 'dss:warn: No usable pre-upgrade baseline; before/after comparison is unavailable.' >&2
+    [ -z "${DR_CONFIG_BASELINE:-}" ] || availability_ret=1
     return "$availability_ret"
   fi
   print_incompatible_package_changes "$fromfile"
   print_crossgrade_obsolete_package_changes "$fromfile" || { report_status=$?; [ "$availability_ret" -ne 0 ] || availability_ret=$report_status; }
   echo 'dss:info: Configuration changes are review observations; changed or missing files may be intentional. Sidecars are compared only when already present.'
   if $post_recorded; then
-    print_minimal_config_diff "$fromfile" "/root/distrorejuveinfo/postupgrade.dpkg.$now" | awk '{print "dss:configdiff:statechanges:" $0}'
+    print_minimal_config_diff "$fromfile" "$postfile" | awk '{print "dss:configdiff:statechanges:" $0}'
     pipeline_status=("${PIPESTATUS[@]}")
     if [ "${pipeline_status[0]}" -gt 1 ] || [ "${pipeline_status[1]}" -ne 0 ]; then
       echo 'dss:error: Cannot compare original and current configuration state.' >&2
       [ "$availability_ret" -ne 0 ] || availability_ret=1
     fi
   fi
-  manifest_compare_baseline "$fromfile" || :
+  comparison_status=0
+  manifest_compare_baseline "$fromfile" || comparison_status=$?
+  if [ "$comparison_status" -eq 2 ]; then
+    print_pkg_to_modified_diff review "$fromfile" || {
+      report_status=$?; [ "$availability_ret" -ne 0 ] || availability_ret=$report_status;
+    }
+  fi
   print_pkg_to_modified_diff '' || { report_status=$?; [ "$availability_ret" -ne 0 ] || availability_ret=$report_status; }
   if [ -d /etc/apache2/sites-available ] && [ -f /etc/apache2/apache2.conf ] && grep -qai 'Include.*sites-.*conf' /etc/apache2/apache2.conf; then
     if files=$(find /etc/apache2/sites-available -type f ! -name '*.conf' ! -name '*dpkg-*'); then
@@ -7595,8 +8440,20 @@ function print_config_state_changes() {
 # Keep purge reminders attached to the same oldest recent baseline used for configuration diffs.
 function config_state_output_baseline() {
   local file baseline='' days=${DR_CONFIGURATION_HISTORY_DAYS:-7}
+  if [ -n "${DR_CONFIG_BASELINE:-}" ]; then
+    case "$DR_CONFIG_BASELINE" in /*) :;; *) echo 'dss:error: DR_CONFIG_BASELINE must be an absolute file path.' >&2; return 1;; esac
+    if [ ! -e "$DR_CONFIG_BASELINE.incomplete" ] && [ ! -L "$DR_CONFIG_BASELINE.incomplete" ] &&
+        [ ! -L "$DR_CONFIG_BASELINE" ] && [ -s "$DR_CONFIG_BASELINE" ] && [ -f "$DR_CONFIG_BASELINE" ] && [ -r "$DR_CONFIG_BASELINE" ]; then
+      printf '%s\n' "$DR_CONFIG_BASELINE"
+      return 0
+    fi
+    echo 'dss:warn: Pinned configuration baseline unavailable; no global history fallback selected.' >&2
+    return 1
+  fi
   for file in "/root/distrorejuveinfo/"*preupgrade* "/root/deghostinfo/"*preupgrade*; do
-    [ -f "$file" ] || continue
+    case "$file" in *.incomplete) continue;; esac
+    [ ! -e "$file.incomplete" ] && [ ! -L "$file.incomplete" ] || continue
+    [ -f "$file" ] && [ -s "$file" ] || continue
     [ -n "$(find "$file" -maxdepth 0 -mtime "-$days" -print)" ] || continue
     if [ -z "$baseline" ] || [ "$file" -ot "$baseline" ]; then baseline=$file; fi
   done
@@ -7637,49 +8494,146 @@ function print_incompatible_package_changes() {
   done
 }
 
+# Preserve the existing comparison format with either native listener tool.
+function config_state_output_listeners() {
+  local output backend
+  if command -v netstat >/dev/null 2>&1; then
+    output=$(netstat -ntpl) || return 1
+    backend=netstat
+  elif command -v ss >/dev/null 2>&1; then
+    output=$(ss -lntp) || return 1
+    backend=ss
+  else
+    echo 'dss:error: Listener snapshot unavailable: neither netstat nor ss is installed.' >&2
+    return 1
+  fi
+  # netstat -ntpl: tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN 42/sshd
+  # ss -lntp: LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=42,fd=3))
+  # Both retain the legacy record: Listen ports: :::22 sshd
+  (set -o pipefail
+    printf '%s\n' "$output" | LC_ALL=C awk -v backend="$backend" '
+      backend == "netstat" && /LISTEN/ {
+        address=$4; program=$7; sub(/^[0-9]+\//, "", program)
+      }
+      backend == "ss" && $1 == "LISTEN" {
+        address=$4; program="-"
+        if (match($0, /"[^"]+"/)) program=substr($0,RSTART+1,RLENGTH-2)
+      }
+      address != "" {
+        sub(/^0[.]0[.]0[.]0:/, ":::", address)
+        print "Listen ports: " address " " program
+        address=""
+      }
+    ' | sort -k 3 | uniq
+  )
+}
+
+# Required producers and writes must succeed; no matches are normal empty sections.
+# Scoped pipefail stays inside this capture and does not change upgrade control flow.
+function config_state_capture() {
+(
+  set -o pipefail
+  local file=$1 files now config_file
+  local -a config_files=()
+  now=$(date) || return 1
+  # find /etc -type f: /etc/example.conf.dpkg-old -> configfiles entry;
+  # /etc/example.conf -> no sidecar entry. Keep the established suffix matches.
+  files=$(find /etc -type f | awk '/.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|[.]rpmnew|[.]rpmsave/' | sort) || return 1
+  printf 'Date: %s\n' "$now" >> "$file" || return 1
+  if [ -n "$files" ]; then
+    while IFS= read -r config_file; do config_files+=("$config_file"); done <<< "$files"
+    ls -lrt -- "${config_files[@]}" | awk '{print "configfiles:" $0}' >> "$file" || return 1
+  fi
+  printf 'Listening ports:\n\n' >> "$file" || return 1
+  config_state_output_listeners >> "$file" || return 1
+  printf 'Apache vhosts:\n\n' >> "$file" || return 1
+  print_distro_info >> "$file" || return 1
+  if [ -x /usr/sbin/apache2ctl ]; then
+    /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> "$file" || return 1
+  fi
+  printf '\nRunning processes:\n\n' >> "$file" || return 1
+  ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' |
+    awk '!/^process: \[|COMMAND|init/' | sort | uniq >> "$file" || return 1
+  if [ -x /usr/bin/dpkg ]; then
+    printf 'Installed packages:\n' >> "$file" || return 1
+    # dpkg -l: ii  bash:amd64  5.2-2  amd64  shell -> installed: bash.
+    # No installed packages is a valid empty section, unlike a failed dpkg query.
+    dpkg -l | awk '/^ii/ { name=$2; sub(/:.*/, "", name); if (name !~ /^lib/) print "installed: " name }' |
+      sort >> "$file" || return 1
+  fi
+  return 0
+)
+}
+
 function record_config_state() {
   prepare_output_dir
-  local file=$1
+  local file=$1 pinned=false original=false parent
+  [ -n "$file" ] || file=${DR_CONFIG_BASELINE:-}
+  if [ -n "${DR_CONFIG_BASELINE:-}" ] && [ "$file" = "$DR_CONFIG_BASELINE" ]; then
+    pinned=true
+    case "$file" in /*) :;; *) echo 'dss:error: DR_CONFIG_BASELINE must be an absolute file path.' >&2; return 1;; esac
+    # The operator prepares a private, source-local parent directory for this job.
+    # Refuse empty, linked or non-regular existing files rather than replacing them.
+    if [ -e "$file" ] || [ -L "$file" ] || [ -e "$file.incomplete" ] || [ -L "$file.incomplete" ]; then
+      config_state_output_baseline >/dev/null
+      return $?
+    fi
+    parent=${file%/*}; parent=${parent:-/}
+    [ -d "$parent" ] || { echo 'dss:error: Prepare the pinned baseline parent directory before collection.' >&2; return 1; }
+  fi
   if [ -z "$file" ]; then
     if ! file=$(config_state_output_baseline); then
       file="/root/distrorejuveinfo/preupgrade.dpkg.$$"
       [ -e "$file" ] && file="$file.$(date +%s)"
     fi
   fi
-  # don't overwrite the preupgrade file
-  echo "$file" | grep -qai preupgrade && [ -f "$file" ] && return 0
+  # Do not overwrite an existing original, including a failed marked attempt.
+  case "${file##*/}" in *preupgrade*)
+    original=true
+    [ ! -L "$file" ] && [ ! -e "$file.incomplete" ] && [ ! -L "$file.incomplete" ] || return 1
+    if [ -f "$file" ]; then [ -s "$file" ]; return $?; fi;;
+  esac
+  if $pinned; then original=true; fi
   echo "dss:trace:record_config_state:$file"
-  local files=$(find "/etc" -type f | egrep '.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|\.rpmnew|.rpmsave' | sort)
-  > "$file" || return 1
-  # conf files
-  echo "Date: $(date)" >> "$file"
-  [ ! -z "$files" ] && ls -lrt $files | awk '{print "configfiles:" $0}' >> "$file"
-  echo "Listening ports:" >> "$file"
-  echo "" >> "$file"
-  # listening ports
-  # Listen ports: 0.0.0.0:995 dovecot
-  netstat -ntpl | grep LISTEN | awk '{print "Listen ports: " $4 " " $7}' | sed 's/ [0-9]*\// /' | sed 's/0.0.0.0:/:::/' | sort -k 3 | uniq >> "$file"
-  echo "Apache vhosts:" >> "$file"
-  echo "" >> "$file"
-  print_distro_info >> "$file"
-  # vhosts
-  [ -x /usr/sbin/apache2ctl ] && /usr/sbin/apache2ctl -S 2>&1 | awk '{print "ApacheStatus: " $0}' >> "$file"
-  echo "" >> "$file"
-  echo "Running processes:" >> "$file"
-  echo "" >> "$file"
-  ps ax | awk '{print "process: " $5 " " $6 " " $7 " " $8 " " $9}' | egrep -v '^process: \[|COMMAND|init' | sort | uniq >> "$file"
-
-  [  -x /usr/bin/dpkg ] && echo "Installed packages:" >> "$file" && dpkg -l | grep '^ii' | awk '{print $2}' | sed 's/:.*//' | sort | grep -v '^lib' | awk '{ print "installed: " $0 }' >> "$file"
-  case "${file##*/}" in preupgrade.dpkg.*)
+  if $original; then
+    # A failed required snapshot keeps its marker and cannot be accepted on retry.
+    # Reserve only this new baseline; a concurrent collection cannot truncate it.
+    (umask 077; set -o noclobber; : > "$file.incomplete" && : > "$file" &&
+      chmod u=rw,go= -- "$file" "$file.incomplete") || return 1
+  else
+    (umask 077; : > "$file" && chmod u=rw,go= -- "$file") || return 1
+  fi
+  if ! config_state_capture "$file"; then
+    echo 'dss:error: Required configuration snapshot failed; preserve this attempt and collect a usable original before package changes.' >&2
+    return 1
+  fi
+  if $pinned || [[ "${file##*/}" = preupgrade.dpkg.* ]]; then
     # Capture active web roles before package work, independently of the optional manifest.
     (umask 077; mkdir -m 700 -- "$file.php-runtime" && upgrade_php_runtime_snapshot "$file.php-runtime") || return 1
     (umask 077; mkdir -m 700 -- "$file.services" && upgrade_services_snapshot "$file.services") || return 1
     # Save original site/runtime relationships once, without DNS or mail-store traversal.
     if ! manifest_capture "$file.applications"; then
       echo "dss:warn: Original application manifest was not completed; review $file.applications before relying on it." >&2
-    fi;;
-  esac
+    fi
+  fi
+  if $original; then rm -f -- "$file.incomplete" || return 1; fi
   return 0
+}
+
+# APT can return zero while retaining old indexes after a failed refresh.
+function apt_get_update_has_failed_indexes() {
+  # LC_ALL=C apt-get update:
+  # Err:1 http://security.ubuntu.com/ubuntu resolute-security InRelease
+  #   Temporary failure resolving 'security.ubuntu.com'
+  # W: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/resolute/InRelease  Temporary failure resolving 'archive.ubuntu.com'
+  # W: Some index files failed to download. They have been ignored, or old ones used instead.
+  # These fail refresh even with exit 0; a legacy-key warning alone does not.
+  LC_ALL=C awk '
+    /^Err:[0-9]+[ \t]/ || /^E:/ ||
+    /^W: Failed to fetch / || /^W: Some index files failed to download[.]/ ||
+    /^W: An error occurred during the signature verification[.]/ { failed=1 }
+    END { exit !failed }
+  ' "$1"
 }
 
 function apt_get_update() {
@@ -7700,13 +8654,27 @@ apt_state_updated=
 apt_state_upgraded=
 apt_state_dist_upgraded=
 tmplog=$(mktemp "tmplog.aptgetupdate.log.XXXXXX") || return 1
-apt-get $APT_GET_INSTALL_OPTIONS update 2>&1 | tee "$tmplog"
+LC_ALL=C apt-get $APT_GET_INSTALL_OPTIONS update 2>&1 | tee "$tmplog"
 update_status=("${PIPESTATUS[@]}")
 ret=${update_status[0]}
+if [ "$ret" -eq 0 ] && apt_get_update_has_failed_indexes "$tmplog"; then
+  ret=1
+  echo 'dss:warn: APT returned success with failed index downloads; retrying refresh before package selection.' >&2
+fi
+# Old APT can exit zero after rejecting an index and retaining stale lists.
+# "W: ... NO_PUBKEY 112695A0E562B32A" is a failed authenticated refresh,
+# even without an exit-100 error; never advance using its unauthenticated packages.
+if [ "${apt_archive_authentication_enabled:-false}" != true ] &&
+    grep -Eq '(^|[[:space:]])(NO_PUBKEY|EXPKEYSIG|REVKEYSIG|BADSIG|KEYEXPIRED)([[:space:]]|$)' "$tmplog"; then ret=100; fi
 
 # E: Release file expired, ignoring http://archive.debian.org/debian/dists/squeeze-lts/Release (invalid since 14d 8h 58min 38s)
 if [ "$ret" -ne 0 ]; then
   local -a release_options=()
+  if ! apt_repair_debian_signing_keys "$tmplog"; then
+    echo 'dss:error: Automatic Debian signing-key repair failed; package authentication remains required.' >&2
+    rm -f -- "$tmplog"
+    return 1
+  fi
   # E: Repository 'URI suite InRelease' changed its 'Suite' value from 'stable' to 'oldstable'
   # Quoted fields 6/8 must age together in EVERY repository, preserving pocket suffixes.
   # https://manpages.debian.org/trixie/apt/apt-get.8.en.html#allow-releaseinfo-change
@@ -7721,9 +8689,13 @@ if [ "$ret" -ne 0 ]; then
     release_options=(-o Acquire::AllowReleaseInfoChange::Suite=true)
   fi
   echo "dss:stage: Retrying index refresh over IPv4 after APT update failed (status $ret)" >&2
-  apt-get $APT_GET_INSTALL_OPTIONS -o Acquire::ForceIPv4=true "${release_options[@]}" update 2>&1 | tee -a "$tmplog"
+  # The outer run log retains both attempts. Inspect only the final refresh for
+  # remaining signature failures and cacheability after a successful key repair.
+  LC_ALL=C apt-get $APT_GET_INSTALL_OPTIONS -o Acquire::ForceIPv4=true "${release_options[@]}" update 2>&1 | tee "$tmplog"
   update_status=("${PIPESTATUS[@]}")
   ret=${update_status[0]}
+  if [ "${apt_archive_authentication_enabled:-false}" != true ] &&
+      grep -Eq '(^|[[:space:]])(NO_PUBKEY|EXPKEYSIG|REVKEYSIG|BADSIG|KEYEXPIRED)([[:space:]]|$)' "$tmplog"; then ret=100; fi
 fi
 if [ "$ret" -eq 0 ] && [ "${update_status[1]}" -ne 0 ]; then
   ret=${update_status[1]}; phase=index_log_capture
@@ -7732,6 +8704,12 @@ fi
 # https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.html#non-free-split
 if egrep -qai "Repository 'Debian bookworm' changed its 'non-free component' value from 'non-free' to 'non-free non-free-firmware'" "$tmplog" && [ -d /etc/apt/apt.conf.d/ ]; then
   echo "dss:info: disabling the warning around non-free/non-free-firmware per /etc/apt/apt.conf.d/no-bookworm-firmware.conf and https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.html#non-free-split" && echo 'APT::Get::Update::SourceListWarnings::NonFreeFirmware "false";' > /etc/apt/apt.conf.d/no-bookworm-firmware.conf
+fi
+
+# Evaluate only the final attempt; its successful refresh supersedes earlier download errors.
+if [ "$ret" -eq 0 ] && apt_get_update_has_failed_indexes "$tmplog"; then
+  ret=1; phase=index_downloads
+  echo 'dss:error: APT index downloads failed; stale indexes cannot authorize package selection.' >&2
 fi
 
 # A stale APT::Default-Release can break package selection even after a good update.
@@ -7770,6 +8748,96 @@ function apt_get_autoremove() {
   apt_get_apply $APT_GET_INSTALL_OPTIONS autoremove
 }
 
+# Return a count only when both configured and available locales are standard.
+# locale.gen/SUPPORTED: "en_US.UTF-8 UTF-8" -> one selection;
+# locale -a: "en_US.utf8" -> that supported name. C/C.utf8/POSIX are built in.
+# An unknown configured pair or available name -> 0 (keep local generation).
+function upgrade_locales_output_standard_count() {
+  local supported=$1 configuration=$2 available=$3
+  LC_ALL=C awk '
+    function normalized(name) { name=tolower(name); gsub(/-/, "", name); return name }
+    FILENAME == ARGV[1] {
+      if (NF == 2) {
+        supported[$1 SUBSEP $2]=1; names[normalized($1)]=1
+        # SUPPORTED "de_DE@euro ISO-8859-15" also permits the locale -a
+        # codeset alias "de_DE.iso885915@euro".
+        base=$1; modifier=""
+        if (match(base, /@.*/)) { modifier=substr(base, RSTART); base=substr(base, 1, RSTART-1) }
+        if (base !~ /[.]/) names[normalized(base "." $2 modifier)]=1
+      }
+      next
+    }
+    FILENAME == ARGV[2] {
+      sub(/[ \t]*#.*/, "")
+      if (!NF) next
+      if (NF != 2 || !(($1 SUBSEP $2) in supported)) { custom=1; next }
+      if (!selected[$1 SUBSEP $2]++) count++
+      next
+    }
+    {
+      name=normalized($0)
+      if (name != "c" && name != "c.utf8" && name != "posix" && !(name in names)) custom=1
+    }
+    END { print custom ? 0 : count+0 }
+  ' "$supported" "$configuration" /dev/stdin <<< "$available"
+}
+
+# Install before dpkg can configure locales during a package/release upgrade.
+# Small selections retain generation; locales-all otherwise adds about 200 MiB.
+function upgrade_prepare_debian_locales() {
+  local enabled=${DR_PRECOMPILED_LOCALES:-true} current state status available count native plan before after
+  local -a options=()
+  case "$enabled" in
+    false) return 0;; true) :;;
+    *) echo 'dss:error: DR_PRECOMPILED_LOCALES must be true or false.' >&2; return 1;;
+  esac
+  current=$(distro_output_codename) || return 1
+  case " $ALL_DEBIAN " in *" $current "*) :;; *) return 0;; esac
+  [ -z "${I18NPATH:-}${LOCPATH:-}" ] || return 0
+  [ -r /etc/locale.gen ] && [ -r /usr/share/i18n/SUPPORTED ] || return 0
+  [ ! -s /usr/local/share/i18n/SUPPORTED ] || return 0
+  if state=$(dpkg-query -W -f='${Status}' locales-all 2>/dev/null); then
+    case "$state" in
+      *' ok installed'|*' ok unpacked'|*' ok half-configured'|*' ok half-installed'|*' ok triggers-awaited'|*' ok triggers-pending'|hold*) return 0;;
+    esac
+  else status=$?; [ "$status" -eq 1 ] || return "$status"; fi
+  if state=$(dpkg-query -W -f='${Status}' locales 2>/dev/null); then :
+  else status=$?; [ "$status" -eq 1 ] && return 0; return "$status"; fi
+  [ "$state" = 'install ok installed' ] || return 0
+  available=$(LC_ALL=C locale -a) || return 1
+  count=$(upgrade_locales_output_standard_count /usr/share/i18n/SUPPORTED /etc/locale.gen "$available") || return 1
+  [ "$count" -ge 100 ] || return 0
+  # Optional preparation must not use the archive authentication exception.
+  [ "${DR_ALLOW_UNAUTHENTICATED_ARCHIVES:-false}" != true ] || return 0
+  native=$(dpkg --print-architecture) || return 1
+  case "$native" in ''|*[!a-z0-9-]*) return 1;; esac
+  before=$(sha256sum -- /etc/locale.gen) || return 1
+  read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
+  if ! plan=$(LC_ALL=C apt-get "${options[@]}" -o APT::Get::AllowUnauthenticated=false \
+      -o APT::Get::AutomaticRemove=false --no-remove --no-install-recommends --simulate install "locales-all:$native" 2>&1); then
+    echo 'dss:warn: Precompiled locales are unavailable; retaining normal locale generation.' >&2
+    return 0
+  fi
+  # APT simulation: "Inst locales-all (2.31 ... [amd64])" -> allowed.
+  # Permit its locale-data dependency, but no removals or unrelated package work.
+  if ! awk '
+    /^(Remv|Purg) / { bad=1 }
+    /^(Inst|Conf) / { name=$2; sub(/:.*/, "", name); if (name != "locales-all" && name != "libc-l10n") bad=1 }
+    /^Inst locales-all(:[a-z0-9-]+)? / { found=1 }
+    END { exit bad || !found }
+  ' <<< "$plan"; then
+    echo 'dss:warn: Precompiled locale plan requires other package changes; retaining normal locale generation.' >&2
+    return 0
+  fi
+  echo "dss:stage: Installing precompiled Debian locale data for $count configured locales." >&2
+  apt_get_install -o APT::Get::AllowUnauthenticated=false -o APT::Get::AutomaticRemove=false \
+    --no-remove --no-install-recommends "locales-all:$native" || return $?
+  after=$(sha256sum -- /etc/locale.gen) || return 1
+  [ "$before" = "$after" ] || { echo 'dss:error: Locale selection changed during precompiled locale preparation; review /etc/locale.gen.' >&2; return 1; }
+  state=$(dpkg-query -W -f='${Status}' "locales-all:$native") || return 1
+  [ "$state" = 'install ok installed' ] || { echo 'dss:error: Precompiled locale package is not fully installed.' >&2; return 1; }
+}
+
 function apt_get_upgrade() {
   pause_check
   [ ! -f /etc/debian_version ] && return 0
@@ -7792,7 +8860,8 @@ function apt_get_upgrade() {
   apt_state_upgraded=
   apt_state_dist_upgraded=
   echo "dss:trace:apt_get_upgrade"
-  record_config_state
+  record_config_state || return $?
+  upgrade_prepare_debian_locales || return $?
   echo "dss:info: Configuring pending packages before the package upgrade (dpkg --configure -a)." >&2
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
@@ -8016,6 +9085,7 @@ function dist_upgrade_ubuntu_to_latest() {
     upgrade_record_package_origins ubuntu "$current" "$next" || return 1
     apt_sources_upgrade ubuntu "$current" "$next" || return 1
     apt_get_update "after switching sources to $next" || return 1
+    upgrade_check_target_init_plan "$next" || return 1
     if ! is_distro_name_older "$next" xenial; then
       apt_get_install dpkg || return 1
       upgrade_migrate_php_packages "$next" || return 1
@@ -8044,17 +9114,26 @@ function dist_upgrade_ubuntu_to_latest() {
 }
 
 function print_distro_info() {
-if [ -f /etc/redhat-release ]; then
-  local foo="dss:distroinfo: REDHAT $(cat /etc/redhat-release)"
+  local information foo
+  if [ -f /etc/redhat-release ]; then
+    information=$(cat /etc/redhat-release) || return 1
+    [ -n "$information" ] || return 1
+    foo="dss:distroinfo: REDHAT $information"
+  elif [ -x /usr/bin/lsb_release ] || [ -x /bin/lsb_release ]; then
+    information=$(lsb_release -a 2>/dev/null) || return 1
+    # lsb_release -a: Description:	Debian GNU/Linux 12 (bookworm)
+    # -> dss:distroinfo: Description: Debian GNU/Linux 12 (bookworm).
+    information=$(printf '%s\n' "$information" | grep -i description) || return 1
+    foo="dss:distroinfo: $information"
+  elif [ -f /etc/debian_version ]; then
+    information=$(cat /etc/debian_version) || return 1
+    [ -n "$information" ] || return 1
+    foo="dss:distroinfo: DEBIAN $information"
+  else
+    foo='dss:distroinfo: NA'
+  fi
+  # Preserve the established single-line whitespace normalization.
   echo $foo
-elif [ -x /usr/bin/lsb_release ] || [ -x /bin/lsb_release ] ; then
-  local foo="dss:distroinfo: $(lsb_release -a 2>/dev/null | grep -i description)"
-  echo $foo
-elif [ -f /etc/debian_version ]; then
-  local foo="dss:distroinfo: DEBIAN $(cat /etc/debian_version)"
-  echo $foo
-else echo "dss:distroinfo: NA"; fi
-return 0
 }
 
 
@@ -8596,6 +9675,7 @@ if [ -f /etc/debian_version ]; then
   if $php_migration; then
     apt_get_update || return 1
     record_config_state || return 1
+    upgrade_check_target_init_plan "$current" || return 1
     apt_get_install dpkg || return 1
     upgrade_migrate_php_packages "$current" || return 1
   fi
@@ -8672,11 +9752,11 @@ function manifest_output_review_record() {
   local type=$1 key value
   shift
   # Process IDs and counts are transient observations, not migration configuration.
-  case "$type:${2:-}" in security_indicator:*|collection_status:*|probe_status:*|warning:security_*) return 0;; esac
+  case "$type:${2:-}" in security_indicator:*|collection_status:*|collection_scope:*|probe_status:*|website_probe:*|capacity:*|upgrade_directory:*|language_consumer:process_comm|warning:security_*) return 0;; esac
   printf '%s' "$type"
   while [ "$#" -ge 2 ]; do
     key=$1; value=$2; shift 2
-    case "$key" in generated_utc|version_file_modified|date_basis|dns|dns_addresses|dns_reason) continue;; esac
+    case "$key" in generated_utc|version_file_modified|date_basis|dns|dns_addresses|dns_reason|daemon_process_count|query_status) continue;; esac
     printf '\t%s=' "$key"
     manifest_json_string "$value"
   done
@@ -8698,8 +9778,17 @@ function manifest_emit() {
         package:name|package:version|package:architecture|package:package_backend|\
         runtime:kind|runtime:version|runtime:package|runtime:package_version|runtime:version_source|runtime:conditional|\
         application:application|application:version|application:language|application:language_version|application:language_version_source|\
+        application:execution|application:activity|application:activity_basis|\
         website:server|website:port|website:tls|website:certificate_file_present|website:runtime_version|\
         website:runtime_version_source|website:runtime_package|website:dns|website:dns_reason|website:proxy_basis|\
+        website:execution|website:activity|website:activity_basis|\
+        web_asset_root:exists|web_asset_root:symlink|web_asset_root:migration_role|web_asset_root:execution|\
+        web_file:language|web_file:execution|web_file:evidence|\
+        application_context:role|application_context:activity|application_context:execution|application_context:migration_default|\
+        website_handler:server|website_handler:kind|website_handler:language|website_handler:runtime_version|website_handler:runtime_package|website_handler:runtime_version_source|website_handler:activity|website_handler:activity_basis|\
+        website_redirect:server|website_redirect:activity|website_redirect:activity_basis|\
+        web_frontend:server|web_frontend:activity|web_frontend:activity_basis|\
+        lighttpd_site:selector_kind|lighttpd_site:mapping|lighttpd_site:runtime|lighttpd_site:frontend|lighttpd_site:activity|lighttpd_site:activity_basis|\
         mail_storage:size_mib|mail_storage:mailbox_count|mail_storage:size_basis|mail_storage:count_reason|mail_storage:reason|\
         migration_path:kind|migration_path:ownership|migration_path:package|migration_path:verification|\
         migration_mount:filesystem|migration_mount:mounted|hosting_panel:name|hosting_panel:version|\
@@ -8711,7 +9800,7 @@ function manifest_emit() {
         collection_status:core_collectors_failed|collection_status:warning_count|collection_status:completeness) :;;
         website:runtime)
           # An unmatched handler can contain a customer socket path or upstream name.
-          case "$value" in unknown|php-fpm|php_disabled|apache-mod-php|fastcgi_handler_version_unknown|php_handler_version_unknown) :;; *) value='[redacted]';; esac;;
+          case "$value" in unknown|php-fpm|php_disabled|apache-mod-php|fastcgi_handler_version_unknown|php_handler_version_unknown|static_files|cgi|scgi|reverse_proxy) :;; *) value='[redacted]';; esac;;
         *) case "$value" in ''|unknown) :;; *) value='[redacted]';; esac;;
       esac
       public_record+=("$key" "$value")
@@ -8806,6 +9895,7 @@ function manifest_listeners() {
       apache2|httpd) application=Apache ;;
       nginx*) application=nginx ;;
       caddy*) application=Caddy ;;
+      lighttpd*) application=lighttpd ;;
     esac
     case "$port" in
       25|465|587) protocol=smtp ;;
@@ -8822,6 +9912,83 @@ function manifest_listeners() {
   done <<< "$parsed"
 }
 
+# Output process names from kernel status metadata only; do not read cmdline/environ.
+# /proc/553/status metadata (literal tabs):
+# Name:	lighttpd
+# Pid:	553
+# -> lighttpd.
+# A missing/mismatched Pid or unreadable status leaves coverage incomplete.
+function manifest_output_proc_process_names() {
+  local directory file pid line name recorded_pid lines count=0 found=0 started=$SECONDS incomplete=false
+  [ -d "$manifest_root/proc" ] && [ ! -L "$manifest_root/proc" ] || return 1
+  for directory in "$manifest_root"/proc/[0-9]*; do
+    [ -d "$directory" ] || continue
+    pid=${directory##*/}
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    count=$((count+1))
+    if [ "$count" -gt 20000 ] || [ $((SECONDS-started)) -ge 5 ]; then incomplete=true; break; fi
+    file=$directory/status
+    if [ -L "$directory" ] || [ -L "$file" ] || [ ! -f "$file" ] || [ ! -r "$file" ]; then incomplete=true; continue; fi
+    name= recorded_pid= lines=0
+    # Kernel status is line-oriented and tab-delimited. Bound individual reads
+    # too, so an unexpected fixture file cannot bypass the overall time limit.
+    while IFS= read -r -t 1 line; do
+      lines=$((lines+1))
+      if [ "$lines" -gt 64 ] || [ $((SECONDS-started)) -ge 5 ]; then incomplete=true; break; fi
+      case "$line" in
+        Name:$'\t'*) name=${line#*$'\t'};;
+        Pid:$'\t'*) recorded_pid=${line#*$'\t'};;
+      esac
+      [ -z "$name" ] || [ -z "$recorded_pid" ] || break
+    done < "$file"
+    case "$name" in ''|*$'\t'*|*$'\r'*|*$'\n'*) incomplete=true; continue;; esac
+    if [ "$recorded_pid" != "$pid" ] || [ "${#name}" -gt 64 ]; then incomplete=true; continue; fi
+    printf '%s\n' "$name"
+    found=$((found+1))
+  done
+  [ "$found" -gt 0 ] && ! $incomplete
+}
+
+# Validate process names independently of command exit status before inferring services.
+function manifest_process_names() {
+  local snapshot names reason
+  manifest_processes_available=false
+  manifest_processes=
+  if snapshot=$(LC_ALL=C manifest_run_bounded 5 ps -eo pid=,comm= 2>/dev/null); then
+    # ps -eo pid=,comm=: " 553 lighttpd" -> lighttpd; "PID COMMAND"
+    # or "lighttpd 553" -> invalid, even when ps exits zero. Names may contain spaces.
+    if names=$(LC_ALL=C awk '
+      NR > 20000 { bad=1; next }
+      $1 !~ /^[0-9]+$/ || $1+0 == 0 || NF < 2 { bad=1; next }
+      {
+        name=$0
+        sub(/^[ \t\r\013\014]*[0-9]+[ \t\r\013\014]+/, "", name)
+        if (name ~ /[\t\r\013\014]/ || length(name) > 64) { bad=1; next }
+        valid++; print name
+      }
+      END { if (bad || !valid) exit 1 }
+    ' <<< "$snapshot"); then
+      manifest_processes=$names
+      manifest_processes_available=true
+      return
+    fi
+    reason='Process-name snapshot was malformed despite successful ps exit status'
+  else
+    reason='Process-name snapshot failed or timed out'
+  fi
+  manifest_emit warning area processes reason "$reason; trying bounded /proc status metadata. Process coverage remains incomplete."
+  manifest_collection_failed=true
+  # Keep useful names even when other processes exit or are unreadable. Absence
+  # never proves a service stopped, and no arguments are recovered from /proc.
+  if names=$(manifest_output_proc_process_names); then
+    manifest_processes=$names
+    manifest_processes_available=true
+  else
+    manifest_processes=$names
+    manifest_emit warning area processes reason 'The /proc process-name fallback was unavailable or incomplete (permissions, exited processes, malformed status, 5 seconds or 20000 processes); missing service activity is unknown.'
+  fi
+}
+
 # Inspect arguments as data only; emit fixed indicators and numeric references, never raw commands.
 # Explicit C whitespace and escaped regex slashes also work with pre-POSIX-class AWK.
 # Detection examples are invented. USER, HIDDEN, URL, ENCODED and TOKEN are placeholders.
@@ -8830,6 +9997,8 @@ function manifest_process_indicators() {
   # ps -eww -o pid=,ppid=,uid=,vsz=,args=, for example:
   # 101 50 1001 9000 tee -a /etc/sudoers -> sudoers_write_command.
   # 102 50 1001 4000 [kworker/0:0] 47128 -> userspace_kernel_name, not a kernel thread.
+  # Legacy ps can exit zero with ",ppid=,uid=,vsz=,args=" followed by
+  # "              521" -> malformed snapshot, not evidence of no indicators.
   # Finish ps before starting the parser: otherwise ps can collect AWK's own
   # regex program, whose mining examples match the heuristic. Do not exclude
   # descendants or generic awk processes; their arguments remain evidence.
@@ -8848,8 +10017,9 @@ function manifest_process_indicators() {
       counts[key]++
     }
     NR > 20000 { limited=1; next }
-    $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || NF < 5 { bad=1; next }
+    $1 !~ /^[0-9]+$/ || $1+0 == 0 || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || NF < 5 { bad=1; next }
     {
+      valid++
       args=$0; sub(/^[ \t\r\013\014]*[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+/, "", args)
       # printf RULE >> /etc/sudoers or tee -a /etc/sudoers -> sudoers_write_command.
       # cat /etc/sudoers > /tmp/example.txt -> no write indicator.
@@ -8891,7 +10061,7 @@ function manifest_process_indicators() {
         printf "%s\t%d\t%s\t%s\t%s\n", kinds[key], counts[key], pids[key], parents[key], uids[key]
       }
       if (limited) print "limit"
-      if (bad) print "parse_failed"
+      if (bad || !valid) print "parse_failed"
     }
   ' <<< "$snapshot" | LC_ALL=C sort); then
     manifest_emit warning area security_processes reason 'Process snapshot failed or timed out; potential compromise indicators could not be evaluated.'
@@ -8902,7 +10072,7 @@ function manifest_process_indicators() {
     case "$indicator" in
       '') continue;;
       limit) manifest_emit warning area security_processes reason 'Only the first 20000 processes and 200 indicator/parent/UID groups were examined; coverage is incomplete.'; continue;;
-      parse_failed) manifest_emit warning area security_processes reason 'Some process rows could not be parsed; coverage is incomplete.'; continue;;
+      parse_failed) manifest_emit warning area security_processes reason 'Process snapshot was empty or contained malformed rows despite successful ps exit status; argument-indicator coverage is incomplete. Raw arguments are not emitted and /proc names cannot replace argument inspection.'; manifest_collection_failed=true; continue;;
       sudoers_write_command) reason='Command references a sudoers write; verify authorization and whether the write succeeded.';;
       encoded_shell_pipeline) reason='Command decodes Base64 and pipes to a shell; review its origin without executing the payload.';;
       mining_command_arguments) reason='Command contains a mining protocol or correlated algorithm, pool and user options; verify whether mining is authorized.';;
@@ -9144,7 +10314,7 @@ function manifest_run_bounded() {
 function manifest_service() {
   local name=$1 package=$2 version=$3 selector=$1 running=unknown enabled=unknown state result link processes
   local systemd=false
-  local enabled_source=unknown running_source=unknown clusters row cluster_version cluster port cluster_state
+  local enabled_source=unknown running_source=unknown clusters row cluster_version cluster port cluster_state fields key value sub_state main_pid
   if [ -d "$manifest_root/run/systemd/system" ]; then
     case "$(readlink "$manifest_root/proc/1/exe" 2>/dev/null)" in */systemd|*/'systemd (deleted)') systemd=true;; esac
   fi
@@ -9162,7 +10332,26 @@ function manifest_service() {
       running_source=pg_lsclusters
     fi
   elif ! "${manifest_unprivileged:-false}" && command -v upgrade_services_is_active >/dev/null 2>&1; then
-    if upgrade_services_is_active "$name" "$selector"; then running=yes; running_source=service_status
+    if upgrade_services_is_active "$name" "$selector"; then
+      running=yes; running_source=service_status
+      # systemctl show for a legacy daemon wrapper:
+      # SubState=exited followed by MainPID=0 -> no observed daemon, not running=yes.
+      # Postfix has a separately verified oneshot/master status path; preserve it.
+      if $systemd && [ "$name" != postfix ]; then
+        sub_state= main_pid=
+        if fields=$(manifest_run_bounded 2 systemctl show -p SubState -p MainPID "$selector.service" 2>/dev/null); then
+          while IFS='=' read -r key value; do
+            case "$key" in SubState) sub_state=$value;; MainPID) main_pid=$value;; esac
+          done <<< "$fields"
+          if [ "$sub_state:$main_pid" = exited:0 ]; then
+            running=unknown; running_source=systemd_exited_wrapper
+          elif [[ ! "$sub_state" =~ ^[a-z-]+$ ]] || [[ ! "$main_pid" =~ ^[0-9]+$ ]]; then
+            running=unknown; running_source=systemd_state_unknown
+          elif [ "$main_pid" = 0 ]; then
+            running=unknown; running_source=systemd_no_main_pid
+          fi
+        else running=unknown; running_source=systemd_state_unknown; fi
+      fi
     else
       result=$?
       # Old init scripts can return 1 for an unsupported status action; do not call that stopped.
@@ -9198,6 +10387,320 @@ function manifest_service() {
   manifest_emit service name "$name" package "$package" version "$version" running "$running" enabled "$enabled" status_source "$running_source" enabled_source "$enabled_source"
 }
 
+# Resolver addresses only: no search domains, environment or credential configuration.
+function manifest_resolver_addresses() {
+  local source=$1
+  awk -v source="$source" '
+    function ipv4(value, parts,n,i) {
+      n=split(value,parts,"."); if(n!=4) return 0
+      for(i=1;i<=n;i++) if(parts[i] !~ /^[0-9]+$/ || length(parts[i])>3 || parts[i]+0>255) return 0
+      return 1
+    }
+    function ip(value, parts,n,i,compressed,copy,groups) {
+      if(index(value,":")==0) return ipv4(value)
+      if(value !~ /^[0-9A-Fa-f:]+$/ || value ~ /:::/ || value ~ /^:[^:]/ || value ~ /[^:]:$/) return 0
+      copy=value; compressed=gsub(/::/,"X",copy)
+      if(compressed>1 || (!compressed && (value ~ /^:/ || value ~ /:$/))) return 0
+      n=split(value,parts,":")
+      for(i=1;i<=n;i++) { if(length(parts[i])>4) return 0; if(parts[i]!="") groups++ }
+      if(compressed) return groups<8
+      return n==8
+    }
+    function address(value, parsed) {
+      # fe80::53%eth0 -> fe80::53; the local interface suffix is not a DNS address.
+      # Invalid or unsupported tokens contribute a count only, never their text.
+      parsed=tolower(value); sub(/#.*/,"",parsed)
+      if(index(parsed,"%")) {
+        if(parsed !~ /%[A-Za-z0-9_.-]+$/) return ""
+        sub(/%[^%]*$/,"",parsed)
+        if(index(parsed,":")==0) return ""
+      }
+      if(ip(parsed)) return parsed
+      return ""
+    }
+    # resolv.conf: nameserver 192.0.2.53 -> 192.0.2.53; search private.example is skipped.
+    # resolvectl dns: Link 2 (eth0): 2001:db8::53 192.0.2.53 -> two numeric addresses.
+    # Global: with no addresses -> no address records; the caller emits address_count=0.
+    NR>512 { limit=1; exit }
+    {
+      if(source=="resolv_conf") {
+        if($1!="nameserver") next
+        value=address($2)
+        if(value=="") invalid++
+        else if(!seen[value]++) { if(count<32) { print value; count++ } else limit=1 }
+      } else {
+        if($0 ~ /^Global:/) sub(/^Global:[ \t]*/,"",$0)
+        else if($0 ~ /^Link [0-9]+ [(][^)]*[)]:/) sub(/^Link [0-9]+ [(][^)]*[)]:[ \t]*/,"",$0)
+        else next
+        for(i_field=1;i_field<=NF;i_field++) {
+          value=address($i_field)
+          if(value=="") invalid++
+          else if(!seen[value]++) { if(count<32) { print value; count++ } else limit=1 }
+        }
+      }
+    }
+    END { if(invalid) print "!unparsed " invalid; if(limit) print "!limit" }'
+}
+
+function manifest_resolver() {
+  local kind=absent records addresses address count=0 status failed=false parse_status=observed unparsed=0
+  if [ -L "$manifest_root/etc/resolv.conf" ]; then kind=symlink
+  elif [ -f "$manifest_root/etc/resolv.conf" ]; then kind=regular; fi
+  manifest_emit resolver_config path /etc/resolv.conf kind "$kind"
+  if [ "$kind" != absent ]; then
+    records=$(head -c 65537 -- "$manifest_root/etc/resolv.conf" 2>/dev/null)
+    status=$?
+    if [ "$status" -ne 0 ] || [ "${#records}" -gt 65536 ]; then
+      failed=true
+      manifest_emit warning area resolver reason resolv_conf_read_failed_or_limit command_status "$status"
+    else
+      addresses=$(printf '%s\n' "$records" | manifest_resolver_addresses resolv_conf)
+      while IFS= read -r address; do
+        [ -n "$address" ] || continue
+        case "$address" in
+          '!unparsed '*) unparsed=${address#'!unparsed '}; parse_status=partial; failed=true; continue;;
+          '!limit') parse_status=partial; failed=true; continue;;
+        esac
+        count=$((count+1))
+        manifest_emit resolver_address source resolv_conf address "$address"
+      done <<< "$addresses"
+      if [ "$parse_status" = partial ]; then manifest_emit warning area resolver reason resolver_addresses_partial source resolv_conf unparsed_count "$unparsed"; fi
+      manifest_emit resolver_summary source resolv_conf address_count "$count" status "$parse_status" unparsed_count "$unparsed"
+    fi
+  fi
+  if "${manifest_unprivileged:-false}"; then
+    manifest_emit resolver_summary source resolvectl_dns status skipped_unprivileged
+  elif [ -n "$manifest_root" ]; then
+    manifest_emit resolver_summary source resolvectl_dns status skipped_fixture_root
+  elif ! command -v resolvectl >/dev/null 2>&1; then
+    manifest_emit resolver_summary source resolvectl_dns status unavailable
+  else
+    records=$(set -o pipefail; LC_ALL=C manifest_run_bounded 3 resolvectl dns 2>/dev/null | head -c 65537)
+    status=$?
+    if [ "$status" -ne 0 ] || [ "${#records}" -gt 65536 ]; then
+      failed=true
+      manifest_emit warning area resolver reason resolvectl_dns_failed_or_limit command_status "$status"
+      manifest_emit resolver_summary source resolvectl_dns status query_failed
+    elif ! printf '%s\n' "$records" | grep -qE '^(Global:|Link [0-9]+ [(][^)]*[)]:)'; then
+      failed=true
+      manifest_emit warning area resolver reason resolvectl_dns_unrecognised
+      manifest_emit resolver_summary source resolvectl_dns status malformed_output
+    else
+      count=0; parse_status=observed; unparsed=0
+      addresses=$(printf '%s\n' "$records" | manifest_resolver_addresses resolvectl_dns)
+      while IFS= read -r address; do
+        [ -n "$address" ] || continue
+        case "$address" in
+          '!unparsed '*) unparsed=${address#'!unparsed '}; parse_status=partial; failed=true; continue;;
+          '!limit') parse_status=partial; failed=true; continue;;
+        esac
+        count=$((count+1))
+        manifest_emit resolver_address source resolvectl_dns address "$address"
+      done <<< "$addresses"
+      if [ "$parse_status" = partial ]; then manifest_emit warning area resolver reason resolver_addresses_partial source resolvectl_dns unparsed_count "$unparsed"; fi
+      manifest_emit resolver_summary source resolvectl_dns address_count "$count" status "$parse_status" unparsed_count "$unparsed"
+    fi
+  fi
+  if $failed; then manifest_collection_failed=true; return 1; fi
+  return 0
+}
+
+# Capacity uses fixed numeric fields only; device names and mount paths are omitted.
+function manifest_capacity() {
+  local records status total used available percent extra memory key value unit mode kind memory_total_seen=false
+  for mode in -Pk -Pi; do
+  case "$mode" in -Pk) kind=filesystem_root;; -Pi) kind=filesystem_root_inodes;; esac
+  records=$(LC_ALL=C manifest_run_bounded 5 df "$mode" -- "${manifest_root:-/}" 2>/dev/null)
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    # POSIX df -Pk: /dev/vda1 100000 40000 60000 40% / -> 100000,40000,60000,40%.
+    records=$(printf '%s\n' "$records" | awk 'NR == 2 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+%$/ { print $2, $3, $4, $5 }')
+    read -r total used available percent extra <<< "$records"
+    if [ -n "$total" ] && [ -z "$extra" ]; then
+      if [ "$mode" = -Pk ]; then
+        manifest_emit capacity kind "$kind" total_kib "$total" used_kib "$used" available_kib "$available" used_percent "${percent%%%}" source df_posix
+      else
+        manifest_emit capacity kind "$kind" total "$total" used "$used" available "$available" used_percent "${percent%%%}" source df_posix
+      fi
+    else
+      manifest_emit warning probe capacity reason df_output_unrecognised metric "$kind"
+    fi
+  else
+    manifest_emit warning probe capacity reason df_failed metric "$kind" command_status "$status"
+  fi
+  done
+  memory=$(manifest_read_metadata "$manifest_root/proc/meminfo")
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    # /proc/meminfo: MemTotal:       2048000 kB -> total_kib=2048000.
+    # Emit only these kernel numeric counters, never arbitrary file contents.
+    while read -r key value unit extra; do
+      case "$value" in ''|*[!0-9]*) continue;; esac
+      [ "$unit" = kB ] && [ -z "$extra" ] || continue
+      case "$key" in MemTotal:) key=total; memory_total_seen=true;; MemAvailable:) key=available;; SwapTotal:) key=swap_total;; SwapFree:) key=swap_free;; *) continue;; esac
+      manifest_emit capacity kind memory metric "$key" value_kib "$value" source proc_meminfo
+    done <<< "$memory"
+    if ! $memory_total_seen; then
+      manifest_emit warning probe capacity reason meminfo_total_unrecognised
+    fi
+  else
+    manifest_emit warning probe capacity reason meminfo_unavailable command_status "$status"
+  fi
+  return 0
+}
+
+# Interpreter names establish observed consumers; arguments and cron commands never leave the parser.
+function manifest_language_consumers() {
+  local records status language count file line interpreter file_count=0
+  if "${manifest_processes_available:-false}"; then
+    records=$(printf '%s\n' "$manifest_processes" | awk '
+      # ps -eo comm=: python2.7 -> Python process count; worker.py is not an interpreter.
+      /^python([0-9]+([.][0-9]+)*)?$/ { count["Python"]++ }
+      /^php([0-9]+([.][0-9]+)*)?$/ { count["PHP"]++ }
+      /^ruby([0-9]+([.][0-9]+)*)?$/ { count["Ruby"]++ }
+      /^perl([0-9]+([.][0-9]+)*)?$/ { count["Perl"]++ }
+      /^node(js)?$/ { count["JavaScript"]++ }
+      END { for (name in count) print name, count[name] }')
+    while read -r language count; do
+      [ -n "$language" ] || continue
+      manifest_emit language_consumer source process_comm language "$language" process_count "$count"
+    done <<< "$records"
+  else
+    manifest_emit warning probe language_consumers reason process_snapshot_unavailable
+  fi
+  if "${manifest_unprivileged:-false}"; then
+    manifest_emit collection_scope probe language_consumers cron skipped_unprivileged
+    return 0
+  fi
+  for file in "$manifest_root"/etc/crontab "$manifest_root"/etc/cron.d/* "$manifest_root"/var/spool/cron/crontabs/* "$manifest_root"/var/spool/cron/*; do
+    [ -f "$file" ] || continue
+    file_count=$((file_count + 1))
+    if [ "$file_count" -gt 128 ]; then
+      manifest_emit warning probe language_consumers reason cron_file_limit
+      break
+    fi
+    records=$(manifest_read_metadata "$file")
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      manifest_emit warning probe language_consumers reason cron_metadata_unavailable source_file "${file#"$manifest_root"}"
+      continue
+    fi
+    # /etc/crontab: 0 * * * * root /usr/bin/python2.7 /srv/task.py --token SECRET
+    # -> line=1 interpreter=python2.7; command, user, arguments and SECRET are omitted.
+    # User crontabs omit the username; @daily uses one schedule field.
+    records=$(printf '%s\n' "$records" | awk -v system_file="${file#"$manifest_root"}" '
+      /^[[:space:]]*(#|$)/ { next }
+      /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/ { next }
+      {
+        command = ($1 ~ /^@/) ? 2 : 6
+        if (system_file == "/etc/crontab" || system_file ~ /^\/etc\/cron[.]d\//) command++
+        token = $command
+        sub(/^.*\//, "", token)
+        language = ""
+        if (token ~ /^python([0-9]+([.][0-9]+)*)?$/) language="Python"
+        else if (token ~ /^php([0-9]+([.][0-9]+)*)?$/) language="PHP"
+        else if (token ~ /^ruby([0-9]+([.][0-9]+)*)?$/) language="Ruby"
+        else if (token ~ /^perl([0-9]+([.][0-9]+)*)?$/) language="Perl"
+        else if (token ~ /^node(js)?$/) language="JavaScript"
+        if (language != "") print NR, language, token
+      }')
+    while read -r line language interpreter; do
+      [ -n "$line" ] || continue
+      manifest_emit language_consumer source cron source_file "${file#"$manifest_root"}" source_line "$line" language "$language" interpreter "$interpreter"
+    done <<< "$records"
+  done
+  return 0
+}
+
+# Fixed unit metadata also covers removed server packages with retained units.
+# Query only state properties; unit configuration and environment stay private.
+# Fixed tool paths and allocated directory sizes support upgrade preparation.
+# Never run application commands, read directory contents or return du diagnostics.
+function manifest_upgrade_assets() {
+  local tool path directory records status size extra count=0
+  for tool in wp php mysql mysqld mysqldump rsync tar gzip systemd-run screen tmux; do
+    path=$(type -P "$tool" 2>/dev/null)
+    if [ -n "$path" ]; then
+      manifest_emit upgrade_tool name "$tool" available yes path "$path"
+    else
+      manifest_emit upgrade_tool name "$tool" available no path unknown
+    fi
+  done
+  for directory in /var/www /var/lib/mysql /var/cache/apt/archives /var/cache/apt /var/log/journal /var/lib/apt/lists /root /boot /usr /var/mail /var/backups /backup /backups; do
+    count=$((count + 1))
+    [ "$count" -le 13 ] || break
+    if "${manifest_unprivileged:-false}"; then
+      case "$directory" in /root|/var/lib/mysql|/var/mail|/var/backups|/backup|/backups)
+        manifest_emit upgrade_directory path "$directory" status skipped_unprivileged
+        continue;;
+      esac
+    fi
+    if [ ! -d "$manifest_root$directory" ]; then
+      manifest_emit upgrade_directory path "$directory" status absent
+      continue
+    fi
+    records=$(LC_ALL=C manifest_run_bounded 10 du -skxH -- "$manifest_root$directory" 2>/dev/null)
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      case "$status" in 124|142) status=timeout;; *) status=query_failed;; esac
+      manifest_emit upgrade_directory path "$directory" status "$status"
+      manifest_emit warning probe upgrade_assets reason directory_size_failed path "$directory"
+      continue
+    fi
+    # -H follows only a directory symlink supplied as the operand; -x stays on its filesystem.
+    # du -skxH: 12345<TAB>/var/www -> allocated_kib=12345. Paths/diagnostics are discarded.
+    # Reject multiple records and nonnumeric sizes; never emit arbitrary command output.
+    size=$(printf '%s\n' "$records" | awk 'NR == 1 && $1 ~ /^[0-9]+$/ { value=$1 } END { if (NR == 1 && value != "") print value }')
+    if [ -n "$size" ]; then
+      manifest_emit upgrade_directory path "$directory" status observed allocated_kib "$size" filesystem_scope one_filesystem
+    else
+      manifest_emit upgrade_directory path "$directory" status malformed_output
+      manifest_emit warning probe upgrade_assets reason directory_size_unrecognised path "$directory"
+    fi
+  done
+  return 0
+}
+
+function manifest_service_states() {
+  local name process count records status key value source systemd=false
+  local load active sub enabled result failed=false
+  if [ -d "$manifest_root/run/systemd/system" ]; then
+    case "$(readlink "$manifest_root/proc/1/exe" 2>/dev/null)" in */systemd|*/'systemd (deleted)') systemd=true;; esac
+  fi
+  for name in mysql mariadb postgresql dovecot; do
+    case "$name" in mysql) process=mysqld;; mariadb) process=mariadbd;; postgresql) process=postgres;; dovecot) process=dovecot;; esac
+    # ps -eo comm=: mysqld followed by postgres -> mysql count=1; master is never attributed to Postfix.
+    count=unknown
+    if "${manifest_processes_available:-false}"; then
+      count=$(printf '%s\n' "$manifest_processes" | awk -v name="$process" '$1 == name && NF == 1 { count++ } END { print count+0 }')
+    fi
+    load=unknown; active=unknown; sub=unknown; enabled=unknown; result=unknown; status=not_run
+    source=systemd_unavailable
+    if "${manifest_unprivileged:-false}"; then source=skipped_unprivileged
+    elif $systemd && command -v systemctl >/dev/null 2>&1; then
+      source=systemd
+      records=$(manifest_run_bounded 2 systemctl show -p LoadState -p ActiveState -p SubState -p UnitFileState -p Result "$name.service" 2>/dev/null)
+      status=$?
+      # LoadState=loaded, ActiveState=active, SubState=exited -> wrapper active/exited, independently of daemon count.
+      # LoadState=not-found with command status 1 retains the explicit missing-unit state.
+      while IFS='=' read -r key value; do
+        case "$value" in ''|*[!a-z0-9_-]*) continue;; esac
+        case "$key" in LoadState) load=$value;; ActiveState) active=$value;; SubState) sub=$value;; UnitFileState) enabled=$value;; Result) result=$value;; esac
+      done <<< "$records"
+      # Missing optional unit: LoadState=not-found, ActiveState=inactive, SubState=dead.
+      # Timeout status 124 or success with absent required state remains a failed query.
+      if [ "$load" != not-found ] && { [ "$status" -ne 0 ] || [ "$load" = unknown ] || [ "$active" = unknown ] || [ "$sub" = unknown ]; }; then
+        failed=true
+        manifest_collection_failed=true
+        manifest_emit warning area service_states reason unit_state_query_failed name "$name" query_status "$status"
+      fi
+    fi
+    manifest_emit service_state name "$name" load_state "$load" active_state "$active" sub_state "$sub" unit_file_state "$enabled" result "$result" state_source "$source" query_status "$status" daemon_process_name "$process" daemon_process_count "$count"
+  done
+  if $failed; then return 1; fi
+  return 0
+}
+
 function manifest_packages() {
   local postgres_pattern='^postgresql-[0-9]+([.][0-9]+)*$'
   local package version status architecture records name release seen_services='|'
@@ -9206,6 +10709,15 @@ function manifest_packages() {
     manifest_collection_failed=true
     return
   fi
+  # Preserve the full package state before filtering daemon/runtime summaries.
+  # dpkg: python<TAB>2.7.12-1~16.04<TAB>install ok config-files<TAB>i386
+  # -> package_state status="install ok config-files", not an installed runtime.
+  while IFS=$'\t' read -r package version status architecture; do
+    [ -n "$package" ] || continue
+    case "$status" in *' not-installed') continue;; esac
+    manifest_emit package_state name "${package%%:*}" version "$version" architecture "${architecture:-unknown}" \
+      status "$status" package_backend "$manifest_package_backend"
+  done <<< "$records"
   # Prefer the daemon owner over plugins and transitional package names.
   # nginx:amd64<TAB>1.24.0<TAB>install ok installed<TAB>amd64 -> name=nginx, version=1.24.0.
   # dovecot-core plus dovecot-imapd -> one service owned by dovecot-core; residual config-files rows are skipped.
@@ -9240,7 +10752,7 @@ function manifest_packages() {
     name=''
     case "$package" in
       apache2|apache2-bin|apache2.2-common) name=apache2;; httpd) name=httpd;; nginx|nginx-core|nginx-full|nginx-light|nginx-extras) name=nginx;;
-      caddy|postfix|redis|redis-server|fail2ban) name=$package;; exim4*daemon*|exim4) name=exim4;; exim) name=exim;;
+      caddy|lighttpd|postfix|redis|redis-server|fail2ban) name=$package;; exim4*daemon*|exim4) name=exim4;; exim) name=exim;;
       sendmail|sendmail-bin) name=sendmail;; dovecot|dovecot-core|dovecot-common|dovecot-imapd|dovecot-pop3d) name=dovecot;; courier*) name=courier;; mailman*) name=mailman;;
       mysql-server|mysql-server-[0-9]*) name=mysql;; mariadb-server|mariadb-server-[0-9]*|MariaDB-server) name=mariadb;; postgresql-server) name=postgresql;; postgresql[0-9][0-9]-server)
         release=${package#postgresql}; release=${release%-server}
@@ -9254,7 +10766,7 @@ function manifest_packages() {
       manifest_service "$name" "$package" "$version"
     else
       case "$package" in
-        perl|perl-base|ruby|ruby[0-9].[0-9]|ruby[0-9].[0-9].[0-9]|python2|python2.[0-9]|python3|python3.[0-9]|python3.[0-9][0-9]|nodejs)
+        wordpress|wordpress-l10n|perl|perl-base|ruby|ruby[0-9].[0-9]|ruby[0-9].[0-9].[0-9]|python2|python2.[0-9]|python3|python3.[0-9]|python3.[0-9][0-9]|nodejs)
           manifest_emit package name "$package" version "$version" architecture "${architecture:-unknown}" package_backend "$manifest_package_backend";;
       esac
     fi
@@ -9267,10 +10779,31 @@ function manifest_read_metadata() {
   head -c 1048576 -- "$1" 2>/dev/null
 }
 
+# Availability is metadata from existing indexes, never a refresh or removal.
+function manifest_package_review() {
+  local records package architecture version classification reason
+  [ "$manifest_package_backend" = dpkg ] || return 0
+  if [ -n "$manifest_root" ]; then
+    manifest_emit warning area package_review reason 'APT availability is unavailable for a fixture root; host indexes were not used.'
+    return 1
+  fi
+  if ! records=$(apt_packages_output_review); then
+    manifest_emit warning area package_review reason 'Existing APT index or package provenance query failed; availability is unknown. No packages or indexes were changed.'
+    return 1
+  fi
+  # Classifier TSV: libexample<TAB>amd64<TAB>1.0<TAB>unavailable<TAB>reason
+  # -> metadata only; residual-config state is already in package_state records.
+  while IFS=$'\t' read -r package architecture version classification reason; do
+    case "$classification" in obsolete|unavailable|transitional|incomplete) :;; *) continue;; esac
+    manifest_emit package_review name "$package" architecture "$architecture" version "$version" \
+      classification "$classification" reason "$reason" indexes existing freshness unverified removal_safety unverified
+  done <<< "$records"
+}
+
 # These conventional paths give migration hints, not complete server configuration.
 # Check custom include trees and startup flags when conventional configuration paths yield no findings.
 function manifest_config_files() {
-  local kind="$1" file count=0
+  local kind="$1" file count=0 resolved seen='|'
   local -a files=()
   case "$kind" in
     apache) files=("$manifest_root"/etc/apache2/apache2.conf "$manifest_root"/etc/apache2/sites-enabled/* "$manifest_root"/etc/apache2/conf-enabled/* "$manifest_root"/etc/httpd/conf/httpd.conf "$manifest_root"/etc/httpd/conf.d/*.conf) ;;
@@ -9279,8 +10812,16 @@ function manifest_config_files() {
     caddy) files=("$manifest_root"/etc/caddy/Caddyfile) ;;
     fpm) files=("$manifest_root"/etc/php/*/fpm/pool.d/*.conf "$manifest_root"/etc/php5/fpm/pool.d/*.conf "$manifest_root"/etc/php-fpm.d/*.conf "$manifest_root"/etc/opt/remi/php*/php-fpm.d/*.conf "$manifest_root"/etc/opt/rh/rh-php*/php-fpm.d/*.conf) ;;
   esac
+  # Conventional generated configuration paths; parse as text, without invoking panel tools.
+  case "$kind" in
+    apache|apache-modules) files+=("$manifest_root"/etc/apache2/conf/httpd.conf "$manifest_root"/usr/local/apache/conf/httpd.conf "$manifest_root"/var/www/vhosts/system/*/conf/httpd.conf "$manifest_root"/usr/local/directadmin/data/users/*/httpd.conf);;
+    nginx) files+=("$manifest_root"/var/www/vhosts/system/*/conf/nginx.conf "$manifest_root"/usr/local/directadmin/data/users/*/nginx.conf);;
+  esac
   for file in "${files[@]}"; do
     if [ ! -f "$file" ] || [ ! -r "$file" ]; then continue; fi
+    resolved=$(readlink -f -- "$file" 2>/dev/null) || resolved=$file
+    case "$seen" in *"|$resolved|"*) continue;; esac
+    seen="$seen$resolved|"
     count=$((count+1))
     [ "$count" -le 200 ] || break
     printf '%s\n' "$file"
@@ -9350,6 +10891,337 @@ function manifest_apache_php() {
     manifest_apache_php_package=unknown
   fi
   if [ "$count" -eq 1 ] && ! $ambiguous; then manifest_apache_php_available=true; fi
+}
+
+# Tokenize configuration as data. Never invoke lighttpd, include_shell or a backend.
+# Input from lighttpd.conf: server.document-root = "/srv/www" # comment
+# -> w/vserver.document-root, p/v=, s/v/srv/www, n/v (TSV adds file and line).
+# The v prefix preserves empty quoted strings through Bash tab-delimited reads.
+function manifest_lighttpd_tokens() {
+  local file=$1 depth=$2 resolved size tokens type value source line extra include_value='' include_count=0 include_line=0 in_include=false
+  local candidate pattern matches
+  if [ "$depth" -gt 16 ] || [ "$manifest_lighttpd_files" -ge 200 ] || [ $((SECONDS-manifest_lighttpd_started)) -ge 5 ]; then
+    printf 'W\tvcollection_limit\t%s\t1\n' "$manifest_lighttpd_main"; return
+  fi
+  case "$file" in *$'\t'*|*$'\r'*|*$'\n'*|*'\'*|*/../*|*/..|*/./*) printf 'W\tvunsafe_include\t%s\t1\n' "$manifest_lighttpd_main"; return;; esac
+  resolved=$(manifest_run_bounded 1 readlink -f -- "$file" 2>/dev/null) || resolved=
+  case "$resolved" in "$manifest_lighttpd_base"/*) :;; *) printf 'W\tvinclude_outside_config_tree\t%s\t1\n' "$manifest_lighttpd_main"; return;; esac
+  case "|$manifest_lighttpd_stack|" in *"|$resolved|"*) printf 'W\tvinclude_cycle\t%s\t1\n' "${file#"$manifest_root"}"; return;; esac
+  if [ ! -f "$resolved" ] || [ ! -r "$resolved" ]; then printf 'W\tvunreadable_include\t%s\t1\n' "${file#"$manifest_root"}"; return; fi
+  size=$(manifest_run_bounded 1 wc -c < "$resolved") || size=9999999
+  manifest_lighttpd_bytes=$((manifest_lighttpd_bytes+size))
+  if [ "$size" -gt 262144 ] || [ "$manifest_lighttpd_bytes" -gt 2097152 ]; then printf 'W\tvcollection_limit\t%s\t1\n' "${file#"$manifest_root"}"; return; fi
+  manifest_lighttpd_files=$((manifest_lighttpd_files+1))
+  local manifest_lighttpd_stack="$manifest_lighttpd_stack$resolved|"
+  tokens=$(LC_ALL=C manifest_run_bounded 2 awk -v source="${file#"$manifest_root"}" '
+    function out(kind,value) { printf "%s\tv%s\t%s\t%d\n",kind,value,source,FNR }
+    {
+      if (length($0)>65536 || FNR>20000) { out("e","token_limit"); exit }
+      text=$0
+      while (length(text)) {
+        if (text ~ /^[ \t\r]/) { sub(/^[ \t\r]+/,"",text); continue }
+        c=substr(text,1,1)
+        if (c=="#") break
+        if (c=="\042") {
+          value=""; escaped=0; closed=0
+          for (i=2;i<=length(text);i++) {
+            c=substr(text,i,1)
+            if (escaped) { if (c!="\042" && c!="\\") value=value "\\"; value=value c; escaped=0 }
+            else if (c=="\\") escaped=1
+            else if (c=="\042") { closed=1; break }
+            else value=value c
+          }
+          if (!closed || value ~ /[\t\r\013\014]/) { out("e","invalid_string"); break }
+          out("s",value); text=substr(text,i+1); continue
+        }
+        if (text ~ /^(\+=|=>|==|=~|!=|!~|:=)/) { out("p",substr(text,1,2)); text=substr(text,3); continue }
+        if (c ~ /[(){}\[\],=$+;]/) { out("p",c); text=substr(text,2); continue }
+        if (match(text,/^[A-Za-z0-9_.:-]+/)) { out("w",substr(text,1,RLENGTH)); text=substr(text,RLENGTH+1); continue }
+        out("e","unsupported_token"); break
+      }
+      out("n","")
+    }
+  ' "$resolved") || { printf 'W\tvtokenizer_failed\t%s\t1\n' "${file#"$manifest_root"}"; return; }
+  while IFS=$'\t' read -r type value source line extra; do
+    if [ -n "$extra" ]; then printf 'W\tvinvalid_token_record\t%s\t1\n' "$manifest_lighttpd_main"; return; fi
+    if [ $((SECONDS-manifest_lighttpd_started)) -ge 5 ]; then printf 'W\tvcollection_limit\t%s\t1\n' "$manifest_lighttpd_main"; return; fi
+    if [ "$type:$value" = w:vinclude ] || [ "$type:$value" = w:vinclude_shell ]; then
+      in_include=true; include_count=0; include_value=; include_line=$line
+      if [ "$value" = vinclude_shell ]; then include_count=100; fi
+      continue
+    fi
+    if $in_include; then
+      if [ "$type" != n ]; then
+        include_count=$((include_count+1))
+        if [ "$type" = s ] && [ "$include_count" -eq 1 ]; then include_value=${value#v}; else include_count=100; fi
+        continue
+      fi
+      in_include=false
+      if [ "$include_count" -ne 1 ]; then printf 'W\tvdynamic_or_generated_include\t%s\t%s\n' "$source" "$include_line"; continue; fi
+      case "$include_value" in
+        ''|*'$'*|*'`'*|*'%'*|*'|'*|*'..'*|*'('*|*')'*|*$'\t'*|*$'\r'*|*$'\n'*) printf 'W\tvunsafe_include\t%s\t%s\n' "$source" "$include_line"; continue;;
+        /etc/lighttpd/*) pattern="$manifest_root$include_value";;
+        /*) printf 'W\tvinclude_outside_config_tree\t%s\t%s\n' "$source" "$include_line"; continue;;
+        *) pattern="${file%/*}/$include_value";;
+      esac
+      # compgen expands a quoted literal glob; it neither evaluates shell text nor
+      # reads unreferenced conf-enabled files. At most 201 names are retained.
+      matches=$(manifest_run_bounded 1 env -u BASH_ENV -u ENV /bin/bash --noprofile --norc -c 'compgen -G "$1" | LC_ALL=C sort | head -n 201' bash "$pattern") || matches=
+      if [ -z "$matches" ]; then printf 'W\tvinclude_not_found\t%s\t%s\n' "$source" "$include_line"; continue; fi
+      while IFS= read -r candidate; do
+        manifest_lighttpd_tokens "$candidate" "$((depth+1))"
+      done <<< "$matches"
+    else
+      printf '%s\t%s\t%s\t%s\n' "$type" "$value" "$source" "$line"
+    fi
+  done <<< "$tokens"
+}
+
+# A conservative subset, not a replacement for lighttpd configuration evaluation.
+# Literal lighttpd input (arrays may span lines):
+# server.modules = ( "mod_staticfile", "mod_fastcgi" )
+# $HTTP["host"] == "app.example.invalid" { fastcgi.server = ( ".php" =>
+#   (( "socket" => "/run/php.sock", "bin-path" => "/usr/bin/php-cgi -q" )) ) }
+# -> site node 1/literal_host/app.example.invalid; handler node 1/.php/fastcgi,
+# executable /usr/bin/php-cgi, socket /run/php.sock. Arguments/environment stay private.
+# Unknown expressions/includes make all site certainty incomplete; host regex and
+# URL/socket conditions retain their selector kinds instead of becoming URLs.
+function manifest_lighttpd_output_configuration() {
+  local main=$1 base root_path
+  local manifest_lighttpd_main="${1#"$manifest_root"}" manifest_lighttpd_base
+  local manifest_lighttpd_started=$SECONDS manifest_lighttpd_files=0 manifest_lighttpd_bytes=0 manifest_lighttpd_stack='|'
+  case "$manifest_lighttpd_main" in *$'\t'*|*$'\r'*|*$'\n'*|*'\'*) printf 'warning\tunsafe_main_path\tunknown\t1\nmeta\tconfiguration_complete\tfalse\n'; return;; esac
+  root_path=$(manifest_run_bounded 1 readlink -f -- "${manifest_root:-/}" 2>/dev/null) || root_path=
+  base="$manifest_root/etc/lighttpd"
+  manifest_lighttpd_base=$(manifest_run_bounded 1 readlink -f -- "$base" 2>/dev/null) || manifest_lighttpd_base=
+  if [ -z "$root_path" ] || [ "$manifest_lighttpd_base" != "${root_path%/}/etc/lighttpd" ]; then
+    printf 'warning\tunsafe_config_tree\t%s\t1\nmeta\tconfiguration_complete\tfalse\n' "$manifest_lighttpd_main"; return
+  fi
+  # Bound the parser too: many small nested contexts must not turn its final
+  # inheritance pass into an unbounded calculation after bounded file reads.
+  (set -o pipefail; manifest_lighttpd_tokens "$main" 0 | LC_ALL=C manifest_run_bounded 10 awk '
+    function val(v) { return v=="" ? "unknown" : v }
+    function safe(v) { gsub(/[\t\r\n\013\014]/,"",v); return val(v) }
+    function sym(i,v) { return kind[i]=="p" && token[i]==v }
+    function warn(reason,file,line) { print "warning",reason,safe(file),line; incomplete=1 }
+    function literal(a,b) { return a==b && (kind[a]=="s" || (kind[a]=="w" && token[a] ~ /^[0-9]+$/)) }
+    function path(v) { return v ~ /^\// && v !~ /[?$%`{}\r\t]/ ? v : "unknown" }
+    function host(v) { return v ~ /^[A-Za-z0-9_.:\[\]-]+$/ ? v : "unknown" }
+    function target(v) {
+      sub(/[?#].*$/,"",v)
+      if (v ~ /^[A-Za-z][A-Za-z0-9+.-]*:\/\//) sub(/\/\/[^/]*@/,"//",v)
+      if (v !~ /^(https?:\/\/|\/)/ || v ~ /[\t\r ]/) return "unknown"
+      return v
+    }
+    function inherited(node,key,    n) {
+      n=node
+      while (n>=0) { if ((n SUBSEP key) in setting) return setting[n,key]; n=parent[n] }
+      return "unknown"
+    }
+    function effective_module(node,module,    n) {
+      n=node
+      while (n>=0) {
+        if ((n SUBSEP module) in modules) return 1
+        if ((n SUBSEP "modules_reset") in setting) return 0
+        n=parent[n]
+      }
+      return 0
+    }
+    function handler_applies(node,idx,    n) {
+      if(disabled[idx]) return 0
+      for(n=node;n>=0;n=parent[n]) {
+        if(n==handler_node[idx]) return effective_module(node,handler_module[idx])
+        if((n SUBSEP handler_kind[idx] "_reset") in setting) return 0
+      }
+      return 0
+    }
+    function emit_handler(node,ext,handler,executable,socket,backend,port,file,line,    mod) {
+      mod=(handler=="cgi" ? "mod_cgi" : handler=="fastcgi" ? "mod_fastcgi" : handler=="scgi" ? "mod_scgi" : "mod_proxy")
+      handlers[++nh]=node OFS safe(ext) OFS handler OFS safe(executable) OFS safe(socket) OFS safe(backend) OFS safe(port) OFS safe(file) OFS line
+      handler_module[nh]=mod; handler_node[nh]=node; handler_kind[nh]=handler
+    }
+    function arrays(a,b,node,key,file,line,    i,j,d,ext,executable,socket,backend,port,handler,valid,field,endpoints,skip) {
+      if (!sym(a,"(") || !sym(b,")")) { warn("dynamic_array",file,line); unknown[node]=1; return }
+      if (key=="server.modules") {
+        for (i=a+1;i<b;i++) {
+          if (sym(i,",")) continue
+          if (kind[i]!="s" || token[i] !~ /^mod_[A-Za-z0-9_]+$/) { warn("dynamic_modules",file,line); unknown[node]=1; continue }
+          modules[node,token[i]]=1
+          # Unmodelled request handlers prevent a static-only claim.
+          if (token[i] !~ /^mod_(access|accesslog|auth|authn_file|authn_ldap|authn_pam|authn_sasl|authn_mysql|authn_pgsql|authn_dbi|cgi|fastcgi|scgi|proxy|redirect|staticfile|indexfile|dirlisting|deflate|compress|expire|setenv|status|openssl|mbedtls|gnutls|nss|wolfssl|evasive|extforward|rrdtool|secdownload|simple_vhost|evhost)$/) {
+            warn("unmodelled_module",file,line); unknown[node]=1
+          }
+          if (token[i] ~ /^mod_(simple_vhost|evhost)$/) { warn("dynamic_virtual_hosts",file,line); unknown[node]=1 }
+        }
+        return
+      }
+      if (key=="url.redirect") {
+        for(i=a+1;i<b;i++) {
+          if(sym(i,",")) continue
+          if (kind[i]=="s" && sym(i+1,"=>") && kind[i+2]=="s") {
+            redirects[++nr]=node OFS (token[i] ~ /[?@#]/ ? "unknown" : safe(token[i])) OFS safe(target(token[i+2])) OFS safe(file) OFS line; i+=2
+          } else { warn("dynamic_redirect",file,line); unknown[node]=1; break }
+        }
+        return
+      }
+      handler=(key=="cgi.assign" ? "cgi" : key=="fastcgi.server" ? "fastcgi" : key=="scgi.server" ? "scgi" : "reverse_proxy")
+      i=a+1
+      while(i<b) {
+        if(sym(i,",")) { i++; continue }
+        if(kind[i]!="s" || !sym(i+1,"=>")) { warn("dynamic_handler",file,line); unknown[node]=1; break }
+        ext=token[i]; if (ext=="") ext="all_paths"
+        if (ext ~ /[?$@]/) ext="unknown"
+        i+=2; executable=socket=backend=port="unknown"; valid=1; endpoints=0
+        if(handler=="cgi") {
+          if(kind[i]!="s") valid=0
+          else { executable=token[i]; sub(/[ \t].*$/,"",executable); executable=(executable=="" ? "direct_shebang" : path(executable)); i++ }
+        } else if(sym(i,"(")) {
+          d=1; i++
+          # Endpoint keys are read only at the first backend attribute level.
+          # "bin-environment" and its nested map are never traversed as endpoints.
+          for(;i<b && d;i++) {
+            if(kind[i]=="s" && token[i] ~ /^bin-(copy-)?environment$/ && sym(i+1,"=>")) {
+              i+=2
+              if(sym(i,"(")) {
+                skip=1
+                while(skip && ++i<b) { if(sym(i,"(")) skip++; else if(sym(i,")")) skip-- }
+                if(skip) valid=0
+              }
+              continue
+            }
+            if (sym(i,"(")) { d++; continue }
+            if (sym(i,")")) {
+              if (d==2) {
+                emit_handler(node,ext,handler,executable,socket,backend,port,file,line); endpoints++
+                executable=socket=backend=port="unknown"
+              }
+              d--; continue
+            }
+            if(d<=2 && kind[i]=="s" && sym(i+1,"=>") && (kind[i+2]=="s" || kind[i+2]=="w")) {
+              field=token[i]
+              if(field ~ /^(bin-path|socket|host|port)$/ && !literal(i+2,i+2)) { valid=0; i+=2; continue }
+              if(field=="bin-path") { executable=token[i+2]; sub(/[ \t].*$/,"",executable); executable=path(executable) }
+              else if(field=="socket") socket=path(token[i+2])
+              else if(field=="host") backend=host(token[i+2])
+              else if(field=="port" && token[i+2] ~ /^[0-9]+$/ && token[i+2]+0<=65535) port=token[i+2]
+              i+=2
+            } else if (sym(i,"+") || (kind[i]=="w" && token[i] !~ /^[0-9]+$/)) valid=0
+          }
+          if(d) valid=0
+        } else valid=0
+        if(!valid) { warn("dynamic_handler",file,line); unknown[node]=1; break }
+        if (!endpoints) emit_handler(node,ext,handler,executable,socket,backend,port,file,line)
+      }
+    }
+    function assignment(a,b,node,file,line,    key,op,i,scalar) {
+      key=token[a]; op=token[a+1]
+      if (op!="=" && op!="+=") { warn("unsupported_assignment",file,line); unknown[node]=1; return }
+      # server.chroot = "/srv/jail" makes /www relative to that jail,
+      # not the host /www. Leave filesystem/launcher mapping for manual review.
+      if(key=="server.chroot") {
+        if(!literal(a+2,b) || (token[a+2]!="" && token[a+2]!="/")) {
+          warn("unresolved_chroot_paths",file,line); host_paths_unresolved=1
+        }
+        return
+      }
+      if(key=="server.document-root" || key=="server.port" || key=="server.username" || key=="ssl.engine" || key=="server.name") {
+        if (!literal(a+2,b) || op!="=") { setting[node,key]="unknown"; warn("dynamic_site_value",file,line); unknown[node]=1; return }
+        scalar=token[a+2]
+        if(key=="server.document-root") scalar=path(scalar)
+        if(key=="server.name") scalar=host(scalar)
+        if(key=="server.port" && (scalar !~ /^[0-9]+$/ || scalar+0>65535)) scalar="unknown"
+        if(key=="server.username" && scalar !~ /^[A-Za-z0-9_.-]+$/) scalar="unknown"
+        if(key=="ssl.engine") scalar=(scalar=="enable" ? "true" : scalar=="disable" ? "false" : "unknown")
+        setting[node,key]=scalar
+        if(scalar=="unknown") { warn("invalid_site_literal",file,line); unknown[node]=1 }
+        return
+      }
+      if(key=="server.modules" || key=="cgi.assign" || key=="fastcgi.server" || key=="scgi.server" || key=="proxy.server" || key=="url.redirect") {
+        if(key=="server.modules" && op=="=") {
+          for(i in modules) if(index(i,node SUBSEP)==1) delete modules[i]
+          setting[node,"modules_reset"]=1
+        }
+        if (op=="=" && key ~ /^(cgi\.assign|fastcgi\.server|scgi\.server|proxy\.server)$/) {
+          scalar=(key=="cgi.assign" ? "cgi" : key=="fastcgi.server" ? "fastcgi" : key=="scgi.server" ? "scgi" : "reverse_proxy")
+          setting[node,scalar "_reset"]=1
+          for(i=1;i<=nh;i++) if(handler_node[i]==node && handler_kind[i]==scalar) disabled[i]=1
+        }
+        arrays(a+2,b,node,key,file,line); return
+      }
+      # Known metadata/access/TLS directives do not choose an executing handler.
+      # Everything else is unresolved: e.g. alias, rewrite, vhostdb, Lua or variables.
+      if (key !~ /^(server\.(bind|tag|errorlog|errorlog-use-syslog|pid-file|groupname|chroot|event-handler|max-.*|network-backend|upload-dirs|follow-symlink|dir-listing|range-requests)|index-file\.names|mimetype\.assign|accesslog\..*|auth\..*|ssl\..*|url\.access-deny|static-file\..*|dir-listing\..*|compress\..*|deflate\..*|expire\..*|setenv\..*|debug\..*|cgi\.execute-x-only|fastcgi\.debug|scgi\.debug|proxy\.debug)$/) {
+        warn("unresolved_directive",file,line); unknown[node]=1
+      }
+    }
+    function statement(a,b,node,file,line) { if(a<=b) assignment(a,b,node,file,line) }
+    function condition(a,b,node,file,line,    id,selector,what,op,v) {
+      id=++nodes; parent[id]=node; source[id]=file; lineno[id]=line; selector="unknown"; what="conditional"
+      if(token[a]=="$" && (token[a+1]=="HTTP" || token[a+1]=="SERVER") && token[a+2]=="[" && kind[a+3]=="s" && token[a+4]=="]" && kind[a+6]=="s" && a+6==b) {
+        op=token[a+5]; v=token[a+6]
+        if(token[a+1]=="HTTP" && token[a+3]=="host" && (op=="==" || op=="!=")) { what=(op=="==" ? "literal_host" : "host_exclusion"); selector=host(v) }
+        else if(token[a+1]=="HTTP" && token[a+3]=="host" && (op=="=~" || op=="!~")) { what=(op=="=~" ? "host_regex" : "host_regex_exclusion"); if(v !~ /[@#\r\t \/=]/) selector=safe(v) }
+        else if(token[a+1]=="HTTP" && token[a+3]=="url" && (op=="==" || op=="=~" || op=="!=" || op=="!~")) {
+          what=(op=="!=" ? "url_exclusion" : op=="!~" ? "url_regex_exclusion" : "url")
+          if(v !~ /[@#\r\t ]/ && v !~ /\\\?|\[\?\]/ && ((op=="=~" || op=="!~") || v !~ /\?/)) selector=safe(v)
+        }
+        else if(token[a+1]=="SERVER" && token[a+3]=="socket" && op=="==") { what="socket"; selector=host(v); if(v ~ /:[0-9]+$/) { sub(/^.*:/,"",v); setting[id,"server.port"]=v } }
+      }
+      selection[id]=selector; selection_kind[id]=what
+      if(what=="conditional" || selector=="unknown") { warn("unresolved_condition",file,line); unknown[id]=1 }
+      return id
+    }
+    BEGIN { FS="\t"; OFS="\t"; parent[0]=-1; selection[0]="default"; selection_kind[0]="default"; current=0; start=1 }
+    $1=="W" || $1=="e" { warn(substr($2,2),$3,$4); next }
+    {
+      typ=$1; value=substr($2,2)
+      if(typ=="n" && parens>0) next
+      if(typ=="n" || (typ=="p" && value==";")) { statement(start,count,current,first_file,first_line); count=0; start=1; next }
+      if(typ=="p" && value=="{" && parens==0) { current=condition(start,count,current,first_file,first_line); count=0; start=1; next }
+      if(typ=="p" && value=="}" && parens==0) {
+        statement(start,count,current,first_file,first_line); count=0; start=1
+        if(current==0) warn("unbalanced_context",$3,$4); else current=parent[current]
+        next
+      }
+      if(!count) { first_file=$3; first_line=$4; if(source[0]=="") {source[0]=$3; lineno[0]=$4} }
+      count++; token[count]=value; kind[count]=typ
+      if(typ=="p" && value=="(") parens++
+      if(typ=="p" && value==")") { parens--; if(parens<0) { warn("unbalanced_array",$3,$4); parens=0 } }
+      if(count>20000) {warn("token_limit",$3,$4); exit}
+    }
+    END {
+      if(count) statement(start,count,current,first_file,first_line)
+      if(parens || current) warn("unclosed_context_or_array",first_file,first_line)
+      for(i=1;i<=nh;i++) {
+        if(disabled[i]) continue
+        n=handler_node[i]
+        if(host_paths_unresolved) continue
+        if(effective_module(n,handler_module[i])) {
+          print "handler",handlers[i]
+          active[n,handler_kind[i]]=1
+        } else {warn("handler_module_unresolved",source[n],lineno[n]); unknown[n]=1}
+      }
+      for(i=1;i<=nr;i++) print "redirect",redirects[i]
+      for(n=0;n<=nodes;n++) {
+        runtime="static_files"; seen=0; bad=incomplete
+        for(j=n;j>=0;j=parent[j]) {
+          if(unknown[j]) bad=1
+          for(k=1;k<=nh;k++) if(handler_node[k]==j && handler_applies(n,k)) {
+            if(!seen) runtime=handler_kind[k]; else if(runtime!=handler_kind[k]) runtime="unknown"
+            seen++
+          }
+        }
+        if(bad) runtime="unknown"
+        root=inherited(n,"server.document-root"); username=inherited(n,"server.username"); port=inherited(n,"server.port"); tls=inherited(n,"ssl.engine")
+        if(host_paths_unresolved) root="unknown"
+        if(root=="unknown" && runtime=="static_files") { warn("unresolved_document_root",source[n],lineno[n]); runtime="unknown"; bad=1 }
+        selector=selection[n]; if(n==0 && inherited(0,"server.name")!="unknown") selector=inherited(0,"server.name")
+        route="none"; for(j=n;j>0;j=parent[j]) route=selection_kind[j] ":" selection[j] (route=="none" ? "" : ";" route)
+        print "site",n,safe(selector),selection_kind[n],port,tls,root,username,runtime,safe(source[n]),val(lineno[n]),safe(route),(bad ? "incomplete" : "literal_configuration")
+      }
+      print "meta","configuration_complete",(incomplete ? "false" : "true")
+    }
+  ')
 }
 
 function manifest_has_php_document_root() {
@@ -9440,9 +11312,11 @@ function manifest_dns() {
     fi
   done
   if [ "${#manifest_dns_names[@]}" -ge "$manifest_dns_limit" ]; then manifest_dns_reason=domain_limit; return; fi
-  if { ! command -v timeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; } ||
-      { ! command -v getent >/dev/null 2>&1 && ! command -v host >/dev/null 2>&1; }; then
-    manifest_dns_reason=resolver_or_timeout_unavailable; return
+  if ! command -v getent >/dev/null 2>&1 && ! command -v host >/dev/null 2>&1; then
+    manifest_dns_reason=resolver_client_unavailable; return
+  fi
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; then
+    manifest_dns_reason=timeout_facility_unavailable; return
   fi
   if command -v getent >/dev/null 2>&1 && addresses=$(manifest_run_bounded 2 getent ahosts "$domain" 2>/dev/null); then
     # 192.0.2.1 STREAM example.invalid plus a DGRAM row for the same address -> one 192.0.2.1.
@@ -9502,11 +11376,22 @@ function manifest_dns() {
 
 # Read version declarations as text. Executing an application file to obtain
 # its version could run customer code, load secrets or change the application during inventory collection.
+# manifest_application /srv/www configured_document_root configured_document_root static_file_only
+# keeps discovery/site_mapping in arguments 2/3 and execution in argument 4.
+# Conventional packaged copies instead use conventional_package_path/unknown.
 function manifest_application() {
   local version_pattern='^[0-9][A-Za-z0-9.+_()\ -]{0,100}$'
-  local document_root="$1" file='' application=unknown version=unknown language=unknown language_version=unknown version_source=unknown modified=unknown
+  local discovery=${2:-configured_document_root} site_mapping=${3:-configured_document_root}
+  local document_root="$1" file='' resolved execution="${4:-unknown}" application=unknown version=unknown language=unknown language_version=unknown version_source=unknown modified=unknown version_file=unknown
   case "$document_root" in /*) ;; *) return ;; esac
   case "$document_root" in *'$'*|*'%'*|*'{'*|*'}'*) return ;; esac
+  if [ -n "$manifest_root" ]; then
+    resolved=$(readlink -f -- "$manifest_root$document_root" 2>/dev/null) || resolved=
+    case "$resolved" in "$manifest_root"/*) :;; *)
+      manifest_emit warning area applications reason 'Document root resolves outside the inventory root or is unresolved; application markers were not read.'
+      manifest_collection_failed=true; return;;
+    esac
+  fi
   if [ -f "$manifest_root$document_root/wp-includes/version.php" ]; then
     file="$manifest_root$document_root/wp-includes/version.php"; application=WordPress; language=PHP
     # $wp_version = "6.5.3"; -> version=6.5.3.
@@ -9544,7 +11429,10 @@ function manifest_application() {
   # A version is metadata, never an arbitrary expression or configuration value.
   # 6.5.3 and 6.5.3 (stable) pass; VERSION_CONSTANT and 6.5.3;extra become unknown.
   if [[ ! "$version" =~ $version_pattern ]]; then version=unknown; fi
-  if [ -n "$file" ]; then modified=$(stat -c '%y' -- "$file" 2>/dev/null) || modified=unknown; fi
+  if [ -n "$file" ]; then
+    version_file=${file#"$manifest_root"}
+    modified=$(stat -c '%y' -- "$file" 2>/dev/null) || modified=unknown
+  fi
   case "$language" in
     Ruby) file="$manifest_root$document_root/.ruby-version" ;;
     Python) file="$manifest_root$document_root/.python-version" ;;
@@ -9556,7 +11444,66 @@ function manifest_application() {
     if [[ "$language_version" =~ ^[0-9][0-9A-Za-z.+_-]{0,60}$ ]]; then version_source=project_declared_not_verified_runtime
     else language_version=unknown; fi
   fi
-  manifest_emit application document_root "$document_root" application "$application" version "$version" language "$language" language_version "$language_version" language_version_source "$version_source" version_file_modified "$modified" date_basis filesystem_metadata_not_install_date
+  manifest_emit application discovery "$discovery" site_mapping "$site_mapping" document_root "$document_root" application "$application" version "$version" language "$language" language_version "$language_version" language_version_source "$version_source" version_file "$version_file" version_file_modified "$modified" date_basis filesystem_metadata_not_install_date execution "$execution" activity unknown activity_basis file_markers_not_live_requests
+}
+
+# Distribution WordPress files can coexist with separately deployed websites.
+# Presence checks inspect fixed paths only; never read wp-config.php credentials.
+function manifest_packaged_wordpress() {
+  local root=/usr/share/wordpress path present
+  if [ ! -f "$manifest_root$root/wp-includes/version.php" ]; then return 0; fi
+  case "|$manifest_seen_roots|" in
+    *"|$root|"*) ;;
+    *) manifest_application "$root" conventional_package_path unknown;;
+  esac
+  for path in /etc/wordpress/config-default.php /etc/wordpress/htaccess /usr/share/wordpress/wp-config.php /etc/apache2/conf-enabled/wordpress.conf; do
+    present=false
+    if [ -e "$manifest_root$path" ] || [ -L "$manifest_root$path" ]; then present=true; fi
+    manifest_emit application_config_presence application WordPress path "$path" present "$present" discovery conventional_package_path site_mapping unknown
+  done
+  return 0
+}
+
+
+# Observe configured authorities only. Never send URL credentials, request data,
+# browser cookies or redirected requests; curl configuration/proxies are disabled.
+function manifest_http() {
+  local name=$1 scheme=$2 port=$3 key url output status=not_run code=unknown address=unknown verify=unknown reason=observed probe_started=$SECONDS
+  local host_pattern='^([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])$'
+  # example.test/443 -> https://example.test:443/; user@example.test and wildcard names are skipped.
+  if [[ ! "$name" =~ $host_pattern ]] || [[ ! "$port" =~ ^[0-9]{1,5}$ ]] ||
+      [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; then return 0; fi
+  case "$scheme" in http|https) :;; *) return 0;; esac
+  [ "$name" != unknown ] || return 0
+  key="$scheme://$name:$port"
+  case "|$manifest_http_seen|" in *"|$key|"*) return 0;; esac
+  manifest_http_seen="$manifest_http_seen|$key"
+  url="$key/"
+  if "${manifest_unprivileged:-false}"; then reason=skipped_unprivileged
+  elif ! "${manifest_http_enabled:-true}"; then reason=disabled
+  elif ! command -v curl >/dev/null 2>&1; then reason=curl_unavailable
+  elif [ "${manifest_http_count:-0}" -ge 40 ] || [ $((SECONDS - (${manifest_http_started:-$SECONDS}))) -ge 45 ]; then reason=probe_limit
+  else
+    manifest_http_count=$(( ${manifest_http_count:-0} + 1 ))
+    # curl write-out: 301|192.0.2.10|0 -> status=301, remote_ip=192.0.2.10, tls_verify_result=0.
+    # Exit 6/28/60 retains DNS/timeout/certificate failure numerically; stderr and response headers are discarded.
+    output=$(manifest_run_bounded 6 curl -q --silent --head --output /dev/null --noproxy '*' --connect-timeout 2 --max-time 4 --max-redirs 0 --proto '=http,https' --write-out '%{http_code}|%{remote_ip}|%{ssl_verify_result}' -- "$url" 2>/dev/null)
+    status=$?
+    IFS='|' read -r code address verify <<< "$output"
+    case "$code" in [0-9][0-9][0-9]) :;; *) code=unknown;; esac
+    case "$address" in ''|*[!0-9A-Fa-f:.]*) address=unknown;; esac
+    case "$verify" in ''|*[!0-9]*) verify=unknown;; esac
+    [ "$status" -eq 0 ] || reason=curl_error
+    if [ "$scheme" = https ]; then
+      # curl can return its default verify=0 before TLS starts (e.g. DNS failure).
+      if [ "$code" = 000 ] && [ "$verify" = 0 ]; then verify=unknown; fi
+    else verify=not_applicable; fi
+  fi
+  # Network waiting must not consume the separate website-file sampling budget.
+  if [ -n "${manifest_web_started:-}" ]; then
+    manifest_web_started=$((manifest_web_started + SECONDS - probe_started))
+  fi
+  manifest_emit website_probe name "$name" protocol "$scheme" port "$port" url "$url" method HEAD http_status "$code" remote_ip "$address" tls_verify_result "$verify" curl_status "$status" reason "$reason"
 }
 
 # Infer the website runtime from its handler, FPM pool or Apache module.
@@ -9565,8 +11512,13 @@ function manifest_website() {
   local name_port_pattern='^([^:]+|\[[^]]+\]):([0-9]+)$'
   local server="$1" names="$2" port="$3" tls="$4" document_root="$5" user="$6" runtime="$7" config="$8"
   local name url scheme=http primary_url=unknown primary=true runtime_version=unknown runtime_source=unknown runtime_package=unknown i matched_pool=-1 ambiguous_pool=false
-  local certificate_file=${9:-unknown} certificate_file_present=unknown proxy=${10:-unknown}
+  local certificate_file=${9:-unknown} certificate_file_present=unknown proxy=${10:-unknown} document_root_exists=unknown
+  local configuration_scope=${11:-unknown} execution=${12:-unknown}
   local url_host_pattern='^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f:.]+\])$'
+  case "$document_root" in
+    *'$'*|*'%'*|*'{'*|*'}'*) :;;
+    /*) document_root_exists=false; [ ! -d "$manifest_root$document_root" ] || document_root_exists=true;;
+  esac
   # shortcut: Check direct paths only; resolve includes/automatic TLS if richer inventory is needed.
   case "$certificate_file" in
     *'$'*|*'%'*|*'{'*|*'}'*|*'"'*|*"'"*) certificate_file=unknown;;
@@ -9620,11 +11572,15 @@ function manifest_website() {
       primary=false
     fi
     manifest_dns "$name"
-    manifest_emit website server "$server" name "$name" port "$port" tls "$tls" url "$url" primary_url "$primary_url" certificate_file "$certificate_file" certificate_file_present "$certificate_file_present" document_root "$document_root" user "$user" runtime "$runtime" runtime_version "$runtime_version" runtime_version_source "$runtime_source" runtime_package "$runtime_package" config "$config" dns "$manifest_dns_result" dns_addresses "$manifest_dns_addresses" dns_reason "$manifest_dns_reason" proxy "$proxy" proxy_basis literal_config_authority_not_resolved
+    manifest_emit website server "$server" name "$name" port "$port" tls "$tls" url "$url" primary_url "$primary_url" certificate_file "$certificate_file" certificate_file_present "$certificate_file_present" document_root "$document_root" document_root_exists "$document_root_exists" user "$user" runtime "$runtime" runtime_version "$runtime_version" runtime_version_source "$runtime_source" runtime_package "$runtime_package" config "$config" dns "$manifest_dns_result" dns_addresses "$manifest_dns_addresses" dns_reason "$manifest_dns_reason" proxy "$proxy" proxy_basis literal_config_authority_not_resolved configuration_scope "$configuration_scope" execution "$execution" activity unknown activity_basis configuration_not_live_requests
+    case "$scheme:$port" in
+      http:80|https:443|*:unknown) manifest_http "$name" http 80; manifest_http "$name" https 443;;
+      *) manifest_http "$name" "$scheme" "$port";;
+    esac
   done
   case "|$manifest_seen_roots|" in *"|$document_root|"*) ;; *)
     manifest_seen_roots="$manifest_seen_roots|$document_root"
-    manifest_application "$document_root"
+    manifest_application "$document_root" configured_document_root configured_document_root "$execution"
     manifest_web_indicators "$document_root" ;;
   esac
 }
@@ -9763,6 +11719,225 @@ function manifest_websites() {
       done <<< "$records"
     done <<< "$files"
   done
+  manifest_lighttpd_websites
+}
+
+# Paths are metadata, not a reason to start an old application. A public asset
+# root can point into a retained application: /srv/www/files -> ../legacy/public
+# yields resolved_path=/srv/legacy/public and migration_role=required_public_assets.
+function manifest_website_assets() {
+  local root=$1 execution=$2 actual resolved project file paths candidate depth=0 symlink=false exists=false
+  case "$root" in /*) :;; *) return;; esac
+  case "$root" in /|/home|/root|/srv|/var|/var/www|/usr|/opt|/etc|/etc/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|*'$'*|*'%'*|*'{'*|*'}'*) return;; esac
+  actual="$manifest_root$root"
+  resolved=$(readlink -f -- "$actual" 2>/dev/null) || resolved=
+  if [ -n "$manifest_root" ]; then
+    case "$resolved" in "$manifest_root"/*) :;; *) resolved=;; esac
+  fi
+  [ ! -d "$actual" ] || exists=true
+  if [ -n "$resolved" ] && [ "$resolved" != "$actual" ]; then symlink=true; fi
+  manifest_emit web_asset_root document_root "$root" resolved_path "${resolved#"$manifest_root"}" exists "$exists" symlink "$symlink" migration_role required_public_assets execution "$execution"
+  [ -n "$resolved" ] && $exists || return
+  case "${resolved#"$manifest_root"}" in /|/etc|/etc/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*) return;; esac
+  # Inspect at most four ancestors for a conventional application marker, never
+  # an environment, database config or code body. A Rails config marker does not
+  # establish that the application is running or that its startup should be copied.
+  project=$resolved
+  while [ "$depth" -lt 4 ]; do
+    case "${project#"$manifest_root"}" in ''|/|/home|/root|/srv|/var|/var/www|/usr|/opt) break;; esac
+    for candidate in config/environment.rb config.ru manage.py wp-settings.php; do
+      [ -f "$project/$candidate" ] || continue
+      manifest_emit application_context document_root "$root" path "${project#"$manifest_root"}" marker "$candidate" role asset_ancestor activity unknown execution not_implied_by_asset_use migration_default preserve_activity_and_data
+      break 2
+    done
+    project=${project%/*}; depth=$((depth+1))
+  done
+  if ! paths=$(set -o pipefail; manifest_run_bounded 2 find "$resolved" -maxdepth 1 \
+      \( -name '*[[:cntrl:]]*' -prune \) -o \( -type f \( -name '*.php' -o -name '*.py' -o -name '*.rb' -o -name '*.pl' -o -name '*.cgi' -o -name '*.fcgi' -o -name '*.sh' \) -print \) 2>/dev/null | head -n 21); then
+    manifest_emit warning area website_assets reason 'Script-file metadata sampling failed or timed out; missing files remain unknown.'
+    return
+  fi
+  depth=0
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    depth=$((depth+1))
+    if [ "$depth" -gt 20 ]; then manifest_emit warning area website_assets reason 'Only the first 20 top-level script-file paths were sampled; file contents were not read.'; break; fi
+    case "$file" in *.php) candidate=PHP;; *.py) candidate=Python;; *.rb) candidate=Ruby;; *.pl) candidate=Perl;; *.sh) candidate=Shell;; *) candidate=unknown;; esac
+    manifest_emit web_file document_root "$root" path "${file#"$manifest_root"}" language "$candidate" execution "$execution" evidence filename_not_executed
+  done <<< "$paths"
+}
+
+# Associate a configured handler with its executable/pool, never with CLI PHP.
+# cgi.assign: ".py" => "/usr/bin/python3" -> language=Python; a FastCGI socket
+# matching listen=/run/php/site.sock -> version from that pool, not `php -v`.
+function manifest_lighttpd_handler() {
+  local scope=$1 selector=$2 kind=$3 executable=$4 socket=$5 host=$6 port=$7 config=$8 line=$9
+  local language=unknown interpreter=unknown version=unknown package=unknown version_source=unknown actual first owner rows name candidate status architecture i matches=0
+  local version_pattern='^([0-9]+[.][0-9]+([.][0-9]+)?)'
+  if [ "$kind" = fastcgi ]; then
+    for ((i=0;i<${#manifest_fpm_sockets[@]};i++)); do
+      if { [ "$socket" != unknown ] && [ "$socket" = "${manifest_fpm_sockets[i]}" ]; } ||
+          { [ "$host" != unknown ] && [ "$port" != unknown ] && [ "$host:$port" = "${manifest_fpm_sockets[i]}" ]; }; then
+        matches=$((matches+1))
+        language=PHP; version=${manifest_fpm_versions[i]}; package=${manifest_fpm_packages[i]}; version_source=fpm_pool_config
+      fi
+    done
+    if [ "$matches" -gt 1 ]; then version=unknown; package=unknown; version_source=ambiguous_fpm_pool_config; fi
+  fi
+  case "$executable" in
+    /*)
+      interpreter=$executable
+      actual=$(readlink -f -- "$manifest_root$executable" 2>/dev/null) || actual=
+      if [ -n "$manifest_root" ]; then case "$actual" in "$manifest_root"/*) :;; *) actual=;; esac; fi
+      if [ -f "$actual" ] && [ -r "$actual" ]; then
+        first=$(head -c 2 -- "$actual" 2>/dev/null)
+        if [ "$first" = '#!' ]; then
+          # read stops at the first newline or 512 characters; no code body is needed.
+          IFS= read -r -n 512 -t 1 first < "$actual" || :
+        else first=; fi
+        # #!/usr/bin/env python3 -> interpreter=/usr/bin/env, language=Python;
+        # #!/usr/bin/ruby -> interpreter=/usr/bin/ruby, language=Ruby. No script runs.
+        if [[ "$first" =~ ^\#![[:space:]]*(/[A-Za-z0-9_./+-]+) ]]; then
+          interpreter=${BASH_REMATCH[1]}
+          case "$first" in '#!'*'/env python'*|'#!'*'/env -S python'*) language=Python;; '#!'*'/env ruby'*) language=Ruby;; '#!'*'/env perl'*) language=Perl;; esac
+        fi
+      fi
+      case "${interpreter##*/}" in php*|php-cgi) language=PHP;; python*) language=Python;; ruby*) language=Ruby;; perl*) language=Perl;; esac
+      # An env wrapper only identifies a language; its interpreter version stays unknown.
+      actual=$(readlink -f -- "$manifest_root$interpreter" 2>/dev/null) || actual=
+      if [ -n "$manifest_root" ]; then case "$actual" in "$manifest_root"/*) :;; *) actual=;; esac; fi
+      if [ "$version_source" = unknown ] && [ "${interpreter##*/}" != env ] && [ "$language" != unknown ] && [ -f "$actual" ] &&
+          owner=$(packages_output_file_owner "${actual#"$manifest_root"}" "$manifest_package_backend" 2>/dev/null); then
+        owner=${owner%%:*}
+        if rows=$(packages_output_inventory "$manifest_package_backend" 2>/dev/null); then
+          while IFS=$'\t' read -r name candidate status architecture; do
+            name=${name%%:*}
+            [ "$name" = "$owner" ] || continue
+            case "$status" in installed|*' installed') :;; *) continue;; esac
+            candidate=${candidate#*:}
+            if [[ "$candidate" =~ $version_pattern ]]; then version=${BASH_REMATCH[1]}; package=$owner; version_source=installed_handler_package; fi
+            break
+          done <<< "$rows"
+        fi
+      fi;;
+  esac
+  manifest_emit website_handler server lighttpd configuration_scope "$scope" selector "$selector" kind "$kind" executable "$executable" interpreter "$interpreter" socket "$socket" backend_host "$host" backend_port "$port" language "$language" runtime_version "$version" runtime_package "$package" runtime_version_source "$version_source" config "$config" line "$line" activity unknown activity_basis configured_handler_not_live_requests
+}
+
+# /proc/PID/cmdline: lighttpd<NUL>-f<NUL>/etc/lighttpd/lighttpd.conf<NUL>
+# -> only config=/etc/lighttpd/lighttpd.conf. /proc/PID/maps paths ending in
+# mod_staticfile.so -> modules=mod_staticfile; all other argv/map fields are omitted.
+function manifest_lighttpd_frontends() {
+  local directory pid file line name recorded_pid count=0 lines arg expect_config=false config modules parsed started=$SECONDS incomplete=false
+  manifest_lighttpd_running_configs='|'
+  manifest_lighttpd_loaded_execution=false
+  manifest_lighttpd_frontend_incomplete=false
+  [ -d "$manifest_root/proc" ] && [ ! -L "$manifest_root/proc" ] || return 0
+  for directory in "$manifest_root"/proc/[0-9]*; do
+    [ -d "$directory" ] || continue
+    pid=${directory##*/}
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    count=$((count+1))
+    if [ "$count" -gt 20000 ] || [ $((SECONDS-started)) -ge 5 ]; then incomplete=true; break; fi
+    [ ! -L "$directory" ] && [ ! -L "$directory/status" ] && [ -f "$directory/status" ] && [ -r "$directory/status" ] || continue
+    name= recorded_pid= lines=0
+    while IFS= read -r -t 1 line; do
+      lines=$((lines+1)); [ "$lines" -le 64 ] || break
+      case "$line" in Name:$'\t'*) name=${line#*$'\t'};; Pid:$'\t'*) recorded_pid=${line#*$'\t'};; esac
+      [ -z "$name" ] || [ -z "$recorded_pid" ] || break
+    done < "$directory/status"
+    [ "$name" = lighttpd ] && [ "$recorded_pid" = "$pid" ] || continue
+    config=unknown; expect_config=false; lines=0
+    file=$directory/cmdline
+    if [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ]; then
+      while IFS= read -r -d '' -t 1 arg; do
+        lines=$((lines+1)); if [ "$lines" -gt 100 ] || [ $((SECONDS-started)) -ge 5 ]; then incomplete=true; break; fi
+        if $expect_config; then
+          case "$arg" in /*)
+            case "$arg" in *'$'*|*'%'*|*'|'*|*'?'*|*$'\t'*|*$'\r'*|*$'\n'*) :;; *) [ "${#arg}" -gt 500 ] || config=$arg;; esac;;
+          esac
+          expect_config=false
+        fi
+        [ "$arg" != -f ] || expect_config=true
+      done < "$file"
+    fi
+    modules=unknown
+    if [ -f "$directory/maps" ] && [ -r "$directory/maps" ] && [ ! -L "$directory/maps" ] &&
+        parsed=$(set -o pipefail; manifest_run_bounded 1 head -c 1048576 -- "$directory/maps" 2>/dev/null | LC_ALL=C awk '
+          /\/mod_[a-zA-Z0-9_]+[.]so([.][0-9]+)*([ \t]|$)/ {
+            name=$NF; sub(/^.*\//,"",name); sub(/[.]so.*$/,"",name)
+            if (name ~ /^mod_[A-Za-z0-9_]+$/ && !seen[name]++) { value=value (value ? "," : "") name }
+          }
+          END { if (value!="") print value }
+        '); then [ -z "$parsed" ] || modules=$parsed; fi
+    manifest_emit web_frontend server lighttpd pid "$pid" config "$config" modules "$modules" activity process_observed activity_basis proc_status_cmdline_maps
+    case ",$modules," in *,mod_cgi,*|*,mod_fastcgi,*|*,mod_scgi,*|*,mod_proxy,*|*,mod_magnet,*|*,mod_wstunnel,*) manifest_lighttpd_loaded_execution=true;; esac
+    if [ "$config" = unknown ]; then
+      manifest_emit warning area lighttpd reason 'A running lighttpd process has no readable literal -f configuration path; conventional configuration may not be active.'
+      manifest_lighttpd_frontend_incomplete=true; manifest_collection_failed=true
+    else manifest_lighttpd_running_configs="$manifest_lighttpd_running_configs$config|"; fi
+  done
+  if $incomplete; then
+    manifest_emit warning area lighttpd reason 'Lighttpd process/config/module metadata coverage reached its time or process limit; activity remains unknown.'
+    manifest_lighttpd_frontend_incomplete=true; manifest_collection_failed=true
+  fi
+}
+
+function manifest_lighttpd_websites() {
+  local file="$manifest_root/etc/lighttpd/lighttpd.conf" records type node names selector port tls root user runtime config line route certainty scope execution mapping_complete=true
+  local field1 field2 field3 field4 field5 field6 field7 field8 field9 field10 field11 field12 frontend=unknown has_handlers=false
+  local manifest_lighttpd_running_configs='|' manifest_lighttpd_loaded_execution=false manifest_lighttpd_frontend_incomplete=false
+  local manifest_lighttpd_seen_roots='|'
+  manifest_lighttpd_frontends
+  $manifest_lighttpd_frontend_incomplete && mapping_complete=false
+  if [ ! -f "$file" ]; then
+    if [ "$manifest_lighttpd_running_configs" != '|' ] || $manifest_lighttpd_loaded_execution; then
+      manifest_emit warning area lighttpd reason 'A running lighttpd process has no conventional configuration file to inspect; its sites and handlers require manual mapping.'
+      manifest_collection_failed=true
+    fi
+    return 0
+  fi
+  case "$manifest_lighttpd_running_configs" in *'|/etc/lighttpd/lighttpd.conf|'*) frontend=process_config_observed;; '|') :;; *)
+    manifest_emit warning area lighttpd reason 'The running lighttpd configuration differs from the conventional file; conventional sites may be inactive and the active mapping requires review.'
+    manifest_collection_failed=true; mapping_complete=false;;
+  esac
+  if ! records=$(manifest_lighttpd_output_configuration "$file"); then
+    manifest_emit warning area lighttpd reason 'Lighttpd configuration parsing failed; site/runtime mapping is unknown.'
+    manifest_collection_failed=true
+    return
+  fi
+  while IFS=$'\t' read -r type field1 field2 field3 field4 field5 field6 field7 field8 field9 field10 field11 field12; do
+    if [ "$type:$field1:$field2" = meta:configuration_complete:false ]; then mapping_complete=false; fi
+    [ "$type" != handler ] || has_handlers=true
+  done <<< "$records"
+  if $manifest_lighttpd_loaded_execution && ! $has_handlers; then
+    manifest_emit warning area lighttpd reason 'Loaded executing/proxy modules have no resolved handlers in the inspected configuration; the running mapping may differ and static-only execution is unverified.'
+    manifest_collection_failed=true; mapping_complete=false
+  fi
+  while IFS=$'\t' read -r type field1 field2 field3 field4 field5 field6 field7 field8 field9 field10 field11 field12; do
+    case "$type" in
+      warning)
+        manifest_emit warning area lighttpd reason "$field1" config "$field2" line "$field3"
+        manifest_collection_failed=true;;
+      handler)
+        manifest_lighttpd_handler "lighttpd:$field1" "$field2" "$field3" "$field4" "$field5" "$field6" "$field7" "$field8" "$field9";;
+      redirect)
+        manifest_emit website_redirect server lighttpd configuration_scope "lighttpd:$field1" pattern "$field2" target "$field3" config "$field4" line "$field5" activity unknown activity_basis configured_not_requested;;
+      site)
+        node=$field1; names=$field2; selector=$field3; port=$field4; tls=$field5; root=$field6; user=$field7; runtime=$field8; config=$field9; line=$field10; route=$field11; certainty=$field12
+        scope="lighttpd:$node"; execution=unknown
+        $mapping_complete || runtime=unknown
+        if [ "$runtime" = static_files ] && ! $has_handlers; then execution=static_file_only; fi
+        manifest_emit lighttpd_site configuration_scope "$scope" selector "$names" selector_kind "$selector" route_condition "$route" mapping "$certainty" runtime "$runtime" frontend "$frontend" activity unknown activity_basis configuration_not_live_requests config "$config" line "$line"
+        # Regex and URL selectors are routing conditions, not literal DNS names.
+        case "$selector" in literal_host) :;; default) [ "$names" != default ] || names=unknown;; *) names=unknown;; esac
+        manifest_website lighttpd "$names" "$port" "$tls" "$root" "$user" "$runtime" "$config" unknown unknown "$scope" "$execution"
+        case "$manifest_lighttpd_seen_roots" in *"|$root|"*) :;; *)
+          manifest_lighttpd_seen_roots="$manifest_lighttpd_seen_roots$root|"
+          manifest_website_assets "$root" "$execution";;
+        esac;;
+    esac
+  done <<< "$records"
 }
 
 # Limit both configured paths and resolved aliases before probing mail data.
@@ -9909,6 +12084,8 @@ function manifest_mail() {
   done
   manifest_mail_root /root/Maildir conventional
   manifest_mail_root /root/.Maildir conventional
+  # An absent optional mail directory is a successful inventory with no store.
+  return 0
 }
 
 # Passive migration hints: paths and fixed identity fields, never configured commands or secrets.
@@ -9933,6 +12110,32 @@ function manifest_migration_systemd_target() {
       END { exit !found }') || return 1
   fi
   printf '%s\n' "$target"
+}
+
+# Residual dpkg configuration belongs in migration review even after removal.
+# Keep the general installed-owner helper strict for runtime/package decisions.
+function manifest_migration_file_origin() {
+  local file=$1 backend=$2 root=${3:-} records path owner state
+  if records=$(packages_output_file_origin "$file" "$backend" "$root"); then
+    printf '%s\n' "$records"
+    return 0
+  fi
+  [ "$backend" = dpkg ] || return 1
+  path=${file#"$root"}
+  case "$path" in /*) :;; *) return 1;; esac
+  case "$path" in *$'\n'*|*$'\r'*|*$'\t'*) return 1;; esac
+  records=$(LC_ALL=C dpkg-query -S "$path" 2>/dev/null) || return 1
+  case "$records" in *$'\n'*|*','*) return 1;; esac
+  # dpkg-query -S: dovecot-core: /etc/init.d/dovecot -> owner=dovecot-core.
+  # dpkg-query -W ${Status}: deinstall ok config-files -> retained residual_package_config.
+  case "$records" in *": $path") owner=${records%": $path"};; *) return 1;; esac
+  case "$owner" in ''|*[!a-z0-9.+:-]*) return 1;; esac
+  state=$(LC_ALL=C dpkg-query -W -f='${Status}' "$owner" 2>/dev/null) || return 1
+  case "$state" in
+    'deinstall ok config-files'|'purge ok config-files'|'hold ok config-files'|'install ok config-files')
+      printf 'residual_package_config\t%s\n' "$owner";;
+    *) return 1;;
+  esac
 }
 
 function manifest_migration_path() {
@@ -9961,7 +12164,7 @@ function manifest_migration_path() {
     case "$source" in */systemd/system)
       if [ -L "$file" ]; then checked_file=$(manifest_migration_systemd_target "$file") || checked_file=$file; fi;;
     esac
-    if records=$(packages_output_file_origin "$checked_file" "$manifest_package_backend" "$manifest_root"); then
+    if records=$(manifest_migration_file_origin "$checked_file" "$manifest_package_backend" "$manifest_root"); then
       IFS=$'\t' read -r ownership package <<< "$records"
       if [ "$ownership" = packaged ]; then
         # chmod -x is a common way to disable a packaged run-parts job; keep that migration hint.
@@ -10106,16 +12309,74 @@ function manifest_probe() {
   return "$status"
 }
 
+# Public host keys only; a local file is evidence, not proof of the active sshd key.
+function manifest_ssh_host_keys() {
+  local file size key_type key_data comment output bits fingerprint remainder count=0 found=false
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    manifest_emit warning area ssh_host_keys reason 'ssh-keygen is unavailable; SHA256 host-key fingerprints are unknown.'
+    return 0
+  fi
+  if [ -L "$manifest_root/etc/ssh" ]; then
+    manifest_emit warning area ssh_host_keys reason 'The conventional SSH directory is a symlink; public host keys were not inspected.'
+    return 0
+  fi
+  for file in "$manifest_root"/etc/ssh/ssh_host_*_key.pub; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    found=true
+    count=$((count+1))
+    if [ "$count" -gt 32 ]; then
+      manifest_emit warning area ssh_host_keys reason 'Public host-key discovery stopped after 32 files; coverage is incomplete.'
+      break
+    fi
+    if [ -L "$file" ] || [ ! -f "$file" ] || [ ! -r "$file" ]; then
+      manifest_emit warning area ssh_host_keys reason 'A public host-key path is not a readable regular non-symlink file; its fingerprint is unknown.'
+      continue
+    fi
+    size=$(stat -c %s -- "$file" 2>/dev/null) || size=unknown
+    case "$size" in ''|*[!0-9]*) size=0;; esac
+    if [ "$size" -eq 0 ] || [ "$size" -gt 65536 ]; then
+      manifest_emit warning area ssh_host_keys reason 'A public host-key file is empty, too large or cannot be measured; its fingerprint is unknown.'
+      continue
+    fi
+    # OpenSSH .pub: ssh-ed25519 AAAA example-comment -> type=ssh-ed25519,
+    # data=AAAA, comment discarded. ssh-keygen separately validates the key blob.
+    key_type=; key_data=; comment=
+    read -r key_type key_data comment < "$file" || :
+    case "$key_type" in ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521) :;; *) key_data=;; esac
+    case "$key_data" in ''|*[!A-Za-z0-9+/=]*)
+      manifest_emit warning area ssh_host_keys reason 'A public host-key file has an unsupported or malformed first line; its fingerprint is unknown.'
+      continue;;
+    esac
+    if ! output=$(printf '%s %s\n' "$key_type" "$key_data" | LC_ALL=C ssh-keygen -l -E sha256 -f - 2>/dev/null); then
+      manifest_emit warning area ssh_host_keys reason 'SHA256 fingerprinting failed; the key may be invalid or this ssh-keygen may lack SHA256 support.'
+      continue
+    fi
+    # ssh-keygen -l -E sha256: 256 SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA (stdin) (ED25519)
+    # -> bits=256, fingerprint=SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; discard the rest.
+    read -r bits fingerprint remainder <<< "$output"
+    if [[ ! "$bits" =~ ^[0-9]+$ ]] || [[ ! "$fingerprint" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || [[ "$output" = *$'\n'* ]]; then
+      manifest_emit warning area ssh_host_keys reason 'Unexpected SHA256 fingerprint output; no host-key identity was recorded for this file.'
+      continue
+    fi
+    manifest_emit ssh_host_key path "${file#"$manifest_root"}" key_type "$key_type" bits "$bits" fingerprint "$fingerprint" source public_key_file active unknown
+  done
+  if ! $found; then
+    manifest_emit warning area ssh_host_keys reason 'No conventional public host-key files were found; custom sshd paths and active keys remain unknown.'
+  fi
+}
+
 function manifest_output() (
   local manifest_format="${1:-text}" manifest_dns_enabled="${2:-${DR_MANIFEST_DNS:-true}}" manifest_root="${3:-/}"
   local manifest_unprivileged=${DR_UNPRIVILEGED:-false} manifest_redact=${MANIFEST_REDACT:-false}
   case "$manifest_unprivileged:$manifest_redact" in true:true|true:false|false:true|false:false) :;; *) return 1;; esac
   [ "$(id -u)" = 0 ] || manifest_unprivileged=true
-  local manifest_processes='' manifest_package_backend=unknown
+  local manifest_processes='' manifest_processes_available=false manifest_package_backend=unknown
   local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
   local manifest_review_file=${4:-} manifest_collection_failed=false manifest_warning_count=0
   local manifest_web_roots=0 manifest_web_files=0 manifest_web_findings=0 manifest_web_incomplete=false manifest_web_started=$SECONDS
   local manifest_dns_limit=20 manifest_mail_metrics="${DR_MANIFEST_MAIL_METRICS:-true}"
+  local manifest_http_enabled=${DR_MANIFEST_HTTP:-true} manifest_http_seen='' manifest_http_count=0 manifest_http_started=$SECONDS
+  case "$manifest_http_enabled" in true|false) :;; *) return 1;; esac
   local manifest_dns_addresses manifest_dns_result manifest_dns_reason
   local manifest_apache_php_available=false manifest_apache_php_version=unknown manifest_apache_php_package=unknown
   local -a manifest_php_packages=()
@@ -10145,24 +12406,34 @@ function manifest_output() (
   if $manifest_unprivileged; then
     manifest_emit warning area privileges reason 'Unprivileged collection: service status scripts, listener process ownership and mail size scans are skipped. Unreadable configuration, application files, private cron jobs and mail stores may be omitted; missing results are unknown.'
   fi
+  manifest_probe ssh_host_keys manifest_ssh_host_keys
   manifest_probe hosting_panels manifest_hosting_panels || manifest_collection_failed=true
   manifest_probe listeners manifest_listeners
   manifest_probe process_indicators manifest_process_indicators
   manifest_probe executable_indicators manifest_executable_indicators
   manifest_probe schedule_indicators manifest_schedule_indicators
-  manifest_processes=$(ps -eo comm= 2>/dev/null) || manifest_processes=
+  manifest_probe process_names manifest_process_names
+
+  manifest_probe resolver manifest_resolver
+  manifest_probe capacity manifest_capacity
+  manifest_probe upgrade_assets manifest_upgrade_assets
+  manifest_probe language_consumers manifest_language_consumers
   manifest_probe packages manifest_packages
+  manifest_probe service_states manifest_service_states
+  manifest_probe package_review manifest_package_review
   manifest_probe apache_php manifest_apache_php
   manifest_probe fpm_pools manifest_fpm_pools
   manifest_probe mail manifest_mail
   manifest_web_started=$SECONDS
+  manifest_http_started=$SECONDS
   manifest_probe websites manifest_websites
+  manifest_probe packaged_wordpress manifest_packaged_wordpress
   if $manifest_web_incomplete; then
     manifest_emit warning area security_websites reason 'Website security sampling is incomplete: unreadable, large or indirect files, failed probes or limits (20 roots, 200 files/findings, 256 KiB per file, 15 seconds plus the final probe). Only top-level files and common upload/cache and WordPress plugin directories to depth 3 are sampled.'
   fi
   manifest_probe migration manifest_migration
   if $manifest_collection_failed; then manifest_emit warning area collection reason 'One or more collectors failed; missing inventory sections are unknown.'; fi
-  manifest_emit warning area interpretation reason 'Reads common configuration files; custom settings may be missed. Websites and applications are not tested. Certificate files are listed, but HTTPS and certificate validity are not checked.'
+  manifest_emit warning area interpretation reason 'Inventory covers conventional configuration paths, application version files, certificate paths and bounded HTTP/HTTPS HEAD results. Review custom include paths and application workflows in the upgrade plan.'
   manifest_emit warning area security_review reason 'Review potential compromise indicators manually; checks cover selected patterns and paths, and a full security assessment requires separate investigation.'
   manifest_emit collection_status core_collectors_failed "$manifest_collection_failed" warning_count "$manifest_warning_count" completeness requires_review
   [ "$manifest_format" != json ] || printf ']}\n' || return 1
@@ -10173,6 +12444,13 @@ function manifest_output() (
 # Publish a paired JSON inventory and sorted review file only after collection succeeds.
 function manifest_capture() {
 (
+  case "${DR_UPGRADE_MANIFEST:-true}" in
+    true) :;;
+    false)
+      echo 'dss:warn: Automatic application inventory disabled by DR_UPGRADE_MANIFEST=false; supply scoped application baselines and checks separately.' >&2
+      return 2;;
+    *) echo 'dss:error: DR_UPGRADE_MANIFEST must be true or false.' >&2; return 1;;
+  esac
   umask 077
   local directory=$1 file MANIFEST_REDACT=false
   mkdir -m 700 -- "$directory" && chmod 700 -- "$directory" || return 1
@@ -10180,7 +12458,7 @@ function manifest_capture() {
   for file in records.tmp manifest.json.tmp manifest.review.tmp; do
     : > "$directory/$file" && chmod 600 -- "$directory/$file" || return 1
   done
-  DR_MANIFEST_MAIL_METRICS=false manifest_output json false "${2:-/}" "$directory/records.tmp" > "$directory/manifest.json.tmp" || return 1
+  DR_MANIFEST_MAIL_METRICS=false DR_MANIFEST_HTTP=false manifest_output json false "${2:-/}" "$directory/records.tmp" > "$directory/manifest.json.tmp" || return 1
   printf '%s\n' manifest-review-v1 > "$directory/manifest.review.tmp" || return 1
   LC_ALL=C sort "$directory/records.tmp" >> "$directory/manifest.review.tmp" || return 1
   mv -- "$directory/manifest.review.tmp" "$directory/manifest.review" &&
@@ -10218,12 +12496,20 @@ function manifest_print_key_changes() {
 # Status: 0 unchanged, 1 observations changed, 2 comparison unavailable. Never test application behaviour.
 function manifest_compare_baseline() {
 (
+  # Apply the current collection scope even when an older full inventory exists.
+  case "${DR_UPGRADE_MANIFEST:-true}" in
+    true) :;;
+    false)
+      echo 'dss:warn: Automatic application comparison disabled by DR_UPGRADE_MANIFEST=false; application behavior remains unverified by inventory.' >&2
+      return 2;;
+    *) echo 'dss:error: DR_UPGRADE_MANIFEST must be true or false.' >&2; return 1;;
+  esac
   umask 077
   local baseline=$1 original="$1.applications" directory result file
   if [ -z "$baseline" ] || [ -L "$original" ] || [ ! -f "$original/manifest.json" ] ||
       [ -L "$original/manifest.json" ] || [ ! -f "$original/manifest.review" ] || [ -L "$original/manifest.review" ] ||
       [ "$(head -n 1 -- "$original/manifest.review")" != manifest-review-v1 ]; then
-    printf 'dss:warn: Manifest comparison unavailable: no comparable original inventory at %s. No baseline was reconstructed.\n' "$original" >&2
+    printf 'dss:warn: Manifest comparison unavailable: no comparable original inventory at %s. Use the recorded checkpoints and direct service checks.\n' "$original" >&2
     return 2
   fi
   if [ "$(stat -c '%u' -- "$original")" != 0 ]; then
@@ -10393,12 +12679,77 @@ function upgrade_print_report() {
 # Build the public report from a small field allowlist. Trying to redact
 # arbitrary logs is unreliable because commands and configuration can contain credentials or customer data.
 # Public reports select fixed fields; raw logs/configuration are never copied or redacted.
+function is_complete_package_plan() {
+  # LC_ALL=C apt-get -s dist-upgrade emits, for example:
+  # 0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+  # -> complete. The same summary ending "1 not upgraded." -> incomplete,
+  # even without an Inst/Remv/Purg/Conf record. Require one complete all-zero
+  # summary; missing, duplicate, malformed or inconsistent summaries fail closed.
+  LC_ALL=C awk '
+    /^[0-9]+ upgraded,/ {
+      summaries++
+      if ($0 != "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.") bad=1
+    }
+    /^(Inst|Remv|Purg|Conf) / || /^[EW]:/ { bad=1 }
+    /^The following (packages|upgrades) have been (kept back|held back|deferred due to phasing):/ { bad=1 }
+    END { exit (summaries != 1 || bad) }
+  '
+}
+
+function support_output_package_error_recovery() {
+  local logfile=$1 run_status=$2 package_health=${3:-recorded}
+  [ -f "$logfile" ] && [ ! -L "$logfile" ] || return 1
+  # Private output.log producer examples:
+  # dpkg: error processing archive /var/cache/apt/archives/example.deb (--unpack):
+  #  trying to overwrite shared '/etc/example.conf', which is different from other instances
+  # -> dpkg package_file_conflict. A later line such as:
+  # dss:trace: Package recovery health: verified.
+  # -> final audit and complete zero-work plan evidence for console recovery.
+  # dss:stage: Outcome: release verified (trixie); packages verified (trixie); services verified.
+  # -> verified_recovered only when the action also returned zero. A failed, missing,
+  # mismatched or earlier outcome leaves these observations unresolved_or_unverified.
+  # A later support-report collection also requires its current package health checks.
+  LC_ALL=C awk -v run_status="$run_status" -v package_health="$package_health" '
+    /^dss:trace: Package recovery health: (verified|unverified)[.]$/ {
+      health_verified=($0 == "dss:trace: Package recovery health: verified.")
+      health_line=NR
+    }
+    /^dss:stage: Outcome: release / {
+      verified=0
+      if (/^dss:stage: Outcome: release verified [(][a-z]+[)]; packages verified [(][a-z]+[)]; services (verified|failed|unknown)[.]$/) {
+        split($0, checks, ";")
+        release=checks[1]; sub(/^.*[(]/, "", release); sub(/[)]$/, "", release)
+        packages=checks[2]; sub(/^.*[(]/, "", packages); sub(/[)]$/, "", packages)
+        verified=(release == packages)
+      }
+      outcome_line=NR
+    }
+    {
+      line=tolower($0)
+      if (line ~ /dpkg: error|dpkg returned an error/) { dpkg=1; error_line=NR }
+      if (line ~ /trying to overwrite/) { conflict=1; error_line=NR }
+    }
+    END {
+      if (!error_line) print "none_observed\tnone"
+      else {
+        recovered=(run_status == "0" && verified && outcome_line > error_line &&
+                   (package_health == "verified" ||
+                    (package_health == "recorded" && health_verified && health_line > error_line && health_line < outcome_line)))
+        printf "%s\t", (recovered ? "verified_recovered" : "unresolved_or_unverified")
+        if (dpkg) printf "dpkg"
+        if (conflict) printf "%spackage_file_conflict", (dpkg ? " " : "")
+        print ""
+      }
+    }
+  ' "$logfile"
+}
+
 function support_print_report() {
 (
   set -o pipefail
   local directory=${1:-} status=0 release family=unknown architecture kernel digest run_digest=unknown
   local exit_status=unknown action=unknown crossgrade=unknown target=unknown verification=not_recorded counts available mount
-  local tool version probe_status plan local_review=legacy
+  local tool version probe_status plan local_review=legacy package_recovery package_health=unverified audit
   if [ -n "$directory" ]; then
     if [ ! -d "$directory" ] || [ -L "$directory" ] || [ -L "$directory/support.context" ] || [ -L "$directory/output.log" ]; then
       printf '%s\n' 'dss:error: Choose an existing run directory without linked report files.' >&2; return 1
@@ -10464,7 +12815,7 @@ function support_print_report() {
   printf 'current_apt_policy_exit_status: %s\n' "$probe_status"
   [ "$probe_status" -ne 127 ] || status=1
   # A simulation describes current indexes, not completion of the requested release path.
-  plan=$(LC_ALL=C apt-get -s dist-upgrade 2>/dev/null)
+  plan=$(LC_ALL=C apt-get -s dist-upgrade 2>&1)
   probe_status=$?
   printf 'current_index_dist_upgrade_exit_status: %s\n' "$probe_status"
   if [ "$probe_status" -eq 0 ] && counts=$(printf '%s\n' "$plan" | awk '
@@ -10472,13 +12823,24 @@ function support_print_report() {
     /^[0-9]+ upgraded, [0-9]+ newly installed, [0-9]+ to remove/ { summary=1 }
     /^Inst / { install++ } /^Remv / { remove++ } /^Purg / { purge++ } /^Conf / { configure++ }
     END { if (!summary) exit 1; printf "install_or_upgrade=%d remove=%d purge=%d configure=%d", install, remove, purge, configure }
-  '); then printf 'current_index_package_plan: %s\n' "$counts"
+  '); then
+    printf 'current_index_package_plan: %s\n' "$counts"
+    if is_complete_package_plan <<< "$plan" && \
+        audit=$(LC_ALL=C dpkg --audit 2>&1) && [ -z "$audit" ]; then package_health=verified; fi
   else printf '%s\n' 'current_index_package_plan: unknown'; status=1; fi
+  printf 'current_package_health: %s\n' "$package_health"
   for mount in / /usr /var; do
     available=$(LC_ALL=C df -Pk -- "$mount" 2>/dev/null | awk 'END { if (NF >= 6 && $(NF-2) ~ /^[0-9]+$/) print int($(NF-2)/1024); else exit 1 }') || { available=unknown; status=1; }
     printf 'free_mib%s: %s\n' "$mount" "$available"
   done
   if [ -n "$directory" ] && [ -f "$directory/output.log" ]; then
+    if package_recovery=$(support_output_package_error_recovery "$directory/output.log" "$exit_status" "$package_health"); then
+      printf 'recorded_package_error_recovery: %s\nobserved_package_error_categories: %s\n' \
+        "${package_recovery%%$'\t'*}" "${package_recovery#*$'\t'}"
+    else
+      printf '%s\n' 'recorded_package_error_recovery: unknown' 'observed_package_error_categories: unknown'
+      status=1
+    fi
     if [ -e "$directory/php-runtime.findings.tsv.pending" ] || [ -L "$directory/php-runtime.findings.tsv.pending" ]; then local_review=incomplete
     elif [ -f "$directory/php-runtime.findings.tsv" ] && [ ! -L "$directory/php-runtime.findings.tsv" ]; then
       local_review=$(awk -F '\t' '
@@ -10611,6 +12973,7 @@ function support_print_report() {
       }
     ' "$directory/output.log" 2>/dev/null || status=1
   else
+    printf '%s\n' 'recorded_package_error_recovery: not_recorded' 'observed_package_error_categories: not_recorded'
     printf 'recorded_completion_verification: %s\n' "$verification"
     printf '%s\n' 'recorded_release_check: not_recorded' 'recorded_package_check: not_recorded' 'recorded_service_check: not_recorded' \
       'recorded_release_codename: not_recorded' 'recorded_package_release_codename: not_recorded' \
@@ -10638,7 +13001,7 @@ function logging_run() (
 	local logging_verbose="${LOG_VERBOSE:-false}" logging_trace="${LOG_TRACE:-false}"
 	local logging_dir logging_log logging_line logging_status logging_original_umask logging_digest logging_action_status=0
 	local logging_emphasis=false logging_summarize=false logging_level logging_required
-	local logging_expected_stop=false
+	local logging_expected_stop=false logging_package_recovery
 	local -a logging_pipeline_status
 
 	case "$logging_verbose:$logging_trace" in
@@ -10774,6 +13137,14 @@ function logging_run() (
 	if ! (umask 077; printf '%s\t%s\t%s\t%s\t%s\n' "$logging_status" "${DR_ACTION:-${2:-}}" "$logging_digest" "${UPGRADE_CROSSGRADE:-false}" "${3:-unknown}" > "$logging_dir/support.context" && chmod 600 -- "$logging_dir/support.context"); then
 		printf '%s\n' 'dss:warn Cannot record support-report context.' >&2
 	fi
+	# Read after tee finishes, so the final outcome and every earlier error are present.
+	if declare -F support_output_package_error_recovery >/dev/null && \
+		logging_package_recovery=$(support_output_package_error_recovery "$logging_log" "$logging_status"); then
+		case "${logging_package_recovery%%$'\t'*}" in
+			verified_recovered) printf '%s\n' 'dss:stage Earlier package errors were recovered; final release and package checks passed. Error evidence remains in the detailed log.' >&2;;
+			unresolved_or_unverified) printf '%s\n' 'dss:warn Earlier package errors remain unresolved or unverified; review the final outcome and detailed log.' >&2;;
+		esac
+	fi
 	if ! $logging_expected_stop && { [ "$logging_status" -ne 0 ] || [ -f "$logging_dir/outcome.incomplete" ]; }; then
 		if declare -F support_print_report >/dev/null; then
 			if (umask 077; : > "$logging_dir/support-report.txt" && chmod 600 -- "$logging_dir/support-report.txt" && support_print_report "$logging_dir" > "$logging_dir/support-report.txt"); then
@@ -10898,8 +13269,7 @@ elif [ "--remove-leftover-packages" = "${DR_ACTION:-$1}" ] ; then
   exit $?
 elif [ "--remove-deprecated-packages" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
-  ! has_leftover_packages oldpkg && echo "No leftover packages (all installed packages from the current distro).  Nothing to do.  All good." && exit 0
-  remove_leftover_packages oldpkg
+  upgrade_cleanup_deprecated_packages
   exit $?
 elif [ "--to-64bit" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1

@@ -1,5 +1,12 @@
 # Initial upgrade assessment report
 
+Issue this report only after receiving a usable source-associated manifest or
+successfully collecting source inventory. If neither is available, give a short
+access/collection status with the blocker and next action, and retain resumable
+job notes. General upgrade research, a successful login alone and another
+server's configuration are not a substitute. An operator-supplied manifest is
+enough to begin without SSH; a source-based report may identify remaining gaps.
+
 Write for two readers: the customer deciding what to do, and the sysadmin or
 agent preparing the work. Scale detail to the actual setup. A small, well-understood
 upgrade should produce a short report. Do not pad it with irrelevant risks or
@@ -8,6 +15,13 @@ copy the raw manifest into the customer explanation.
 Put the assigned `job_id` and report revision in the report header. They must
 match the durable [job record](../../../../docs/job-records.md). Keep request,
 ticket and VM identifiers distinct from the job ID.
+
+Provide a complete customer assessment that the operator can forward. It must
+stand alone without raw manifests, runner paths or another chat. Put detailed
+commands, access troubleshooting and collector diagnostics in a separate
+technical appendix. Link both artifacts from the private job record and keep
+their job ID, revision, recommendation and unresolved conditions consistent.
+Distinguish the report date from the evidence date when reusing an assessment.
 
 ## Customer explanation
 
@@ -20,11 +34,14 @@ looking up an acronym.
 Cover these questions in this order, combining sections for simple cases:
 
 1. **What do we recommend?** Name the source and proposed target, the recommended
-   route, its main reason, and whether this is provisional or ready for approval.
-   State the most important unresolved condition near the recommendation.
+   route and its main reason. Name the decision-changing issue near the
+   recommendation when one remains.
 2. **What is there now, and what would change?** Describe the server's jobs:
    websites, email, stored data, scheduled work and business-critical applications.
-   Use a small comparison table where useful:
+   Start with a human-readable bullet list of websites grouped by application,
+   mail/database services and other active workloads. Give the upgrade implication
+   for each. State current/target distribution and architecture, with an explicit
+   crossgrade needed yes/no. Use a small comparison table where useful:
 
    | Service or component | Current setup | Proposed change | What this means for you |
    | --- | --- | --- | --- |
@@ -32,9 +49,16 @@ Cover these questions in this order, combining sections for simple cases:
    Include the OS and relevant application/database/panel versions. Distinguish
    observed, customer-reported and inferred facts; mark missing facts as unknown.
    Say what should continue unchanged and what users may need to do differently.
+   Name the websites and distinguish currently live sites from inactive retained
+   applications. Default to preserving the live sites and their behaviour while
+   leaving inactive sites and applications inactive. File presence, an installed
+   runtime or an exited startup wrapper is not proof of live use. Note required
+   symlink targets and separate retention decisions; do not infer deletion or
+   reactivation authority from inactivity. Keep uncertain activity unknown and
+   name the missing check instead of proposing to disable that site.
    Explain relevant support/security changes from current official evidence,
-   including obsolete components that would remain after the upgrade. An OS
-   upgrade does not automatically modernize custom applications or containers.
+   including application updates needed alongside the OS change. State those
+   application tasks directly.
 3. **What are the particular risks?** Explain the few material risks supported
    by this source's evidence. For each, connect the observed condition to the
    proposed change, the possible customer impact, the proposed check/remedy,
@@ -56,6 +80,31 @@ Cover these questions in this order, combining sections for simple cases:
    Explain backup coverage and recovery limits in ordinary language. An assessment
    is not permission to make changes, buy resources or send customer messages.
 
+## Write concrete findings
+
+Let observations speak directly. Avoid boilerplate such as “this is not evidence
+of”, “absence is not proof of absence”, or “not an upgrade-ready plan”. State an
+uncertainty when it changes a decision, a risk or the next check. For example,
+“MySQL is masked and inactive; no database daemon was running” is useful when
+those states were checked. Installed extensions and an application database's
+location belong in their own findings.
+
+The owner report should include a short in-place sequence and the risks to the
+actual workloads. Keep routine copy isolation, backup preparation and final sync
+in the workflow; avoid presenting them as unusual conditions of this server.
+
+Make the appendix specific: hostname-to-vhost/document-root mapping, exact
+application version file, current/target versions, DNS answers and local/proxy
+routing where established, listener bind scope, package installation and service
+active/enabled/failed/masked states. Identify observed consumers of old runtimes
+from bounded process, cron and web-handler metadata. Keep raw arguments, secret
+settings and customer content out of reports.
+
+Use available authorized discovery to resolve useful gaps rather than repeating
+collection limitations. DNS addresses different from the source call for checking
+a proxy or another server before migration decisions. If only reduced input is
+available, still produce a useful inventory and describe consequential gaps once.
+
 ## Choosing the route
 
 Prefer **in-place** when the supported path is straightforward, relevant workloads
@@ -66,7 +115,7 @@ with no second-server copy, changing-data resync or traffic cutover. State that
 production changes happen before the customer can test the upgraded result.
 
 Choose **a separate copy or fresh server** when specific findings justify rehearsal
-or rebuilding: incompatible architecture, unsupported panel transitions, substantial
+or rebuilding: hardware incompatible with the target, unsupported panel transitions, substantial
 application/database changes, or important behaviour that needs testing before
 production changes. Multiple release hops can add risk but do not mandate a copy.
 Explain what this route helps test and what it does not solve. Account for copied
@@ -83,6 +132,17 @@ Explain why the other route is less suitable and what finding would change the
 recommendation. If neither is presently feasible, say so and identify the next check.
 For original-server image replacement, explain the overwrite, final verification
 and temporary-VM retirement. For a DNS/traffic switch, the prepared VM stays live.
+
+An i386-to-amd64 crossgrade is a candidate in-place stage, rather than an
+automatic reason to rebuild. Distrorejuve includes this path; verify its actual
+revision, prerequisites and application support for the job. Treat a needed tool
+fix as named work with an owner and validation, rather than assuming conversion
+will remain unavailable. Distinguish implemented capability, evidence from other
+jobs and an untested route on this source. Use the
+[crossgrade assessment](../../../../docs/upgrade-and-migration.md#assessing-an-architecture-crossgrade)
+to weigh release/package state, workload compatibility, capacity, boot/access,
+recovery, outage and customer preferences together. Explain which findings
+actually decide the route and which are remediable prerequisites.
 
 Distinguish **clean installation on a new server** from upgrading a clone.
 Explain when rebuilding avoids obsolete OS state or unsupported transitions,

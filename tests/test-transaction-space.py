@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 SOURCE = pathlib.Path(os.environ.get('DR_TEST_SOURCE', pathlib.Path(__file__).resolve().parents[1] / 'distrorejuve.sh')).read_text()
-FUNCTIONS = ('apt_space_check_options', 'apt_space_output_plan_records', 'apt_space_output_package_sizes', 'apt_space_check_plan')
+FUNCTIONS = ('apt_space_check_options', 'apt_space_output_plan_records', 'apt_space_output_package_sizes', 'apt_space_output_installed_size', 'apt_space_check_plan')
 PLAN = '1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\nInst sample [1.0] (2.0 Debian:stable [amd64])\nConf sample (2.0 Debian:stable [amd64])\n'
 
 
@@ -35,7 +35,7 @@ apt-cache() {{
   [ "$*" = 'show sample:amd64=2.0' ] || return 92
   printf 'Package: sample\\nVersion: 2.0\\nArchitecture: amd64\\nSize: {archive}\\nInstalled-Size: {installed}\\n{metadata_extra}\\n'
 }}
-dpkg-query() {{ printf 'install ok installed\\t1.0\\t100\\n'; }}
+dpkg-query() {{ printf 'install ok installed\\t1.0\\t100\\tamd64\\n'; }}
 stat() {{
   case "${{!#}}" in
     /usr) echo {4 if separate else 1};;
@@ -83,6 +83,18 @@ df() {
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Insufficient peak transaction space on /var/cache/apt/archives', result.stderr)
 
+    def test_full_peak_plan_sizes_all_native_installed_label_changes(self):
+        for target, old_arch in [('amd64', 'all'), ('all', 'amd64')]:
+            with self.subTest(target=target):
+                body = f"""
+apt-cache() {{ printf 'Package: sample\\nVersion: 2.0\\nArchitecture: {target}\\nSize: 4096\\nInstalled-Size: 200\\n\\n'; }}
+dpkg() {{ echo amd64; }}
+dpkg-query() {{ case "${{!#}}" in sample:{target}) return 1;; sample) printf 'install ok installed\\t1.0\\t100\\t{old_arch}\\n';; *) return 99;; esac; }}
+"""
+                result = self.evaluate(body=body, plan=PLAN.replace('[amd64]', '[' + target + ']'))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('positive installed growth 102400 bytes; unpack reserve 204800 bytes', result.stderr)
+
     def test_unknown_df_is_rejected(self):
         for output in ('', 'header\n/dev/test x y unknown 1% /\n',
                        'header\n/dev/test 100 50 -1 50% /\n',
@@ -112,7 +124,7 @@ df() {
         self.assertNotEqual(result.returncode, 0)
 
     def test_old_package_state_must_match_plan(self):
-        result = self.evaluate(body="dpkg-query() { printf 'install ok installed\\tother-version\\t100\\n'; }")
+        result = self.evaluate(body="dpkg-query() { printf 'install ok installed\\tother-version\\t100\\tamd64\\n'; }")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Selected and installed package states disagree', result.stderr)
 
@@ -191,7 +203,7 @@ apt-get() {
 apt_space_check_plan() { cat "$1"; return 19; }
 apt_get_apply -o APT::Immediate-Configure=0 -f install sample=2.0
 '''
-        result = run(body, names=('apt_get_apply',))
+        result = run('apt_print_t64_replacements() { :; }\n' + body, names=('apt_get_apply',))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('-o APT::Immediate-Configure=0 -f install sample=2.0 --simulate', result.stdout)
         self.assertNotIn('mutation-attempted', result.stderr)

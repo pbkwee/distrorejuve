@@ -38,7 +38,7 @@ class Usrmerge(unittest.TestCase):
         self.converter.chmod(0o700)
 
     def run_fixture(self, action='check_usrmerge', extra=''):
-        names = ['usrmerge_collision_is_repairable', 'usrmerge_output_collisions',
+        names = ['usrmerge_output_executable_origin', 'usrmerge_collision_is_repairable', 'usrmerge_output_collisions',
                  'usrmerge_check_collisions', 'usrmerge_archive_collisions', 'check_usrmerge',
                  'upgrade_print_check']
         functions = '\n'.join(declaration(name) for name in names)
@@ -61,7 +61,7 @@ packages_output_file_owner() {{
     *) return 1;;
   esac
 }}
-packages_output_file_origin() {{ fixture_file_origin "$1" "$2" "$fixture_root"; }}
+packages_output_file_origin() {{ fixture_file_origin "$1" "$2" "$fixture_root" "${{4:-1048576}}"; }}
 stat() {{
   if [ "$1:$2" = '-c:%u %a' ]; then shift 2; command stat -c "$fixture_uid %a" "$@"
   else command stat "$@"; fi
@@ -117,6 +117,31 @@ apt-get() {{ echo unexpected-apt >> "$fixture_root/events"; return 99; }}
         result = self.run_fixture()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.event_lines(), ['baseline', 'convert', 'configure'])
+
+    def test_large_packaged_executable_uses_separate_bound_and_rejects_modification(self):
+        payload = b"packaged executable\n" * 200000
+        self.target.write_bytes(payload)
+        digest = hashlib.md5(payload).hexdigest()
+        (self.root / 'var/lib/dpkg/info/example-package.md5sums').write_text(digest + '  usr/bin/replace\n')
+        result = self.run_fixture(action='usrmerge_collision_is_repairable "$fixture_root/bin/replace" "$fixture_root/usr/bin/replace" example-package')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_fixture(action='packages_output_file_origin "$fixture_root/usr/bin/replace" dpkg')
+        self.assertEqual(result.stdout, 'unknown\tunknown\n')
+        self.target.write_bytes(payload + b"modified")
+        result = self.run_fixture(action='usrmerge_collision_is_repairable "$fixture_root/bin/replace" "$fixture_root/usr/bin/replace" example-package')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.event_lines(), [])
+
+    def test_executable_specific_verifier_keeps_size_and_executable_bounds(self):
+        self.target.chmod(0o644)
+        result = self.run_fixture(action='usrmerge_collision_is_repairable "$fixture_root/bin/replace" "$fixture_root/usr/bin/replace" example-package')
+        self.assertNotEqual(result.returncode, 0)
+        self.target.chmod(0o755)
+        with self.target.open('wb') as stream:
+            stream.truncate(16 * 1024 * 1024 + 1)
+        result = self.run_fixture(action='usrmerge_collision_is_repairable "$fixture_root/bin/replace" "$fixture_root/usr/bin/replace" example-package')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.event_lines(), [])
 
     def test_reverse_ownership_preserves_the_packaged_legacy_path(self):
         digest = hashlib.md5(self.source.read_bytes()).hexdigest()

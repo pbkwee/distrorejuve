@@ -67,3 +67,13 @@ package plans and mocked APT/dpkg/filesystem commands cover shared/separate
 filesystems, retained floor, insufficient cache space, malformed evidence,
 version mismatches, plan changes, and preventing execution after a failed guard.
 No system package operation is used for these checks.
+
+## Planner compatibility
+
+APT 2.2 can append `[]` or `[perl:amd64 ]` to an otherwise complete `Inst`
+record. The parser strips only a validated package-list annotation, preserving
+all action/count/version/architecture checks and rejecting other trailing text.
+For a proven `Architecture: all` to native label change, or its reverse, the
+installed payload lookup may use the unqualified package name. It still requires
+one exact old-version/status/size record and rejects foreign or ambiguous
+architectures. The full selected-plan estimate is recomputed normally.

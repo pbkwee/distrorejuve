@@ -18,13 +18,22 @@ DNS checks:
 ```json
 {
   "observer": "external-observer-example",
+  "required_families": ["ipv4", "ipv6"],
+  "required_dns_addresses": ["192.0.2.53", "2001:db8::53"],
+  "required_dns_transports": ["udp", "tcp"],
   "targets": [
     {"name": "web-v4", "protocol": "https", "family": "ipv4",
      "url": "https://example.invalid/health", "expected_statuses": [200]},
-    {"name": "dns-v4", "protocol": "dns", "family": "ipv4",
+    {"name": "dns-v4-udp", "protocol": "dns", "family": "ipv4", "transport": "udp",
      "address": "192.0.2.53", "port": 53,
      "question": "example.invalid", "qtype": "SOA", "expected_rcodes": [0]},
-    {"name": "dns-v6", "protocol": "dns", "family": "ipv6",
+    {"name": "dns-v4-tcp", "protocol": "dns", "family": "ipv4", "transport": "tcp",
+     "address": "192.0.2.53", "port": 53,
+     "question": "example.invalid", "qtype": "SOA", "expected_rcodes": [0]},
+    {"name": "dns-v6-udp", "protocol": "dns", "family": "ipv6", "transport": "udp",
+     "address": "2001:db8::53", "port": 53,
+     "question": "example.invalid", "qtype": "SOA", "expected_rcodes": [0]},
+    {"name": "dns-v6-tcp", "protocol": "dns", "family": "ipv6", "transport": "tcp",
      "address": "2001:db8::53", "port": 53,
      "question": "example.invalid", "qtype": "SOA", "expected_rcodes": [0]}
   ]
@@ -34,11 +43,22 @@ DNS checks:
 Replace examples with the approved endpoints. An IP literal in an HTTP/HTTPS
 URL must match its configured address family; DNS resolution flags cannot
 convert an IPv6 literal into an IPv4 observation. TCP targets use `"protocol":"tcp"`,
-a literal `address`, explicit `family`, and required `port`. DNS is UDP with an
-explicit ASCII question and A/AAAA/SOA type; expected response codes default to
-NOERROR (`0`). DNS reports only response code and validates transaction ID,
-response flag, and echoed question. Truncated/malformed responses are unknown;
-this sampler does not fetch or retain answer content or fall back to TCP.
+a literal `address`, explicit `family`, and required `port`. DNS uses `"transport":"udp"`
+(the compatibility default) or `"transport":"tcp"`, an explicit ASCII question
+and A/AAAA/SOA type; expected response codes default to NOERROR (`0`). DNS-over-TCP
+checks a bounded length-prefixed DNS response, beyond the TCP connection alone.
+Both transports validate transaction ID, response flag and the echoed question,
+returning only the response code. Truncated, mismatched and malformed messages
+remain unknown. Answer content is discarded; UDP never silently falls back to TCP.
+
+For a dual-stack upgrade, declare every public DNS address and required transport
+as above. Missing family/address/transport coverage is rejected before monitoring.
+These optional declarations preserve existing single-family configurations, but
+one IPv4 sample must not be described as evidence of IPv6 availability. Run the
+same reviewed sampler on an approved observer with the required connectivity.
+Keep its location and SSH/launcher outcome in the job; inability to start or reach
+that observer is a measurement gap. Local unsupported-family, permission and
+no-route conditions are unknown observer failures, not measured DNS downtime.
 
 HTTP/HTTPS uses an installed `curl`, disables `.curlrc`, proxies, redirects, and
 URL globbing, verifies TLS using curl's normal trust configuration, makes a HEAD
@@ -94,7 +114,7 @@ The new directory uses `u=rwx,go=` and files use `u=rw,go=`:
 
 - `monitor.json`: approved target metadata and sampling bounds.
 - `ready.json`: first complete cycle and baseline statuses.
-- `samples.jsonl`: observer/target/family, UTC start/finish, monotonic elapsed time,
+- `samples.jsonl`: observer/target/family and DNS transport, UTC start/finish, monotonic elapsed time,
   latency, status, fixed reason, and optional HTTP/DNS response code.
 - `summary.json`: counts, gaps between samples, and bounded failure windows.
 
@@ -114,6 +134,7 @@ python3 tests/test-availability-monitor.py
 ```
 
 The suite mocks curl, sockets, DNS responses, time, and cancellation. It covers
-missing clients versus timeouts, family validation, discarded content, bounded
+missing clients and observer routes versus timeouts, required-family/transport
+coverage, partial TCP frames, discarded content, bounded
 lifetimes, protected output, gaps, censoring, and summary finalization. It never
 probes a customer endpoint or changes a service.

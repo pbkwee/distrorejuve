@@ -65,3 +65,18 @@ Update the responsible tool or shared workflow when the job reveals a reusable
 gap. Test code changes with isolated fixtures. Keep customer-specific findings
 with the job. Record the reviewed tool artifact used for execution separately
 from later improvements that have not run on that server.
+
+## Runtime activation and boot acceptance
+
+Report three outcomes independently: installed packages, activated process/runtime
+libraries and tested boot. Record running versus installed kernel and the provider
+boot arrangement where verified. A long-running JVM may still map replaced
+libraries after a successful package upgrade. Identify which relevant processes
+loaded the intended binaries/libraries, which restarts were accepted or deferred,
+and the owner and next checkpoint for each deferral. Absence of a reboot-required
+marker does not establish library activation or boot acceptance.
+
+Retain approved target-build assertions for vendor packages even when their package
+version did not change. Keep each database engine, topology, schema, client,
+maintenance and table-upgrade result separate from daemon state. Record retained
+nontransactional consistency requirements and customer acceptance still outstanding.

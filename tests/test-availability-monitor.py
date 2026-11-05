@@ -72,6 +72,30 @@ class ConfigTests(unittest.TestCase):
                 MODULE.dns_question(question, 'A')
 
 
+    def test_required_public_families_and_dns_transports_are_complete(self):
+        source = {'observer': 'dual-stack-fixture', 'required_families': ['ipv4', 'ipv6'],
+                  'required_dns_addresses': ['192.0.2.53', '2001:db8::53'], 'targets': []}
+        for family, address in (('ipv4', '192.0.2.53'), ('ipv6', '2001:db8::53')):
+            for transport in ('udp', 'tcp'):
+                source['targets'].append({'name': family + '-' + transport, 'protocol': 'dns',
+                                          'family': family, 'address': address, 'transport': transport,
+                                          'question': 'example.invalid'})
+        valid = MODULE.validate_config(source)
+        self.assertEqual(len(valid['targets']), 4)
+        self.assertEqual(valid['required_dns_transports'], ['tcp', 'udp'])
+        source['targets'].pop()
+        with self.assertRaisesRegex(ValueError, 'address/transport'):
+            MODULE.validate_config(source)
+        source['required_dns_addresses'] = []
+        source['targets'] = source['targets'][:2]
+        with self.assertRaisesRegex(ValueError, 'family'):
+            MODULE.validate_config(source)
+        source['required_families'] = []
+        source['targets'][0]['transport'] = 'sctp'
+        with self.assertRaises(ValueError):
+            MODULE.validate_config(source)
+
+
 class ProbeTests(unittest.TestCase):
     def target(self):
         return MODULE.validate_config(config())['targets'][0]
@@ -130,7 +154,38 @@ class ProbeTests(unittest.TestCase):
             with self.subTest(error=error), patch.object(MODULE.socket, 'socket', side_effect=error):
                 self.assertEqual(MODULE.probe_socket(dns_target(), 1), {'status': 'unknown', 'reason': 'local_probe_unavailable'})
         with patch.object(MODULE.socket, 'socket', side_effect=OSError(errno.ENETUNREACH, 'unreachable')):
-            self.assertEqual(MODULE.probe_socket(dns_target(), 1), {'status': 'failed', 'reason': 'network_error'})
+            self.assertEqual(MODULE.probe_socket(dns_target(), 1), {'status': 'unknown', 'reason': 'observer_network_unavailable'})
+
+    def test_dns_tcp_checks_framed_response_with_partial_reads(self):
+        target = dns_target()
+        target['transport'] = 'tcp'
+        body = self.dns_response()
+        header = struct.pack('!H', len(body))
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=False)
+        client.recv.side_effect = [header[:1], header[1:], body[:8], body[8:]]
+        with patch.object(MODULE.socket, 'socket', return_value=client) as create, patch.object(MODULE.secrets, 'randbits', return_value=123):
+            value = MODULE.probe_socket(target, 1)
+        self.assertEqual(create.call_args.args[1], socket.SOCK_STREAM)
+        self.assertEqual(value, {'status': 'ok', 'reason': 'dns_response', 'dns_rcode': 0})
+        sent = client.sendall.call_args.args[0]
+        self.assertEqual(struct.unpack('!H', sent[:2])[0], len(sent) - 2)
+        self.assertNotIn('private-answer', json.dumps(value))
+
+    def test_dns_tcp_rejects_oversized_frames_early_eof_and_bad_identity(self):
+        target = dns_target()
+        target['transport'] = 'tcp'
+        wrong = self.dns_response(ident=999)
+        for chunks, reason in (([struct.pack('!H', 4096)], 'malformed_dns_response'),
+                               ([b''], 'malformed_dns_response'),
+                               ([struct.pack('!H', len(wrong)), wrong], 'unmatched_dns_response')):
+            client = Mock()
+            client.__enter__ = Mock(return_value=client)
+            client.__exit__ = Mock(return_value=False)
+            client.recv.side_effect = chunks
+            with self.subTest(reason=reason), patch.object(MODULE.socket, 'socket', return_value=client), patch.object(MODULE.secrets, 'randbits', return_value=123):
+                self.assertEqual(MODULE.probe_socket(target, 1)['reason'], reason)
 
     def test_tcp_connection_requires_no_application_payload(self):
         target = MODULE.validate_config({'observer': 'fixture', 'targets': [{'name': 'port', 'protocol': 'tcp', 'family': 'ipv4', 'address': '192.0.2.10', 'port': 443}]})['targets'][0]

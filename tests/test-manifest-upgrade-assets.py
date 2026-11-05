@@ -29,7 +29,7 @@ manifest_unprivileged=false
 manifest_emit() {{ printf '%s\\n' "$*"; }}
 type() {{ case "$*" in '-P php') printf '/usr/bin/php\\n';; *) return 1;; esac; }}
 manifest_run_bounded() {{
-  [ "$1" = 10 ] && [ "$2" = du ] && [ "$3" = -skxH ] && [ "$4" = -- ] || return 99
+  [ "$1" = 10 ] && [ "$2" = du ] && [ "$3" = -skx ] && [ "$4" = -- ] || return 99
   case "${{@: -1}}" in
     */var/www) printf '12345\\tSECRET-private-path\\n';;
     */var/cache/apt/archives) printf '10\\tPRIVATE-cache-path\\n';;
@@ -70,7 +70,7 @@ manifest_upgrade_assets
             (root / 'unrelated/payload').write_bytes(b'x' * 2097152)
             (root / 'target/nested-link').symlink_to(root / 'unrelated')
             (root / 'var/www').symlink_to(root / 'target')
-            expected = subprocess.check_output(['du', '-skxH', '--', str(root / 'target')], text=True).split()[0]
+            expected = subprocess.check_output(['du', '-skx', '--', str(root / 'target')], text=True).split()[0]
             result = run(f'''
 manifest_root={directory!r}
 manifest_unprivileged=false

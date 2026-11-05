@@ -202,3 +202,22 @@ assumptions into executable instructions. Include relevant detail only:
 Keep raw customer evidence and the completed report private, outside Git. Link
 the report revision and technical appendix from the protected job record. Keep
 approvals in the private job record; the report itself does not grant authority.
+
+## Availability, retention and restoration choices
+
+Lead with the observed operational condition and its practical reason. Distinguish
+a responding web/authentication service, untested protected content, unavailable
+database-backed functions, missing normal configuration and retained files. Old
+versions alone do not establish abandonment or maintenance history.
+
+Ask which sites, paths, databases and files are needed and whether inactive
+applications should work again before defining recovery scope and cost. Record
+working-service migration, application restoration and protected data retention as
+separate deliverables, including the retention destination and period. Preserve
+source data while the owner decides. Keep material risks visible in a short owner
+message; detailed evidence belongs in the technical appendix.
+
+For a custom Java or proxy/database workload, use the manifest's actual running
+runtime and endpoint evidence rather than only installed package names. Use
+approved engine/count/size metadata to identify nontransactional recovery needs;
+leave unauthorized or failed database observations unknown.

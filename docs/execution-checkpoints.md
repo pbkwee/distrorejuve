@@ -172,3 +172,27 @@ Verify normal boot and a fresh installed-system SSH login before using the
 RimuHosting rescue keys apply to that rescue boot; they do not establish access
 to the installed OS. Treat status 202 as pending and account for the API client's
 five-minute inventory cache when reconciling recovery or snapshots.
+
+## Outage deadlines and loss of the operator session
+
+Complete local write/tool readiness, source staging, deployment-permission review,
+approved recovery preparation and the first observation cycle before downtime.
+Record the approved start/window/time zone, maximum interruption, recovery lead
+time and decision owner. Derive the latest recovery-decision time from that budget;
+do not silently replace the approved outage limit after an overrun.
+
+Use a named source/observer supervisor and immutable reviewed artifacts. Record
+how execution continues, pauses or requests assistance if the operator session is
+lost. A package/schema action in an ambiguous state must be reconciled from its
+durable stage result, process/lock state and independent workload evidence before
+any retry or termination. A launch receipt and a successful supervisor are not
+completion evidence. A failing helper must propagate a nonzero exit and preserve
+its failure receipt. Use binary receipt writing across interpreter replacement.
+
+For application changes, follow [application transitions](application-transitions.md)
+and the [bounded evidence helpers](execution-evidence.md). Validate target-account
+access before taking services down, preserve existing/recreated directory modes,
+bind the intended database explicitly, allow only documented bundled replacements,
+and check every process listener. Keep connection-readiness retries bounded and
+fail authentication/SQL errors immediately. Recheck the accepted outage and recovery
+boundary after diagnosis, interruption or a material scope change.

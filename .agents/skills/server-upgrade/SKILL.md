@@ -188,3 +188,39 @@ After the final package and reboot checks, use the [completion report guide](ref
 to produce a client-ready owner report and a concrete sysadmin handoff. Include
 this server's state changes, key actions, checked results and remaining work.
 Keep complete transcripts and recovery references in the protected job record.
+
+## Reusable discovery and execution facilities
+
+For operator-requested agent collection, apply the default
+[bounded follow-up scope](../../../docs/sensitive-data.md#bounded-follow-up-discovery-for-agent-collected-assessments)
+once and reuse it for material gaps. Keep supplied-manifest work offline unless
+collection is requested. Use [access diagnostics](../../../docs/access-diagnostics.md)
+and [job record initialization](../../../docs/job-records.md#initialize-and-maintain-a-record-with-the-optional-helper)
+on the operator machine where Python 3 is available; neither adds a source-host
+dependency. Keep staff runner and provider-specific access setup in its service.
+
+Before disruptive application work, follow the
+[application transition checks](../../../docs/application-transitions.md) and
+[bounded evidence helpers](../../../docs/execution-evidence.md). Scope private
+records and public deployment modes separately, bind the approved database,
+validate every intended listener and supported component replacement, and require
+the actual stage result. Preserve original failures and reconcile ambiguous
+receipts before retrying. Use the outage/recovery decisions in
+[execution checkpoints](../../../docs/execution-checkpoints.md#outage-deadlines-and-loss-of-the-operator-session).
+
+Report installed package state, activated runtime/library state and boot acceptance
+separately. Keep deferred restarts and their owner visible in both completion roles.
+
+## Run covered checks as part of ordinary work
+
+Use normal readiness, assessment and upgrade actions to collect/report compatibility
+findings. Run necessary covered commands and prepare job-private acceptance evidence
+yourself; do not ask the operator to build internal projections/contracts or invoke
+diagnostic subcommands. Explain consequential findings and ask only for a missing
+scope or operational decision. Keep package/removal and signed-source checks active.
+
+For PowerDNS, use [version-aware migration](../../../docs/pdns-upgrades.md): report
+the removed setting names in normal readiness, propose the explicit environment
+setting when required, and let the selected package transition perform the approved
+narrow rename. Keep earlier release hops and read-only checks free of rewrites.
+Vendor/source acceptance and t64 dependency reporting run in their normal phases.

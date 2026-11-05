@@ -108,6 +108,10 @@ def validate_config(config):
                 raise ValueError('a valid port is required')
             safe.update(address=str(ip), port=port)
             if protocol == 'dns':
+                transport = target.get('transport', 'udp')
+                if transport not in ('udp', 'tcp'):
+                    raise ValueError('DNS transport must be udp or tcp')
+                safe['transport'] = transport
                 safe['question'] = target.get('question')
                 safe['qtype'] = target.get('qtype', 'SOA')
                 dns_question(safe['question'], safe['qtype'])
@@ -118,7 +122,29 @@ def validate_config(config):
         else:
             raise ValueError('protocol must be http, https, tcp, or dns')
         result.append(safe)
-    return {'observer': config['observer'], 'targets': result}
+    # IPv4-only observers previously left IPv6 interruptions unmeasured. An
+    # explicit coverage declaration makes every approved public address and DNS
+    # transport a checked requirement rather than an implication of one probe.
+    families = config.get('required_families', [])
+    addresses = config.get('required_dns_addresses', [])
+    transports = config.get('required_dns_transports', ['udp', 'tcp'])
+    if not isinstance(families, list) or any(item not in ('ipv4', 'ipv6') for item in families):
+        raise ValueError('required families must be ipv4/ipv6')
+    if not isinstance(addresses, list) or len(addresses) > 32 or not isinstance(transports, list) or not transports or any(item not in ('udp', 'tcp') for item in transports):
+        raise ValueError('invalid required DNS coverage')
+    if set(families) - {target['family'] for target in result}:
+        raise ValueError('required public family has no observation')
+    canonical_addresses = []
+    for address in addresses:
+        if not isinstance(address, str) or '%' in address:
+            raise ValueError('required DNS addresses must be literal IPs')
+        address = str(ipaddress.ip_address(address))
+        canonical_addresses.append(address)
+        for transport in transports:
+            if not any(target['protocol'] == 'dns' and target['address'] == address and target['transport'] == transport for target in result):
+                raise ValueError('required DNS address/transport has no observation')
+    return {'observer': config['observer'], 'targets': result, 'required_families': sorted(set(families)),
+            'required_dns_addresses': sorted(set(canonical_addresses)), 'required_dns_transports': sorted(set(transports))}
 
 
 def probe_http(target, timeout):
@@ -156,7 +182,8 @@ def probe_http(target, timeout):
 
 def probe_socket(target, timeout):
     family = socket.AF_INET if target['family'] == 'ipv4' else socket.AF_INET6
-    kind = socket.SOCK_DGRAM if target['protocol'] == 'dns' else socket.SOCK_STREAM
+    dns_tcp = target['protocol'] == 'dns' and target.get('transport', 'udp') == 'tcp'
+    kind = socket.SOCK_DGRAM if target['protocol'] == 'dns' and not dns_tcp else socket.SOCK_STREAM
     try:
         deadline = time.monotonic() + timeout
         with socket.socket(family, kind) as client:
@@ -168,9 +195,30 @@ def probe_socket(target, timeout):
             question = dns_question(target['question'], target['qtype'])
             query = struct.pack('!HHHHHH', ident, 0x0100, 1, 0, 0, 0) + question
             client.settimeout(max(0.001, deadline - time.monotonic()))
-            client.send(query)
-            client.settimeout(max(0.001, deadline - time.monotonic()))
-            response = client.recv(4096)
+            if dns_tcp:
+                # RFC 1035 DNS-over-TCP: 00 1d + a 29-byte DNS message ->
+                # read exactly the two-byte length then that message. A TCP
+                # connect alone does not establish a valid DNS response.
+                client.sendall(struct.pack('!H', len(query)) + query)
+                def read_exact(length):
+                    chunks = []
+                    remaining = length
+                    while remaining:
+                        client.settimeout(max(0.001, deadline - time.monotonic()))
+                        data = client.recv(remaining)
+                        if not data:
+                            raise ValueError('incomplete DNS TCP frame')
+                        chunks.append(data)
+                        remaining -= len(data)
+                    return b''.join(chunks)
+                length = struct.unpack('!H', read_exact(2))[0]
+                if not 12 <= length < 4096:
+                    return {'status': 'unknown', 'reason': 'malformed_dns_response'}
+                response = read_exact(length)
+            else:
+                client.send(query)
+                client.settimeout(max(0.001, deadline - time.monotonic()))
+                response = client.recv(4096)
             # RFC 1035 response header !6H: ID, flags, QDCOUNT, ANCOUNT,
             # NSCOUNT, ARCOUNT. Only header and echoed question are inspected;
             # answer data never enters the status records.
@@ -184,6 +232,8 @@ def probe_socket(target, timeout):
             rcode = flags & 15
             return {'status': 'ok' if rcode in target['expected_rcodes'] else 'failed',
                     'reason': 'dns_response', 'dns_rcode': rcode}
+    except ValueError:
+        return {'status': 'unknown', 'reason': 'malformed_dns_response'}
     except (socket.timeout, TimeoutError):
         return {'status': 'failed', 'reason': 'timeout'}
     except ConnectionRefusedError:
@@ -191,7 +241,9 @@ def probe_socket(target, timeout):
     except OSError as error:
         if error.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EPERM, errno.EACCES, errno.ENOSYS):
             return {'status': 'unknown', 'reason': 'local_probe_unavailable'}
-        if error.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNRESET, errno.ETIMEDOUT, errno.ENETDOWN, errno.EHOSTDOWN):
+        if error.errno in (errno.ENETUNREACH, errno.ENETDOWN, errno.EADDRNOTAVAIL):
+            return {'status': 'unknown', 'reason': 'observer_network_unavailable'}
+        if error.errno in (errno.EHOSTUNREACH, errno.ECONNRESET, errno.ETIMEDOUT, errno.EHOSTDOWN):
             return {'status': 'failed', 'reason': 'network_error'}
         return {'status': 'unknown', 'reason': 'probe_error'}
 
@@ -235,6 +287,7 @@ def summarize(records, targets, observer, started, finished, interval, stopped=N
         if current is not None:
             episodes.append(current)
         summary['targets'].append({'name': target['name'], 'protocol': target['protocol'], 'family': target['family'],
+                                   'transport': target.get('transport'),
                                    'counts': counts, 'samples': len(samples), 'gaps': gaps, 'failure_windows': episodes,
                                    'unobserved': not samples,
                                    'first_sample_at': samples[0]['started_at'] if samples else None,
@@ -294,6 +347,8 @@ def run(config, output, duration, interval, timeout, max_samples=10000, stop=Non
                            'family': target['family'], 'started_at': observed, 'finished_at': now(),
                            'elapsed_seconds': round(sample_start - start_mono, 3),
                            'latency_seconds': round(monotonic() - sample_start, 3), 'status': status}
+                    if target['protocol'] == 'dns':
+                        row['transport'] = target.get('transport', 'udp')
                     for key in ('reason', 'http_status', 'dns_rcode'):
                         if key in answer:
                             row[key] = answer[key]

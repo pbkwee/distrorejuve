@@ -24,7 +24,8 @@ def declaration(name):
 def run(names, body):
     # Capacity and acceptance have their own transaction/contract suites. Keep
     # historical recovery fixtures focused on their mocked package/service state.
-    defaults = 'apt_space_check_plan() { :; }; apt_space_check_arguments() { :; }; upgrade_workload_prepare() { :; }; upgrade_stage_finish() { :; }; upgrade_stage_prepare_target() { :; }; upgrade_stage_begin() { :; }; upgrade_stage_record_step() { :; }; upgrade_stage_guard_command() { :; }\n'
+    # Pending PDNS configuration ordering has its own real-guard fixture suite.
+    defaults = 'apt_space_check_plan() { :; }; apt_space_check_arguments() { :; }; upgrade_workload_prepare() { :; }; upgrade_stage_finish() { :; }; upgrade_stage_prepare_target() { :; }; upgrade_stage_begin() { :; }; upgrade_stage_record_step() { :; }; upgrade_stage_guard_command() { :; }; upgrade_pdns_prepare_pending_configuration() { :; }\n'
     script = defaults + '\n'.join(declaration(name) for name in names) + '\n' + body
     return subprocess.run(['bash'], input=script, text=True, capture_output=True)
 

@@ -45,3 +45,42 @@ report numeric nameserver addresses. Full collection also queries bounded
 `resolvectl dns` upstream addresses. An observed zero count identifies a resolver
 with no configured upstream; failed or partially parsed queries retain their status.
 Search domains and TLS server names are omitted.
+
+## Legacy read-only intake and custom JVMs
+
+The read-only collector avoids dense-array append syntax and literal parenthesized
+Bash regexes that prevented older Bash 3.0 sources from parsing the complete script.
+This compatibility does not extend release-upgrade support to those systems or
+install a newer interpreter during collection.
+
+The [inventory guide](inventory.md#first-pass-upgrade-information) describes
+Apache inheritance, application marker versions, ProxySQL/Webmin recognition,
+process self-correlation and the bounded custom Tomcat/JDK records. Full collection
+can read selected Java process arguments, JDK/Tomcat version markers, Host/appBase
+fields in the named Catalina server.xml and selected process-library identities.
+Agree those metadata categories and output limits before collection; arbitrary
+arguments, environment values and resource credentials are omitted.
+
+Focused offline regressions run with:
+
+```sh
+python3 tests/test-collector-improvements.py
+python3 tests/test-manifest-upgrade-assets.py
+python3 tests/test-manifest-processes.py
+```
+
+## Website probe priority
+
+The standard manifest collects website mappings across supported web servers
+before probing their configured authorities. One representative per vhost and
+listener runs before remaining generated aliases, within the same DNS-name,
+HTTP-request and network-time budgets. Distinct metadata records are retained
+when authorities share a cached result. Application/file inspection has its own
+budget and is not charged for deferred DNS/HTTP waits. See
+[probe coverage and limits](inventory.md#first-pass-upgrade-information).
+
+Verify primary/alias ordering and skipped coverage with the offline fixture:
+
+```sh
+python3 tests/test-website-probe-priority.py
+```

@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Read-only intake must parse on Bash 3.0: dense arrays use full-array append
+# assignments because that shell rejects array += before any manifest can run.
 # Boolean controls are later invoked as commands; restrict their values
 # to true/false so an environment setting cannot select another executable.
 # Validate operator settings before logging or system work.
@@ -9,7 +11,7 @@ function environment_validate_settings() {
       DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_HTTP DR_MANIFEST_MAIL_METRICS \
       DR_UPGRADE_MANIFEST DR_PRECOMPILED_LOCALES DR_PREFER_PACKAGED_USRMERGE_FILES \
       DR_PURGE_INCOMPATIBLE_PACKAGES DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES DR_REMOVE_X11_PACKAGES \
-      DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK DR_SKIP_DISK_SPACE_CHECK DR_SKIP_DOVECOT_MIGRATION_CHECK \
+      DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK DR_SKIP_DISK_SPACE_CHECK DR_SKIP_DOVECOT_MIGRATION_CHECK DR_MIGRATE_PDNS_ROLE_SETTINGS \
       DR_SKIP_KERNEL_CHECK DR_SKIP_OLD_PACKAGE_CHECK DR_SKIP_X11_CHECK DR_UNPRIVILEGED; do
     value=${!name}
     case "$value" in
@@ -27,7 +29,7 @@ function environment_validate_settings() {
     printf 'dss:error: %s must be a positive integer.\n' "$name" >&2
     return 1
   done
-  for name in DR_CONFIG_BASELINE DR_DATABASE_DEFAULTS_FILE DR_WORKLOAD_CONTRACT DR_WORKLOAD_EXCEPTIONS DR_STAGE_RECORD; do
+  for name in DR_CONFIG_BASELINE DR_DATABASE_DEFAULTS_FILE DR_WORKLOAD_CONTRACT DR_WORKLOAD_EXCEPTIONS DR_STAGE_RECORD DR_REVIEWED_VENDOR_CONTRACT; do
     value=${!name}
     case "$value" in
       '') :;;
@@ -143,6 +145,7 @@ Run with --upgrade-report to collect a read-only handover for developer/applicat
 It does not test application compatibility.
 
 Run with --capture-baseline to record the selected original before preparatory changes.
+
 Requires root and DR_CONFIG_BASELINE in a private root-owned directory; does not change packages or services.
 
 Run with --support-report [RUN_DIRECTORY] to print a minimal report for a public bug report.
@@ -214,6 +217,8 @@ DR_CONFIGURATION_HISTORY_DAYS sets the configuration-history lookback (default 7
 DR_CONFIG_BASELINE pins the original pre-upgrade snapshot to an absolute file path across runs and release hops.
 Selected originals enable durable release stages at DR_CONFIG_BASELINE.stage; DR_STAGE_RECORD selects another absolute private file.
 DR_DATABASE_DEFAULTS_FILE selects an authorized database maintenance client option file; no credentials are printed.
+DR_MIGRATE_PDNS_ROLE_SETTINGS=true permits master/slave -> primary/secondary renaming during the selected PowerDNS 4.9+ package transition.
+Read-only checks report the boundary without editing configuration; see docs/pdns-upgrades.md.
 DR_PURGE_INCOMPATIBLE_PACKAGES=false blocks known config-breaking packages before release upgrades.
 Set it to literal true to back them up and purge them; reinstall and configure them manually afterward.
 DR_PREFER_PACKAGED_USRMERGE_FILES=true archives an unowned executable collision and keeps its verified packaged counterpart.
@@ -444,14 +449,16 @@ function apt_sources_process() {
       else newsuite=to "/updates"
     }
     archived=contains(family == "debian" ? debian_archive : ubuntu_archive, to)
+    # Some archive endpoints refuse plain HTTP; preserve suites and signature policy
+    # while emitting HTTPS for canonical Debian endpoints.
     if (family == "debian") {
       if (archived && ((suffix == "-updates" && !contains("buster bullseye", to)) || suffix == "/volatile" || suffix == "/non-US")) { drop=1; return }
       if (archived) {
-        newuri="http://archive.debian.org/" (security ? "debian-security" : "debian")
-        if (suffix ~ /^-backports/ && contains("sarge etch lenny squeeze", to)) newuri="http://archive.debian.org/debian-backports"
+        newuri="https://archive.debian.org/" (security ? "debian-security" : "debian")
+        if (suffix ~ /^-backports/ && contains("sarge etch lenny squeeze", to)) newuri="https://archive.debian.org/debian-backports"
       }
       else if (uri ~ /archive.debian.org/ || mode == "upgrade" || generated)
-        newuri="http://deb.debian.org/" (security ? "debian-security" : "debian")
+        newuri="https://deb.debian.org/" (security ? "debian-security" : "debian")
       if (mode != "ensure" && contains("bookworm trixie", to) && contains(components, "non-free") && !contains(components, "non-free-firmware"))
         newcomponents=components " non-free-firmware"
     } else {
@@ -708,7 +715,7 @@ function apt_sources_rewrite() {
     file=${source_files[index]}
     cmp -s -- "$file" "$stage/$index" && continue
     mv -- "$stage/$index" "$file" || { ret=1; break; }
-    activated+=("$file")
+    activated=("${activated[@]}" "$file")
   done
   if [ "$ret" -ne 0 ]; then
     for file in "${activated[@]}"; do
@@ -1154,6 +1161,221 @@ function upgrade_panel_dispatch() {
   if [ "$status" -ne 0 ]; then echo "dss:error: Hosting-panel vendor procedure returned status $status; inspect its recovery instructions before retrying." >&2; fi
   return "$status"
 }
+# A reviewed vendor exception binds source, signer, release identity and a target
+# build discriminator. Version-only checks previously accepted another distro's
+# package with the same name/version. No URL-only or publisher-wide bypass exists.
+function apt_review_is_root_file() {
+  local file=$1 maximum=$2 private=${3:-false} path metadata uid mode size links
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  metadata=$(stat -c '%u %a %s %h' -- "$file") || return 1
+  read -r uid mode size links <<< "$metadata"
+  [ "$uid" = 0 ] && [ "$links" = 1 ] && [ "$size" -gt 0 ] && [ "$size" -le "$maximum" ] || return 1
+  case "$mode" in ''|*[!0-7]*) return 1;; esac
+  (( (8#$mode & 022) == 0 )) || return 1
+  if "$private"; then [ "$mode" = 600 ] || return 1; fi
+  path=${file%/*}; path=${path:-/}
+  while :; do
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    metadata=$(stat -c '%u %a' -- "$path") || return 1
+    read -r uid mode <<< "$metadata"
+    [ "$uid" = 0 ] || return 1
+    case "$mode" in ''|*[!0-7]*) return 1;; esac
+    (( (8#$mode & 022) == 0 )) || return 1
+    [ "$path" != / ] || break
+    path=${path%/*}; path=${path:-/}
+  done
+}
+
+# Contract TSV examples (literal TABs between fields):
+# source<TAB>vendor-a<TAB>https://repo.example.invalid/debian<TAB>trixie<TAB>main<TAB>debian<TAB>trixie<TAB>/usr/share/keyrings/vendor.gpg<TAB><keyring-sha256><TAB><signer-fingerprint><TAB>Vendor<TAB>Vendor<TAB>stable<TAB>/var/lib/apt/lists/vendor_InRelease<TAB>7
+# build<TAB>vendor-a<TAB>example-app<TAB>amd64<TAB>3.0<TAB>/root/job/example.deb<TAB><archive-sha256><TAB>/usr/bin/example-app<TAB><payload-sha256><TAB>trixie
+# -> exact reviewed source plus an approved artifact and installed build discriminator.
+function apt_review_validate_contract() {
+  local file=${1:-${DR_REVIEWED_VENDOR_CONTRACT:-}}
+  [ -n "$file" ] && apt_review_is_root_file "$file" 65536 true || return 1
+  LC_ALL=C awk -F '\t' '
+    function hash(v) { return length(v)==64 && v !~ /[^a-f0-9]/ }
+    function path(v) { return v ~ /^\// && v !~ /(^|\/)\.\.?($|\/)/ && v !~ /[\r\n]/ }
+    function id(v) { return v ~ /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/ && length(v)<=80 }
+    NR>256 || /\r/ { bad=1; next }
+    { for(i=1;i<=NF;i++) if($i=="") bad=1 }
+    $1=="source" {
+      if(NF!=15 || !id($2) || sources[$2]++ ||
+         $3 !~ /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(\/[A-Za-z0-9._~%+\/-]*)?$/ ||
+         $4 !~ /^[a-z0-9][a-z0-9.+\/-]*$/ || $5 !~ /^[a-z0-9][a-z0-9.\/+ -]*$/ ||
+         $6 !~ /^(debian|ubuntu)$/ || $7 !~ /^[a-z][a-z0-9]*$/ || !path($8) || !hash($9) ||
+         (length($10)!=40 && length($10)!=64) || $10 ~ /[^A-F0-9]/ ||
+         $11 !~ /^[A-Za-z0-9][A-Za-z0-9 ._+:()\/-]*$/ || $12 !~ /^[A-Za-z0-9][A-Za-z0-9 ._+:()\/-]*$/ ||
+         $13 !~ /^[A-Za-z0-9][A-Za-z0-9._+\/-]*$/ || !path($14) ||
+         $15 !~ /^[1-9][0-9]*$/ || $15+0<1 || $15+0>366) bad=1
+      targets[$2]=$7; next
+    }
+    $1=="build" {
+      if(NF!=10 || !id($2) || $3 !~ /^[a-z0-9][a-z0-9+.-]*$/ || $4 !~ /^[a-z0-9][a-z0-9-]*$/ ||
+         $5 !~ /^[A-Za-z0-9.+:~_-]+$/ || !path($6) || !hash($7) || !path($8) || !hash($9) ||
+         $10 !~ /^[a-z][a-z0-9]*$/ || payloads[$2 SUBSEP $8]++) bad=1
+      build_ids[++build_count]=$2; build_targets[build_count]=$10; builds[$2]++; next
+    }
+    { bad=1 }
+    END {
+      for(source in sources) if(!builds[source]) bad=1
+      for(i=1;i<=build_count;i++) if(!(build_ids[i] in sources) || targets[build_ids[i]]!=build_targets[i]) bad=1
+      exit (bad || !build_count)
+    }
+  ' "$file"
+}
+
+# Source options are read only for the exact already-approved source record.
+# deb [arch=amd64 signed-by=/usr/share/keyrings/vendor.gpg] https://... trixie main
+# or deb822 Signed-By: /usr/share/keyrings/vendor.gpg -> that one literal keyring.
+# Inline keys, multiple keyrings, trust overrides and malformed stanzas stay blocked.
+function apt_sources_output_signed_by() {
+  local file=$1 line=$2
+  LC_ALL=C awk -v start="$line" '
+    BEGIN { deb822=(ARGV[1] ~ /[.]sources$/) }
+    NR<start { next }
+    !deb822 && NR==start {
+      text=$0
+      if(!match(text,/\[[^]]*\]/)) { bad=1; exit }
+      text=substr(text,RSTART+1,RLENGTH-2); n=split(text,options,/[ \t]+/)
+      for(i=1;i<=n;i++) {
+        if(options[i] ~ /^signed-by=\//) { count++; key=substr(options[i],11) }
+        else if(options[i] !~ /^arch(\+|-)?=[A-Za-z0-9,_-]+$/) bad=1
+      }
+      exit
+    }
+    deb822 {
+      if(NR>start && $0 ~ /^[ \t]*$/) exit
+      if($0 ~ /^#/) next
+      if($0 ~ /^[ \t]/) { if(field=="signed-by") bad=1; next }
+      field=tolower($0); sub(/:.*/,"",field)
+      value=$0; sub(/^[^:]*:[ \t]*/,"",value); sub(/[ \t]+$/,"",value)
+      if(field=="signed-by") { key=value; count++ }
+      if((field=="trusted" || field=="allow-insecure" || field=="allow-weak" || field=="allow-downgrade-to-insecure") && tolower(value)!="no") bad=1
+      if(field=="check-valid-until" && tolower(value)!="yes") bad=1
+    }
+    END { if(bad || count!=1 || key !~ /^\/[^ \t]+$/) exit 1; print key }
+  ' "$file"
+}
+
+function apt_review_matches_digest() {
+  local actual
+  actual=$(sha256sum -- "$1") || return 1
+  [ "${actual%% *}" = "$2" ]
+}
+
+# Verify the actual cached InRelease using its exact reviewed keyring and signing
+# fingerprint. Matching a label in unsigned text must never admit a vendor source.
+# gpgv status: [GNUPG:] VALIDSIG <signing-fpr> ... <primary-fpr> -> exact approved signer.
+function apt_review_check_source_identity() {
+  (
+    local keyring=$1 keyring_digest=$2 fingerprint=$3 origin=$4 label=$5 series=$6 codename=$7 release=$8 maximum_age=$9
+    local status fields date_text valid_text date_seconds valid_seconds now directory
+    apt_review_is_root_file "$keyring" 1048576 && apt_review_matches_digest "$keyring" "$keyring_digest" || return 1
+    apt_review_is_root_file "$release" 8388608 || return 1
+    command -v timeout >/dev/null 2>&1 && command -v gpgv >/dev/null 2>&1 || return 1
+    # gpgv accepts unsigned text outside a valid clearsigned packet. Previously,
+    # a missing signed field could be supplied after the armor, for example:
+    # -----END PGP SIGNATURE-----
+    # Origin: Vendor
+    # Bind field parsing to cleartext extracted by the SAME successful verification.
+    # The private directory belongs only to this invocation and is removed on failure too.
+    umask u=rwx,go=
+    directory=$(mktemp -d "${TMPDIR:-/tmp}/distrorejuve-vendor.XXXXXX") || return 1
+    trap 'rm -rf -- "$directory"' EXIT
+    status=$(LC_ALL=C timeout --kill-after=2 20 gpgv --status-fd 1 --output "$directory/Release" --keyring "$keyring" "$release" 2>/dev/null) || return 1
+    printf '%s\n' "$status" | LC_ALL=C awk -v expected="$fingerprint" '
+      $1=="[GNUPG:]" && $2=="VALIDSIG" { count++; if($3==expected || $NF==expected) matched++ }
+      $1=="[GNUPG:]" && $2 ~ /^(BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG|KEYEXPIRED|SIGEXPIRED)$/ { bad=1 }
+      END { exit (bad || count!=1 || matched!=1) }
+    ' || return 1
+    # Signed Release fields: Origin: Vendor / Label: Vendor / Suite: stable /
+    # Codename: trixie / Date: Thu, 05 Nov 2026 00:00:00 UTC -> exact reviewed identity.
+    fields=$(LC_ALL=C awk -v origin="$origin" -v label="$label" -v series="$series" -v codename="$codename" '
+      /^(Origin|Label|Suite|Codename|Date|Valid-Until):/ {
+        key=$0; sub(/:.*/,"",key); value=$0; sub(/^[^:]*:[ \t]*/,"",value)
+        if(seen[key]++) bad=1
+        values[key]=value
+      }
+      END {
+        if(bad || values["Origin"]!=origin || values["Label"]!=label || values["Suite"]!=series || values["Codename"]!=codename || !values["Date"]) exit 1
+        printf "%s\t%s\n",values["Date"],(values["Valid-Until"]?values["Valid-Until"]:"-")
+      }
+    ' "$directory/Release") || return 1
+    IFS=$'\t' read -r date_text valid_text <<< "$fields"
+    date_seconds=$(LC_ALL=C date -u --date "$date_text" +%s) && now=$(date -u +%s) || return 1
+    [ "$date_seconds" -le "$((now+300))" ] && [ "$now" -le "$((date_seconds+maximum_age*86400))" ] || return 1
+    if [ "$valid_text" != - ]; then
+      valid_seconds=$(LC_ALL=C date -u --date "$valid_text" +%s) || return 1
+      [ "$valid_seconds" -ge "$date_seconds" ] && [ "$now" -le "$valid_seconds" ] || return 1
+    fi
+  )
+}
+
+# An approved archive hash and its actual control fields bind the selected build.
+# Its reviewed payload hash is checked inside the archive and, after transition,
+# against the installed package-owned file. Same-version old payloads must fail.
+function apt_review_check_build() {
+  local phase=$1 package=$2 arch=$3 version=$4 archive=$5 archive_digest=$6 payload=$7 payload_digest=$8
+  local actual owner installed
+  apt_review_is_root_file "$archive" 536870912 && apt_review_matches_digest "$archive" "$archive_digest" || return 1
+  [ "$(dpkg-deb -f "$archive" Package)" = "$package" ] &&
+    [ "$(dpkg-deb -f "$archive" Architecture)" = "$arch" ] &&
+    [ "$(dpkg-deb -f "$archive" Version)" = "$version" ] || return 1
+  actual=$(set -o pipefail; dpkg-deb --fsys-tarfile "$archive" | tar --extract --to-stdout --file - "./${payload#/}" | sha256sum) || return 1
+  [ "${actual%% *}" = "$payload_digest" ] || return 1
+  [ "$phase" = before ] && return 0
+  [ "$phase" = after ] || return 1
+  apt_review_is_root_file "$payload" 268435456 && apt_review_matches_digest "$payload" "$payload_digest" || return 1
+  owner=$(packages_output_file_owner "$payload" dpkg) || return 1
+  case "$owner" in "$package"|"$package:$arch") :;; *) return 1;; esac
+  installed=$(LC_ALL=C dpkg-query -W -f='${Status}\t${Version}\t${Architecture}\n' "$package:$arch") || return 1
+  [ "$installed" = "install ok installed"$'\t'"$version"$'\t'"$arch" ]
+}
+
+# Return 2 for an unreviewed source (normal policy applies), 1 for failed review
+# evidence, and 0 only after source/signature/build checks match the exact target.
+function apt_sources_check_reviewed_vendor() {
+  local file=$1 line=$2 type=$3 uri=$4 suite=$5 components=$6 family=$7 target=$8 phase=$9
+  local contract=${DR_REVIEWED_VENDOR_CONTRACT:-} row kind review_id expected_uri expected_suite expected_components expected_family expected_target keyring keyring_digest fingerprint origin label series release maximum_age actual_keyring
+  local build_id package arch version archive archive_digest payload payload_digest build_target
+  [ -n "$contract" ] && [ "$type" = deb ] || return 2
+  row=$(LC_ALL=C awk -F '\t' -v uri="$uri" -v suite="$suite" -v components="$components" -v family="$family" -v target="$target" '
+    $1=="source" && $3==uri && $4==suite && $5==components && $6==family && $7==target { count++; row=$0 }
+    END { if(count==1) print row; else exit (count?1:2) }
+  ' "$contract") || return $?
+  IFS=$'\t' read -r kind review_id expected_uri expected_suite expected_components expected_family expected_target keyring keyring_digest fingerprint origin label series release maximum_age <<< "$row"
+  actual_keyring=$(apt_sources_output_signed_by "$file" "$line") && [ "$actual_keyring" = "$keyring" ] || return 1
+  apt_review_check_source_identity "$keyring" "$keyring_digest" "$fingerprint" "$origin" "$label" "$series" "$suite" "$release" "$maximum_age" || return 1
+  while IFS=$'\t' read -r kind build_id package arch version archive archive_digest payload payload_digest build_target; do
+    [ "$kind:$build_id" = "build:$review_id" ] || continue
+    apt_review_check_build "$phase" "$package" "$arch" "$version" "$archive" "$archive_digest" "$payload" "$payload_digest" || return 1
+  done < "$contract"
+  printf 'dss:info: Reviewed vendor source %s matches its exact signer, release identity and %s build assertions.\n' "$review_id" "$phase" >&2
+}
+
+function apt_review_check_installed_builds() {
+  [ "$#" -eq 0 ] && [ -n "${DR_REVIEWED_VENDOR_CONTRACT:-}" ] || {
+    echo 'dss:error: Reviewed vendor evidence is missing or the internal check received unexpected arguments.' >&2; return 1;
+  }
+  local contract=$DR_REVIEWED_VENDOR_CONTRACT records row kind review_id uri suite components family target keyring keyring_digest fingerprint origin label series release maximum_age current match file line provider type actual_uri actual_suite actual_components architectures expected_family
+  apt_review_validate_contract "$contract" || return 1
+  records=$(apt_sources_list) || return 1
+  current=$(distro_output_codename) || return 1
+  expected_family=debian
+  case " $ALL_UBUNTU " in *" $current "*) expected_family=ubuntu;; esac
+  while IFS=$'\t' read -r kind review_id uri suite components family target keyring keyring_digest fingerprint origin label series release maximum_age; do
+    [ "$kind" = source ] || continue
+    [ "$target:$family" = "$current:$expected_family" ] || return 1
+    match=$(printf '%s\n' "$records" | LC_ALL=C awk -F '\t' -v uri="$uri" -v suite="$suite" -v components="$components" '
+      $4=="deb" && $5==uri && $6==suite && $7==components { count++; row=$0 }
+      END { if(count!=1) exit 1; print row }
+    ') || return 1
+    IFS=$'\t' read -r file line provider type actual_uri actual_suite actual_components architectures <<< "$match"
+    apt_sources_check_reviewed_vendor "$file" "$line" "$type" "$actual_uri" "$actual_suite" "$actual_components" "$family" "$target" after || return 1
+  done < "$contract"
+}
+
 # A vendor repository may follow different PHP or application upgrade rules.
 # Replacing its release name blindly can mix incompatible packages or bypass a hosting panel.
 # Check official suite consistency/base sources/backports and vendor upgrade blockers.
@@ -1161,6 +1383,10 @@ function apt_sources_check_releases_and_vendors() {
   local target=${1:-${apt_sources_transition_target:-}} current family records file line provider type uri suite components architectures base
   local ret=0 official=0 seen=' ' support status
   if [ -n "$target" ]; then upgrade_panel_refuse_generic || return 1; fi
+  if [ -n "${DR_REVIEWED_VENDOR_CONTRACT:-}" ] && ! apt_review_validate_contract "$DR_REVIEWED_VENDOR_CONTRACT"; then
+    echo 'dss:error: Reviewed vendor contract is invalid, unprotected or incomplete.' >&2
+    return 1
+  fi
   records=$(apt_sources_list) || return 1
   current=$(distro_output_codename) || current=
   family=debian
@@ -1187,6 +1413,22 @@ function apt_sources_check_releases_and_vendors() {
         fi;;
       esac
       continue
+    fi
+    # A targeted transition validates the approved artifact before changes; a
+    # current-release/final check also verifies the actual installed discriminator.
+    if [ -n "${DR_REVIEWED_VENDOR_CONTRACT:-}" ]; then
+      local reviewed_phase=after
+      [ -z "$target" ] || reviewed_phase=before
+      if apt_sources_check_reviewed_vendor "$file" "$line" "$type" "$uri" "$suite" "$components" "$family" "${target:-$current}" "$reviewed_phase"; then
+        continue
+      else
+        status=$?
+        if [ "$status" -eq 1 ]; then
+          echo 'dss:warn: Exact reviewed vendor source, signing identity or build assertion failed; source remains blocked.' >&2
+          ret=1
+          continue
+        fi
+      fi
     fi
     if [ "$provider" = claude ]; then
       if apt_sources_check_claude "$family" "$current" "$target" "$type" "$uri" "$suite" "$components" "$architectures"; then
@@ -1227,6 +1469,11 @@ function apt_sources_check_releases_and_vendors() {
   local -a releases=()
   read -r -a releases <<< "$seen"
   if [ "${#releases[@]}" -gt 1 ]; then echo "dss:warn: APT sources mix distro releases:$seen" >&2; ret=1; fi
+  # Disabling a reviewed vendor source must not accidentally skip its installed
+  # build assertions at completion. Every selected source must still be present.
+  if [ -z "$target" ] && [ -n "${DR_REVIEWED_VENDOR_CONTRACT:-}" ]; then
+    apt_review_check_installed_builds || ret=1
+  fi
   return "$ret"
 }
 
@@ -1352,8 +1599,8 @@ function apt_space_check_options() {
     case "$1" in
       -o|--option|-c|--config-file)
         [ "$#" -gt 1 ] || return 1
-        options+=("$1" "$2"); shift;;
-      -o?*|-c?*|--option=*|--config-file=*) options+=("$1");;
+        options=("${options[@]}" "$1" "$2"); shift;;
+      -o?*|-c?*|--option=*|--config-file=*) options=("${options[@]}" "$1");;
       --print-*|--sim*|--just-*|--dry-*|--recon*|--no-act*|--help*|--version*|--download-only|-d|-s|-h|-v)
         echo 'dss:error: Peak transaction guard requires execution arguments, without print/simulation/download-only modes.' >&2; return 1;;
       -[^-]*[dshv]*)
@@ -1376,7 +1623,20 @@ function apt_space_check_options() {
 function apt_space_output_plan_records() {
   awk '
     /^Inst / {
-      name=$2; old="-"; version=$0; arch=$0
+      # APT 2.2: Inst sample [1.0] (2.0 Debian:stable [amd64]) [perl:amd64 ]
+      # -> sample,2.0,amd64,1.0; [] is also a valid package-list annotation.
+      # Reject malformed/trailing text rather than broadening the complete-plan gate.
+      line=$0
+      if (match(line, /\)[ \t]+\[/)) {
+        annotation=substr(line,RSTART+RLENGTH-1)
+        if (annotation !~ /^\[[^][]*\]$/) { bad=1; next }
+        sub(/^\[/,"",annotation); sub(/\]$/,"",annotation)
+        sub(/^[ \t]+/,"",annotation); sub(/[ \t]+$/,"",annotation)
+        n=split(annotation, packages, /[ \t]+/)
+        for (i=1;i<=n;i++) if (packages[i] !~ /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/) bad=1
+        sub(/\)[ \t]+\[.*$/, ")", line)
+      }
+      name=$2; old="-"; version=line; arch=line
       if ($3 ~ /^\[/) { old=$3; sub(/^\[/,"",old); sub(/\]$/,"",old) }
       if (version !~ /\([^ ]+ .*\[[a-z0-9-]+\]\)$/) { bad=1; next }
       sub(/^[^(]*\(/,"",version); sub(/ .*/,"",version)
@@ -1436,6 +1696,31 @@ function apt_space_output_package_sizes() {
   '
 }
 
+# APT can move a package between Architecture: all and the native label. Querying
+# only the target label then misses its installed payload and understates capacity.
+# dpkg-query row: install ok installed<TAB>1.0<TAB>24<TAB>all -> 24576 bytes.
+# Only a single exact-version all/native transition qualifies; foreign rows stop.
+function apt_space_output_installed_size() {
+  local package=$1 expected=$2 target=$3 row status version kib architecture extra native fallback=false
+  if row=$(LC_ALL=C dpkg-query -W -f='${Status}\t${Version}\t${Installed-Size}\t${Architecture}\n' "$package"); then :
+  else fallback=true; fi
+  if $fallback; then
+    native=$(dpkg --print-architecture) || return 1
+    case "$target" in all|"$native") :;; *) return 1;; esac
+    row=$(LC_ALL=C dpkg-query -W -f='${Status}\t${Version}\t${Installed-Size}\t${Architecture}\n' "${package%%:*}") || return 1
+  fi
+  case "$row" in *$'\n'*) return 1;; esac
+  IFS=$'\t' read -r status version kib architecture extra <<< "$row"
+  case "$status" in 'install ok installed'|'install ok unpacked'|'install ok half-configured'|'install ok triggers-awaited'|'install ok triggers-pending') :;; *) return 1;; esac
+  case "$kib" in ''|*[!0-9]*) return 1;; esac
+  [ "$version" = "$expected" ] && [ -z "$extra" ] && [ "${#kib}" -le 10 ] || return 1
+  if [ "$architecture" != "$target" ]; then
+    [ -n "$native" ] || native=$(dpkg --print-architecture) || return 1
+    case "$architecture:$target" in all:"$native"|"$native":all) :;; *) return 1;; esac
+  fi
+  printf '%s\n' "$((10#$kib * 1024))"
+}
+
 # Estimate a conservative transaction peak from the exact selected APT plan.
 # Metadata has no per-file allocation, so reserve the complete growth+unpack
 # allowance once on every distinct payload filesystem. Never credit removals or
@@ -1473,16 +1758,10 @@ function apt_space_check_plan() {
       read -r archive installed <<< "$sizes"
       current=0
       if [ "$old" != - ]; then
-        # dpkg-query: install ok installed<TAB>1.0<TAB>24 -> old payload=24576 bytes.
-        row=$(LC_ALL=C dpkg-query -W -f='${Status}\t${Version}\t${Installed-Size}\n' "$package") || return 1
-        IFS=$'\t' read -r status current_version current_kib extra <<< "$row"
-        case "$status" in 'install ok installed'|'install ok unpacked'|'install ok half-configured'|'install ok triggers-awaited'|'install ok triggers-pending') :;;
-          *) printf 'dss:error: Cannot size the current package state for %s.\n' "$package" >&2; return 1;; esac
-        case "$current_kib" in ''|*[!0-9]*) return 1;; esac
-        if [ "$current_version" != "$old" ] || [ -n "$extra" ] || [ "${#current_kib}" -gt 10 ]; then
-          printf 'dss:error: Selected and installed package states disagree for %s.\n' "$package" >&2; return 1
-        fi
-        current=$((10#$current_kib * 1024))
+        current=$(apt_space_output_installed_size "$package" "$old" "$arch") || {
+          printf 'dss:error: Selected and installed package states disagree for %s; exact old payload size is unknown.\n' "$package" >&2
+          return 1
+        }
       fi
       if [ "$download" -gt 1000000000000000 ] || [ "$growth" -gt 1000000000000000 ]; then
         echo 'dss:error: Package-space estimate exceeds the supported arithmetic range.' >&2; return 1
@@ -1566,6 +1845,7 @@ function apt_space_check_arguments() {
     echo 'dss:error: Cannot establish a selected package plan; no APT mutation attempted.' >&2
     return "$status"
   fi
+  apt_print_t64_replacements "$directory/plan"
   apt_space_check_plan "$directory/plan" "$@"
 )
 }
@@ -1610,7 +1890,7 @@ function upgrade_configuration_review() {
       printf 'dss:warn: Configuration review skipped unreadable/large file %s; coverage is incomplete.\n' "$file" >&2
       continue
     fi
-    files+=("$file")
+    files=("${files[@]}" "$file")
   done
   [ "${#files[@]}" -gt 0 ] || return 0
   # interfaces: "iface tun0 inet6 v4tunnel" twice -> duplicate_interface with line numbers.
@@ -1878,6 +2158,494 @@ function add_missing_debian_keys() {
   case " $ALL_DEBIAN " in *" $current "*) apt_ensure_archive_keyring debian-archive-keyring;; *) return 0;; esac
 }
 
+# PowerDNS introduced primary/secondary in 4.5 and removed master/slave in 4.9.
+# Earlier jobs reached the new binary with legacy keys and only then failed DNS
+# acceptance. Check the version boundary during preflight; rename only when the
+# actual package plan selects that boundary, while the old binary accepts both.
+function upgrade_pdns_output_installed_version() {
+  local row status
+  row=$(LC_ALL=C dpkg-query -W -f='${Status}\t${Version}\n' pdns-server 2>/dev/null); status=$?
+  if [ "$status" -eq 1 ] && [ -z "$row" ]; then return 1; fi
+  [ "$status" -eq 0 ] || return 2
+  printf '%s\n' "$row" | LC_ALL=C awk -F '\t' '
+    # dpkg-query: install ok installed<TAB>4.7.3-2 -> 4.7.3-2.
+    NF!=2 || NR!=1 { bad=1 }
+    $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && $2 ~ /^[0-9][A-Za-z0-9.+:~_-]*$/ { version=$2 }
+    END { if(bad) exit 2; if(version=="") exit 1; print version }
+  '
+}
+
+# Debian epochs select package ordering, not PowerDNS parser capabilities.
+# 1:4.4.3-1 remains upstream 4.4; it cannot accept the 4.5 canonical keys.
+# Keep the full version elsewhere for exact transaction and recovery receipts.
+function upgrade_pdns_version_is_at_least() {
+  local version=$1 threshold=$2 epoch
+  case "$version" in *:*)
+    epoch=${version%%:*}
+    case "$epoch" in ''|*[!0-9]*) return 2;; esac
+    version=${version#*:};;
+  esac
+  printf '%s\n' "$version" | LC_ALL=C awk 'NR!=1 || $0 !~ /^[0-9]+[.][0-9]+([.+~_-]|$)/ { bad=1 } END { exit bad }' || return 2
+  dpkg --compare-versions "$version" ge "$threshold"
+}
+
+function upgrade_pdns_output_review_target() {
+  local family=$1 current=$2 target=$3 policy candidate records
+  policy=$(LC_ALL=C apt-cache policy pdns-server 2>/dev/null) || policy=
+  candidate=$(printf '%s\n' "$policy" | LC_ALL=C awk '
+    # apt-cache policy: "  Candidate: 4.9.3-1" -> exact candidate 4.9.3-1.
+    $1=="Candidate:" { count++; value=$2 }
+    END { if(count==1 && value ~ /^[0-9][A-Za-z0-9.+:~_-]*$/) print value }
+  ')
+  if [ -n "$candidate" ]; then
+    if upgrade_pdns_version_is_at_least "$candidate" 4.9; then printf '%s\n' "$candidate"; return 0; fi
+    if [ "$current" = "$target" ]; then printf '%s\n' "$candidate"; return 0; fi
+    records=$(apt_sources_list) || return 2
+    if printf '%s\n' "$records" | LC_ALL=C awk -F '\t' -v target="$target" '
+      $4=="deb" && ($6==target || index($6,target "-")==1 || index($6,target "/")==1) { found=1 }
+      END { exit !found }
+    '; then printf '%s\n' "$candidate"; return 0; fi
+  fi
+  # These are conservative known affected releases, not invented exact versions.
+  # Primary package sources: packages.debian.org/trixie/pdns-server (4.9.x),
+  # packages.ubuntu.com/questing/pdns-server and /resolute/pdns-server (5.0.x).
+  # Other targets need their actual selected APT candidate rather than a guess.
+  case "$family:$target" in debian:trixie|ubuntu:questing|ubuntu:resolute) echo 4.9;; *) return 2;; esac
+}
+
+# Auto-editing only conventional root-controlled files avoids following an
+# unverified include or symlink into unrelated configuration/credential paths.
+# stat -c "%u %a %s %h": "0 640 128 1" -> root, no group/other write,
+# bounded 128-byte regular file with a single hardlink.
+function upgrade_pdns_is_safe_file() {
+  local file=$1 metadata uid mode size links path
+  case "$file" in *$'\n'*|*$'\r'*|*$'\t'*) return 1;; esac
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  metadata=$(stat -c '%u %a %s %h' -- "$file") || return 1
+  read -r uid mode size links <<< "$metadata"
+  [ "$uid" = 0 ] && [ "$links" = 1 ] && [ "$size" -le 262144 ] || return 1
+  case "$mode" in ''|*[!0-7]*) return 1;; esac
+  (( (8#$mode & 022) == 0 )) || return 1
+  path=${file%/*}
+  while :; do
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    metadata=$(stat -c '%u %a' -- "$path") || return 1
+    read -r uid mode <<< "$metadata"
+    [ "$uid" = 0 ] || return 1
+    case "$mode" in ''|*[!0-7]*) return 1;; esac
+    (( (8#$mode & 022) == 0 )) || return 1
+    [ "$path" != / ] || break
+    path=${path%/*}; path=${path:-/}
+  done
+}
+
+# Package version alone is insufficient after a failed service restart: the old
+# process can still execute a deleted pre-upgrade binary. Bind the observed PID
+# to the current checksum-verified packaged executable before changing its input.
+function upgrade_pdns_check_running_binary() {
+  local directory=$1 root=${2:-} executable logical origin running_inode installed_inode
+  executable=$(readlink -- "$directory/exe") || return 1
+  logical=${executable#"$root"}
+  case "$logical" in /usr/sbin/pdns_server|/sbin/pdns_server) :;; *) return 1;; esac
+  running_inode=$(stat -Lc '%d:%i' -- "$directory/exe") && installed_inode=$(stat -Lc '%d:%i' -- "$root$logical") || return 1
+  [ "$running_inode" = "$installed_inode" ] || return 1
+  origin=$(usrmerge_output_executable_origin "$root$logical") || return 1
+  case "$origin" in "packaged"$'\t'"pdns-server"|"packaged"$'\t'"pdns-server:"*) :;; *) return 1;; esac
+}
+
+function upgrade_pdns_check_config_selection() {
+  local root=${1:-} file pids status pid identity_before identity_after directory
+  # Local unit overrides can select another configuration or instance. Their
+  # semantics need manual review instead of assuming the packaged default path.
+  for file in "$root/etc/systemd/system/pdns.service" "$root/etc/systemd/system/pdns.service.d/"*.conf; do
+    [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
+  done
+  for file in "$root/etc/default/pdns" "$root/etc/default/pdns-server"; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    upgrade_pdns_is_safe_file "$file" || return 1
+    LC_ALL=C awk '
+      /^[ \t]*#/ { next }
+      /--config|-C[ \t=\/]|--no-config/ { bad=1 }
+      /^[ \t]*DAEMON[ \t]*=/ {
+        value=$0; sub(/^[^=]*=[ \t]*/,"",value); sub(/[ \t]*#.*/,"",value)
+        gsub(/[ \t\042\047]/,"",value)
+        if(value!="/usr/sbin/pdns_server" && value!="/sbin/pdns_server") bad=1
+      }
+      /^[ \t]*(PDNS_OPTIONS|PDNS_OPTS|DAEMON_OPTS|EXTRA_OPTS|CONFIG_DIR|CONFIG_NAME)[ \t]*=/ {
+        value=$0; sub(/^[^=]*=[ \t]*/,"",value); sub(/[ \t]*#.*/,"",value)
+        gsub(/[ \t\042\047]/,"",value); if(value!="") bad=1
+      }
+      END { exit bad }
+    ' "$file" || return 1
+  done
+  command -v timeout >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1 || return 1
+  pids=$(timeout --kill-after=2 5 pgrep -x pdns_server); status=$?
+  if [ "$status" -eq 1 ] && [ -z "$pids" ]; then return 0; fi
+  [ "$status" -eq 0 ] && [ -n "$pids" ] || return 1
+  [ "${#pids}" -le 176 ] || return 1
+  for pid in $pids; do
+    case "$pid" in ''|*[!0-9]*) return 1;; esac
+    directory="$root/proc/$pid"
+    identity_before=$(manifest_output_proc_starttime "$directory") || return 1
+    if [ "${2:-false}" = true ]; then upgrade_pdns_check_running_binary "$directory" "$root" || return 1; fi
+    # /proc/PID/cmdline is NUL-delimited: --config-dir=/etc/powerdns is
+    # conventional; --config-dir=/other or any named instance stays manual.
+    # Inspect only this daemon, return no arguments, and reject PID replacement.
+    (
+      set -o pipefail
+      head -c 16385 -- "$directory/cmdline" | tr '\000' '\n' | LC_ALL=C awk '
+        { bytes+=length($0)+1; if(bytes>16384 || NR>128) bad=1 }
+        NR==1 { if($0!="/usr/sbin/pdns_server" && $0!="/sbin/pdns_server") bad=1; next }
+        pending!="" { if(pending=="dir" ? $0!="/etc/powerdns" : $0!="") bad=1; pending=""; next }
+        $0=="--config-dir" { pending="dir"; next }
+        $0=="--config-name" { pending="name"; next }
+        /^--config-dir=/ { if($0!="--config-dir=/etc/powerdns") bad=1; next }
+        /^--config-name=/ { if($0!="--config-name=") bad=1; next }
+        /^--(master|slave|primary|secondary)(=|$)/ { bad=1 }
+        /^--config/ || /^--no-config/ || /^-C/ { bad=1 }
+        END { exit (bad || pending!="" || NR==0) }
+      '
+    ) || return 1
+    identity_after=$(manifest_output_proc_starttime "$directory") || return 1
+    [ "$identity_before" = "$identity_after" ] || return 1
+  done
+}
+
+function upgrade_pdns_output_config_files() {
+  local root=${1:-} main includes directory file count=1
+  # With no argument, use the live conventional path; root is an internal fixture
+  # parameter, never an environment setting or an operator-facing option.
+  main="$root/etc/powerdns/pdns.conf"
+  upgrade_pdns_check_config_selection "$root" || return 1
+  upgrade_pdns_is_safe_file "$main" || return 1
+  includes=$(LC_ALL=C awk '
+    # pdns.conf: include-dir=/etc/powerdns/pdns.d -> only active *.conf files.
+    /^[ \t]*include-dir[ \t]*=/ {
+      value=$0; sub(/^[^=]*=[ \t]*/,"",value); sub(/[ \t]*#.*/,"",value); sub(/[ \t]+$/,"",value)
+      if(++count>1 || value ~ /[\042\047\t ]/ || value ~ /(^|\/)\.\.?($|\/)/ || value !~ /^\/etc\/powerdns\/[A-Za-z0-9_.\/-]+$/) bad=1
+      selected=value
+    }
+    END { if(bad) exit 1; if(selected!="") print selected }
+  ' "$main") || return 1
+  printf '%s\n' "$main"
+  [ -n "$includes" ] || return 0
+  directory="$root$includes"
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  for file in "$directory/"*.conf; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    count=$((count+1)); [ "$count" -le 100 ] || return 1
+    upgrade_pdns_is_safe_file "$file" || return 1
+    # Nested include-dir selectors need a separate layout review, not recursion
+    # through an inferred application/configuration tree.
+    if LC_ALL=C grep -Eq '^[ \t]*include-dir[ \t]*=' "$file"; then return 1; fi
+    printf '%s\n' "$file"
+  done
+}
+
+function upgrade_pdns_output_config_findings() {
+  LC_ALL=C awk '
+    function manual(key) {
+      return key ~ /^(allow-unsigned-supermaster|slave-cycle-interval|slave-renotify|superslave|supermaster-config|supermasters|supermaster-destdir|domain-metadata-cache-ttl)$/ ||
+             key ~ /^(gmysql|gpgsql|gsqlite3|godbc|gsql)-(info-all-slaves-query|supermaster-query|supermaster-name-to-ips|supermaster-add|update-master-query|info-all-master-query|get-all-domains-query)$/
+    }
+    # Input: "  master = yes # retained comment" -> alias master->primary.
+    # "gmysql-supermaster-query=SELECT ..." -> manual key only; no SQL emitted.
+    /\r/ || length($0)>16384 || NR>40000 || index($0,sprintf("%c",0)) { bad=1; next }
+    /^[ \t]*#/ || /^[ \t]*$/ { next }
+    {
+      line=$0; sub(/^[ \t]*/,"",line); key=line; sub(/[ \t=].*/,"",key)
+      if(key ~ /^(master|slave|primary|secondary)$/) {
+        if(line !~ /^(master|slave|primary|secondary)[ \t]*=[ \t]*(yes|no)[ \t]*(#.*)?$/) { bad=1; next }
+        canonical=key; if(key=="master") canonical="primary"; if(key=="slave") canonical="secondary"
+        if(seen[canonical]++) { bad=1; next }
+        if(key=="master" || key=="slave") findings[++count]="alias\t" FILENAME "\t" FNR "\t" key "\t" canonical
+      } else if(manual(key)) findings[++count]="manual\t" FILENAME "\t" FNR "\t" key
+    }
+    END { if(bad) exit 1; for(i=1;i<=count;i++) print findings[i] }
+  ' "$@"
+}
+
+function upgrade_pdns_output_compatibility_issue() {
+  local family=$1 current=$2 target=$3 installed selected files findings status action=manual root=${4:-}
+  installed=$(upgrade_pdns_output_installed_version); status=$?
+  [ "$status" -ne 1 ] || return 0
+  [ "$status" -eq 0 ] || return 1
+  selected=$(upgrade_pdns_output_review_target "$family" "$current" "$target"); status=$?
+  if [ "$status" -ne 0 ]; then
+    printf 'warn\tpdns-49\t4.9\tpdns-server\tTarget PowerDNS version is not established by existing indexes; the selected package transaction must check the 4.9 role-setting boundary.\n'
+    return 0
+  fi
+  upgrade_pdns_version_is_at_least "$selected" 4.9; status=$?
+  case "$status" in 0) :;; 1) return 0;; *) return 1;; esac
+  files=$(upgrade_pdns_output_config_files "$root") || files=
+  # One path per argument is essential; the actual array construction below
+  # preserves whitespace rather than treating approved paths as shell words.
+  local -a paths=()
+  if [ -n "$files" ]; then
+    while IFS= read -r status; do paths=("${paths[@]}" "$status"); done <<< "$files"
+    findings=$(upgrade_pdns_output_config_findings "${paths[@]}") || files=
+  fi
+  if [ -z "$files" ]; then
+    printf 'manual\tpdns-49\t4.9\tpdns-server\tPowerDNS 4.9 removes master/slave; configuration selection, includes or duplicate role settings require manual review before upgrading.\n'
+    return 0
+  fi
+  if printf '%s\n' "$findings" | grep -q '^manual'; then
+    printf 'manual\tpdns-49\t4.9\tpdns-server\tAdditional legacy PowerDNS settings or custom backend queries require manual migration; DR_MIGRATE_PDNS_ROLE_SETTINGS changes only master/slave.\n'
+  elif printf '%s\n' "$findings" | grep -q '^alias'; then
+    if "${DR_MIGRATE_PDNS_ROLE_SETTINGS:-false}"; then action=warn; fi
+    printf '%s\tpdns-49\t4.9\tpdns-server\tPowerDNS 4.9 removes master/slave; migrate to primary/secondary. DR_MIGRATE_PDNS_ROLE_SETTINGS=true permits only these key renames at the actual selected transition; checks never edit files.\n' "$action"
+  fi
+}
+
+# Rename the key token only. Preserve values, whitespace, inline comments and the
+# original final-newline state; SQL and every unrelated configuration byte stay.
+# pdns.conf: "  master = yes # writer" -> "  primary = yes # writer".
+# A file without a final LF also remains without a final LF.
+function upgrade_pdns_rewrite_file() {
+  local input=$1 output=$2 last newline=false
+  last=$(set -o pipefail; tail -c 1 -- "$input" | od -An -tu1) || return 1
+  last=${last//[[:space:]]/}; [ "$last" != 10 ] || newline=true
+  LC_ALL=C awk -v newline="$newline" '
+    { line=$0; key=line; sub(/^[ \t]*/,"",key); sub(/[ \t=].*/,"",key)
+      if(key=="master" || key=="slave") {
+        prefix=line; sub(/[^ \t].*$/,"",prefix)
+        line=prefix (key=="master"?"primary":"secondary") substr(line,length(prefix)+length(key)+1)
+      }
+      if(NR>1) printf "\n"
+      printf "%s",line
+    }
+    END { if(newline=="true") printf "\n" }
+  ' "$input" > "$output"
+}
+
+# Private migration journals are evidence, not executable shell input. Bind every
+# original backup to its recorded bytes/metadata and an approved current config
+# path before accepting a rollback or using that backup to restore a file.
+function upgrade_pdns_validate_saved_attempt() {
+  local directory=$1 allowed=$2 state=$3 manifest="$1/files.tsv" activated="$1/activated.tsv"
+  local index file digest metadata original_digest observed expected
+  [ -d "$directory" ] && [ ! -L "$directory" ] && [ "$(stat -c '%u:%a' -- "$directory")" = 0:700 ] || return 1
+  for file in "$manifest" "$activated"; do
+    upgrade_pdns_is_safe_file "$file" && [ "$(stat -c %a -- "$file")" = 600 ] && [ "$(stat -c %s -- "$file")" -le 65536 ] || return 1
+  done
+  # files.tsv: 0<TAB>/etc/powerdns/pdns.conf<TAB><new-sha256><TAB>0:0:640<TAB><original-sha256>
+  # activated.tsv: 0<TAB>/etc/powerdns/pdns.conf -> only that indexed original may be restored.
+  LC_ALL=C awk -F '\t' '
+    function hash(value) { return length(value)==64 && value !~ /[^a-f0-9]/ }
+    NF!=5 || NR>100 || /\r/ || $1 !~ /^[0-9]+$/ || $1+0>99 || $2 !~ /^\// || !hash($3) ||
+      $4 !~ /^[0-9]+:[0-9]+:[0-7]+$/ || !hash($5) || indices[$1]++ || paths[$2]++ { bad=1 }
+    END { exit bad }
+  ' "$manifest" || return 1
+  LC_ALL=C awk -F '\t' 'NF!=2 || NR>100 || /\r/ || $1 !~ /^[0-9]+$/ || $1+0>99 || $2 !~ /^\// || seen[$1]++ { bad=1 } END { exit bad }' "$activated" || return 1
+  while IFS=$'\t' read -r index file digest metadata original_digest; do
+    case $'\n'"$allowed"$'\n' in *$'\n'"$file"$'\n'*) :;; *) return 1;; esac
+    upgrade_pdns_is_safe_file "$directory/original.$index" || return 1
+    observed=$(sha256sum -- "$directory/original.$index") || return 1
+    [ "${observed%% *}" = "$original_digest" ] && [ "$(stat -c '%u:%g:%a' -- "$directory/original.$index")" = "$metadata" ] || return 1
+    if [ "$state" = original ]; then
+      upgrade_pdns_is_safe_file "$file" || return 1
+      observed=$(sha256sum -- "$file") || return 1
+      [ "${observed%% *}" = "$original_digest" ] && [ "$(stat -c '%u:%g:%a' -- "$file")" = "$metadata" ] || return 1
+    fi
+  done < "$manifest"
+  while IFS=$'\t' read -r index file; do
+    expected=$(LC_ALL=C awk -F '\t' -v row_index="$index" '$1==row_index { print $2; found=1 } END { if(!found) exit 1 }' "$manifest") || return 1
+    [ "$file" = "$expected" ] || return 1
+  done < "$activated"
+}
+
+function upgrade_pdns_reconcile_attempts() {
+  local parent=$1 root=${2:-} directory files='' count=0 manifest_digest activated_digest observed temporary
+  for directory in "$parent"/attempt.*; do
+    [ -e "$directory" ] || [ -L "$directory" ] || continue
+    count=$((count+1)); [ "$count" -le 100 ] || return 1
+    [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+    if [ ! -e "$directory/incomplete" ]; then
+      [ ! -L "$directory/incomplete" ] && [ -f "$directory/completed.tsv" ] && [ ! -L "$directory/completed.tsv" ] || return 1
+      continue
+    fi
+    upgrade_pdns_is_safe_file "$directory/incomplete" || return 1
+    if [ -s "$directory/activated.tsv" ] && { [ ! -f "$directory/rolled-back" ] || [ -L "$directory/rolled-back" ]; }; then
+      echo 'dss:error: An earlier PowerDNS migration activated files but its rollback is unresolved; reconcile that protected attempt before any further package configuration.' >&2
+      return 1
+    fi
+    [ -n "$files" ] || files=$(upgrade_pdns_output_config_files "$root") || return 1
+    manifest_digest=$(sha256sum -- "$directory/files.tsv") && activated_digest=$(sha256sum -- "$directory/activated.tsv") || return 1
+    if [ -e "$directory/reconciled-rollback.tsv" ] || [ -L "$directory/reconciled-rollback.tsv" ]; then
+      upgrade_pdns_is_safe_file "$directory/reconciled-rollback.tsv" && [ "$(stat -c %a -- "$directory/reconciled-rollback.tsv")" = 600 ] || return 1
+      observed=$(cat -- "$directory/reconciled-rollback.tsv") || return 1
+      [ "$observed" = "${manifest_digest%% *}"$'\t'"${activated_digest%% *}" ] || return 1
+      # A later successful retry legitimately changed current files. This receipt
+      # preserves the earlier verified rollback without requiring legacy bytes forever.
+      upgrade_pdns_validate_saved_attempt "$directory" "$files" backups || return 1
+      continue
+    fi
+    if ! upgrade_pdns_validate_saved_attempt "$directory" "$files" original; then
+      echo 'dss:error: Earlier PowerDNS rollback evidence, original backup integrity or current file digests do not agree; no retry was started.' >&2
+      return 1
+    fi
+    # Close only the recovery question after current/original digests agree under
+    # the lock. Keep incomplete, rolled-back and all original failure evidence.
+    temporary=$(umask u=rwx,go=; mktemp "$directory/reconciled.XXXXXX") || return 1
+    if printf '%s\t%s\n' "${manifest_digest%% *}" "${activated_digest%% *}" > "$temporary" && mv -fT -- "$temporary" "$directory/reconciled-rollback.tsv"; then :
+    else rm -f -- "$temporary"; return 1; fi
+  done
+}
+
+# Audit old failed attempts before even an already-canonical or earlier-target
+# no-op. A missing final receipt must not turn mixed files into a fresh success.
+function upgrade_pdns_reconcile_history() {
+(
+  local root=${1:-} baseline parent
+  if ! baseline=$(config_state_output_baseline); then
+    [ -n "${DR_CONFIG_BASELINE:-}" ] || return 0
+    baseline=$DR_CONFIG_BASELINE
+  fi
+  parent="$baseline.pdns-role-migration"
+  [ -e "$parent" ] || [ -L "$parent" ] || return 0
+  [ -d "$parent" ] && [ ! -L "$parent" ] && [ "$(stat -c '%u:%a' -- "$parent")" = 0:700 ] || return 1
+  [ ! -L "$parent/lock" ] || return 1
+  if [ -e "$parent/lock" ]; then [ -f "$parent/lock" ] && [ "$(stat -c %h -- "$parent/lock")" = 1 ] || return 1; fi
+  command -v flock >/dev/null 2>&1 || return 1
+  exec 9> "$parent/lock" || return 1
+  flock -n 9 || { echo 'dss:error: Another PowerDNS migration owns the selected history; no package work was started.' >&2; return 1; }
+  upgrade_pdns_reconcile_attempts "$parent" "$root"
+)
+}
+
+# Raw dpkg --configure -a can restart an already-unpacked PDNS before APT plans
+# another transaction. Its installed partial state is exact durable selection
+# evidence; never substitute a future release guess or a newer archive candidate.
+function upgrade_pdns_prepare_pending_configuration() {
+(
+  local root=${1:-} row status version extra directory
+  row=$(LC_ALL=C dpkg-query -W -f='${Status}\t${Version}\n' pdns-server 2>/dev/null); status=$?
+  if [ "$status" -eq 1 ] && [ -z "$row" ]; then return 0; fi
+  [ "$status" -eq 0 ] || return 1
+  case "$row" in *$'\n'*) return 1;; esac
+  IFS=$'\t' read -r status version extra <<< "$row"
+  case "$status" in
+    *' ok unpacked'|*' ok half-configured'|*' ok triggers-awaited'|*' ok triggers-pending') :;;
+    *' ok installed'|*' ok not-installed'|*' ok config-files') return 0;;
+    *) return 1;;
+  esac
+  case "$version" in ''|*[!A-Za-z0-9.+:~_-]*) return 1;; esac
+  [ -z "$extra" ] || return 1
+  umask u=rwx,go=
+  directory=$(mktemp -d "${TMPDIR:-/tmp}/distrorejuve-pdns-pending.XXXXXX") || return 1
+  trap 'rm -rf -- "$directory"' EXIT
+  # dpkg-query: install ok unpacked<TAB>1:4.9.3-1 -> configure that exact version.
+  # This private receipt is identified as pending-dpkg, not an APT simulation.
+  printf 'Conf pdns-server (%s installed-pending [current])\n' "$version" > "$directory/configure.plan" || return 1
+  upgrade_pdns_prepare_plan "$directory/configure.plan" "$root" pending-dpkg
+)
+}
+
+function upgrade_pdns_restore_migration() {
+  local directory=$1 allowed=$2 index file temporary status=0
+  upgrade_pdns_validate_saved_attempt "$directory" "$allowed" backups || return 1
+  while IFS=$'\t' read -r index file; do
+    temporary=$(mktemp "$file.distrorejuve-restore.XXXXXX") || { status=1; continue; }
+    if cp -a -- "$directory/original.$index" "$temporary" && mv -fT -- "$temporary" "$file" && cmp -s -- "$directory/original.$index" "$file"; then :
+    else rm -f -- "$temporary"; status=1; fi
+  done < "$directory/activated.tsv"
+  if [ "$status" -eq 0 ] && upgrade_pdns_validate_saved_attempt "$directory" "$allowed" original; then
+    rm -f -- "$directory/completed.tsv" && : > "$directory/rolled-back" || status=1
+  else status=1; echo "dss:error: PowerDNS role-setting rollback incomplete; retain recovery copies in $directory and reconcile before retrying." >&2; fi
+  return "$status"
+}
+
+function upgrade_pdns_prepare_plan() {
+(
+  local plan=$1 root=${2:-} context=${3:-apt-simulation} selected installed status records files findings baseline parent directory index=0 file digest metadata original_digest current completed=false
+  local -a paths=()
+  # A successful APT simulation supplies the exact new version. No static release
+  # prediction may trigger a write during earlier hops or unrelated package work.
+  # APT --simulate: Inst pdns-server [4.7.3-2] (4.9.3-1 Debian:stable [amd64])
+  # -> selected=4.9.3-1. Conf pdns-server (4.9.3-1 ... [amd64]) covers a retry.
+  selected=$(LC_ALL=C awk '
+    /^(Inst|Conf) pdns-server(:[a-z0-9-]+)? / {
+      value=($3 ~ /^\[/ ? $4 : $3); sub(/^\(/,"",value)
+      if(value !~ /^[0-9][A-Za-z0-9.+:~_-]*$/ || (version!="" && version!=value)) bad=1
+      version=value
+    }
+    END { if(bad) exit 2; if(version=="") exit 1; print version }
+  ' "$plan"); status=$?
+  [ "$status" -ne 1 ] || return 0
+  [ "$status" -eq 0 ] || return 1
+  case "$context" in apt-simulation|pending-dpkg) :;; *) return 1;; esac
+  upgrade_pdns_reconcile_history "$root" || return 1
+  upgrade_pdns_version_is_at_least "$selected" 4.9; status=$?
+  case "$status" in 0) :;; 1) return 0;; *) echo 'dss:error: Cannot establish the selected PowerDNS upstream version; role-setting review is required before this package transaction.' >&2; return 1;; esac
+  installed=$(upgrade_pdns_output_installed_version); status=$?
+  [ "$status" -ne 1 ] || return 0
+  [ "$status" -eq 0 ] || return 1
+  files=$(upgrade_pdns_output_config_files "$root") || { echo 'dss:error: Cannot safely select PowerDNS configuration for the 4.9 transition; review custom selectors, includes and permissions.' >&2; return 1; }
+  while IFS= read -r file; do paths=("${paths[@]}" "$file"); done <<< "$files"
+  findings=$(upgrade_pdns_output_config_findings "${paths[@]}") || { echo 'dss:error: PowerDNS role settings are malformed, duplicated or ambiguous; no settings changed.' >&2; return 1; }
+  if printf '%s\n' "$findings" | grep -q '^manual'; then
+    echo 'dss:error: Additional legacy PowerDNS settings or custom backend queries require manual migration; no automatic query/database changes are permitted.' >&2; return 1
+  fi
+  printf '%s\n' "$findings" | grep -q '^alias' || return 0
+  echo 'dss:warn: Selected PowerDNS 4.9+ rejects master/slave; primary/secondary settings are required before its package is configured.' >&2
+  "${DR_MIGRATE_PDNS_ROLE_SETTINGS:-false}" || { echo 'dss:error: Review role-setting migration and set DR_MIGRATE_PDNS_ROLE_SETTINGS=true to enable only these two key renames.' >&2; return 1; }
+  upgrade_pdns_version_is_at_least "$installed" 4.5; status=$?
+  if [ "$status" -eq 1 ]; then
+    echo 'dss:error: The installed PowerDNS is older than 4.5 and cannot parse primary/secondary. Complete a compatible intermediate hop or a separately supervised binary/configuration transition; no settings changed.' >&2; return 1
+  elif [ "$status" -ne 0 ]; then
+    echo 'dss:error: Cannot prove that the installed PowerDNS upstream version accepts primary/secondary; review this build before changing settings.' >&2; return 1
+  fi
+  # This extra executable proof is needed only when a rename will happen.
+  # Already-canonical files remain a no-op even if unrelated runtime evidence
+  # needs later acceptance work; custom configuration selectors still stay manual.
+  upgrade_pdns_check_config_selection "$root" true || { echo 'dss:error: Running PowerDNS does not match the current packaged binary; reconcile it before renaming settings.' >&2; return 1; }
+  command -v flock >/dev/null 2>&1 || return 1
+  record_config_state || return 1
+  baseline=$(config_state_output_baseline) || return 1
+  parent="$baseline.pdns-role-migration"
+  [ ! -L "$parent" ] && mkdir -p -- "$parent" && chmod u=rwx,go= -- "$parent" || return 1
+  [ "$(stat -c '%u:%a' -- "$parent")" = 0:700 ] || return 1
+  [ ! -L "$parent/lock" ] || return 1
+  if [ -e "$parent/lock" ]; then [ -f "$parent/lock" ] && [ "$(stat -c %h -- "$parent/lock")" = 1 ] || return 1; fi
+  exec 9> "$parent/lock" || return 1
+  flock -n 9 || { echo 'dss:error: Another PowerDNS settings migration owns this baseline; reconcile it before retrying.' >&2; return 1; }
+  upgrade_pdns_reconcile_attempts "$parent" "$root" || return 1
+  umask u=rwx,go=
+  directory=$(mktemp -d "$parent/attempt.XXXXXX") || return 1
+  : > "$directory/incomplete" && : > "$directory/activated.tsv" && : > "$directory/files.tsv" || return 1
+  trap 'status=$?; if [ "$completed" != true ] && [ -s "$directory/activated.tsv" ]; then upgrade_pdns_restore_migration "$directory" "$files" || status=1; fi; exit "$status"' EXIT
+  trap 'exit 1' HUP INT TERM
+  for file in "${paths[@]}"; do
+    cp -a -- "$file" "$directory/original.$index" && cp -a -- "$file" "$directory/new.$index" || return 1
+    upgrade_pdns_rewrite_file "$directory/original.$index" "$directory/new.$index" || return 1
+    digest=$(sha256sum -- "$directory/new.$index") && original_digest=$(sha256sum -- "$directory/original.$index") && metadata=$(stat -c '%u:%g:%a' -- "$file") || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' "$index" "$file" "${digest%% *}" "$metadata" "${original_digest%% *}" >> "$directory/files.tsv" || return 1
+    index=$((index+1))
+  done
+  records=$(upgrade_pdns_output_config_findings "$directory"/new.*) || return 1
+  [ -z "$records" ] || return 1
+  current=$(upgrade_pdns_output_config_files "$root") && [ "$current" = "$files" ] || return 1
+  while IFS=$'\t' read -r index file digest metadata original_digest; do
+    cmp -s -- "$file" "$directory/original.$index" && [ "$(stat -c '%u:%g:%a' -- "$file")" = "$metadata" ] || return 1
+  done < "$directory/files.tsv"
+  while IFS=$'\t' read -r index file digest metadata original_digest; do
+    cmp -s -- "$directory/new.$index" "$directory/original.$index" && continue
+    # Record ownership before the atomic replace, so a partially failed move is
+    # still restored from the protected original by the EXIT trap.
+    printf '%s\t%s\n' "$index" "$file" >> "$directory/activated.tsv" || return 1
+    mv -fT -- "$directory/new.$index" "$file" || return 1
+    current=$(sha256sum -- "$file") || return 1
+    [ "${current%% *}" = "$digest" ] && [ "$(stat -c '%u:%g:%a' -- "$file")" = "$metadata" ] || return 1
+  done < "$directory/files.tsv"
+  records=$(upgrade_pdns_output_config_findings "${paths[@]}") && [ -z "$records" ] || return 1
+  digest=$(sha256sum -- "$plan") || return 1
+  cp -- "$plan" "$directory/selection.txt" || return 1
+  printf '%s\t%s\t%s\t%s\n' "$installed" "$selected" "${digest%% *}" "$context" > "$directory/completed.tsv" && rm -- "$directory/incomplete" || return 1
+  completed=true
+  echo "dss:info: Migrated PowerDNS master/slave key names before the selected package transition; originals and receipt: $directory. No DNS service restart or database change was performed." >&2
+)
+}
+
 # Columns: family, first affected release, action, rule, package pattern, remedy.
 # Only purge rules may remove packages; manual rules protect service data and access.
 function upgrade_output_compatibility_rules() {
@@ -1953,10 +2721,10 @@ function upgrade_compatibility_output_config_files() {
       upgrade_compatibility_config_matches '^[ \t\r\f\013]*slapd_conf[ \t\r\f\013]*=[ \t\r\f\013]*[^ \t\r\f\013]|(^|[ \t\r\f\013])-[fF][ \t\r\f\013]' /etc/default/slapd /etc/systemd/system/slapd.service /etc/systemd/system/slapd.service.d/*.conf
       status=$?
       [ "$status" -eq 1 ] || return 2
-      [ ! -f /etc/ldap/slapd.conf ] || queue+=(/etc/ldap/slapd.conf)
+      [ ! -f /etc/ldap/slapd.conf ] || queue=("${queue[@]}" /etc/ldap/slapd.conf)
       if [ -d /etc/ldap/slapd.d ]; then
         text=$(find /etc/ldap/slapd.d -maxdepth 8 \( -type f -o -type l \) -name '*.ldif' -print) || return 2
-        while IFS= read -r file; do [ -z "$file" ] || queue+=("$file"); done <<< "$text"
+        while IFS= read -r file; do [ -z "$file" ] || queue=("${queue[@]}" "$file"); done <<< "$text"
       fi;;
     bind) queue=(/etc/bind/named.conf);;
     dovecot)
@@ -2000,7 +2768,7 @@ function upgrade_compatibility_output_config_files() {
       local expanded matched=false
       while IFS= read -r expanded; do
         [ -n "$expanded" ] || continue
-        queue+=("$expanded"); matched=true
+        queue=("${queue[@]}" "$expanded"); matched=true
       done < <(compgen -G "$included")
       if ! $matched; then
         # Dovecot !include_try explicitly permits missing optional files.
@@ -2038,7 +2806,7 @@ function upgrade_compatibility_rule_applies() {
     dovecot-2|dovecot-24|fail2ban-*|mailman-2|lilo|rabbitmq) return 0;;
     dovecot-23|dovecot-replication)
       files=$(upgrade_compatibility_output_config_files dovecot) || return 2
-      while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+      while IFS= read -r file; do paths=("${paths[@]}" "$file"); done <<< "$files"
       if [ "$rule" = dovecot-23 ]; then
         upgrade_compatibility_config_matches '^[[:space:]]*(ssl_protocols|ssl_parameters|director_doveadm_port|director_consistent_hashing|mdbox_purge_preserve_alt)[[:space:]]*=|^[[:space:]]*mail_plugins[[:space:]]*=[[:space:]]*([^#]*[[:space:]])?(stats|imap_stats)([[:space:]]|$)' "${paths[@]}"
       else
@@ -2055,7 +2823,7 @@ function upgrade_compatibility_rule_applies() {
       awk '$0 !~ /^[ \t\r\f\013]*#/ && $3 == "xfs" && $4 ~ /(^|,)(no)?barrier(=[^,]+)?(,|$)/ { bad=1 } END { exit !bad }' /etc/fstab;;
     ldap-backends|ldap-tls)
       files=$(upgrade_compatibility_output_config_files ldap) || return 2
-      while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+      while IFS= read -r file; do paths=("${paths[@]}" "$file"); done <<< "$files"
       if [ "$rule" = ldap-backends ]; then
         upgrade_compatibility_config_matches '^[[:space:]]*(database[[:space:]]+|olcdatabase:[[:space:]]*(\{[0-9]+\})?)(bdb|hdb|shell)([[:space:]]|$)|^[[:space:]]*(include|olcinclude:).*ppolicy|^[[:space:]]*(dn:[[:space:]]*cn=|cn:[[:space:]]*)(\{[0-9]+\})?ppolicy(,|[[:space:]]|$)|^[[:space:]]*(overlay[[:space:]]+|olcoverlay:[[:space:]]*(\{[0-9]+\})?)nssov|^[[:space:]]*(olcmoduleload:|moduleload[[:space:]]).*nssov' "${paths[@]}"
       else
@@ -2072,7 +2840,7 @@ function upgrade_compatibility_rule_applies() {
         text=$(named-checkconf -p -x -c 2>/dev/null) || return 2
       else
         files=$(upgrade_compatibility_output_config_files bind) || return 2
-        while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+        while IFS= read -r file; do paths=("${paths[@]}" "$file"); done <<< "$files"
         upgrade_compatibility_config_matches '(^|[;{}[:space:]])(plugin|dyndb|dlz)([[:space:]]|$)' "${paths[@]}"
         [ "$?" -eq 1 ] || return 2
         text=$(cat -- "${paths[@]}") || return 2
@@ -2134,6 +2902,11 @@ function upgrade_output_compatibility_issues() {
     fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$action" "$rule" "$boundary" "$selected" "$remedy"
   done < <(upgrade_output_compatibility_rules)
+  # Keep the version-aware PowerDNS boundary in the same read-only report path
+  # as Dovecot and other configuration migrations; removed-package remnants do not qualify.
+  if printf '%s\n' "$packages" | LC_ALL=C awk -F '\t' '$1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && $2=="pdns-server" { found=1 } END { exit !found }'; then
+    upgrade_pdns_output_compatibility_issue "$family" "$current" "$target" || return 1
+  fi
 }
 
 function upgrade_output_incompatible_packages() {
@@ -2637,6 +3410,42 @@ EOF
     return 0
 }
 
+# Explain verified t64 replacements in the ordinary selected APT plan. The
+# previous separate check required an operator-created projection that normal
+# upgrades never used. Reuse the actual archive/Provides/Replaces validator;
+# this report does not authorize removals or change the selected transaction.
+# apt-get --simulate:
+# Remv libcurl4 [7.88-1]
+# Inst libcurl4t64 (8.14-1 Debian:stable [amd64])
+# -> report libcurl4:amd64 -> libcurl4t64:amd64=8.14-1 before normal execution.
+function apt_print_t64_replacements() {
+  local plan=$1 candidates package native replacement status
+  candidates=$(LC_ALL=C awk '
+    /^Remv / && $2 ~ /^lib[0-9a-z][a-z0-9+.-]*(:[a-z0-9-]+)?$/ { if(!seen[$2]++) print $2 }
+  ' "$plan") || {
+    echo 'dss:warn: Cannot summarize t64 replacement metadata for this package plan.' >&2
+    return 0
+  }
+  [ -n "$candidates" ] || return 0
+  native=$(dpkg --print-architecture) || {
+    echo 'dss:warn: Native architecture unavailable; t64 replacement summary is unknown.' >&2
+    return 0
+  }
+  while IFS= read -r package; do
+    [ -n "$package" ] || continue
+    if replacement=$(upgrade_php_output_t64_replacement "$package" "$plan" "$native" 2>/dev/null); then
+      case "$package" in *:*) :;; *) package="$package:$native";; esac
+      printf 'dss:info: Selected APT plan replaces %s with %s; the normal dependency transaction handles this t64 change.\n' "$package" "$replacement" >&2
+    else
+      status=$?
+      if [ "$status" -eq 2 ]; then
+        echo 'dss:warn: Selected library replacement metadata is unavailable; keep the existing package/removal checks.' >&2
+      fi
+    fi
+  done <<< "$candidates"
+  return 0
+}
+
 # Retain the machine's web-server role before every ordinary APT mutation.
 function apt_get_apply() {
 (
@@ -2657,6 +3466,7 @@ function apt_get_apply() {
     umask 077
     dpkg-query -W -f='${Status}\t${Package}\n' > "$directory/packages" || return 1
     (umask "$package_umask" && LC_ALL=C apt-get "$@" --simulate) > "$directory/plan" 2>&1 || { status=$?; cat "$directory/plan" >&2; return "$status"; }
+    apt_print_t64_replacements "$directory/plan"
     apt_space_check_plan "$directory/plan" "$@" || return 1
     if awk -F '\t' '
       $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ &&
@@ -2669,6 +3479,11 @@ function apt_get_apply() {
         printf 'dss:error: APT would add an Apache web server/PHP handler to a host without that role: %s. No package changes attempted; review PHP-FPM/CGI dependency alternatives.\n' "${additions//$'\n'/, }" >&2
         return 1
       fi
+    fi
+    # Wait for the actual selected PDNS version. Earlier release hops must keep
+    # master/slave while an older binary still requires those spellings.
+    if LC_ALL=C grep -Eq '^(Inst|Conf) pdns-server(:[a-z0-9-]+)? ' "$directory/plan"; then
+      upgrade_pdns_prepare_plan "$directory/plan" || return 1
     fi
     : > "$directory/output" || return 1
     umask "$package_umask" || return 1
@@ -3110,6 +3925,8 @@ function upgrade_php_output_t64_replacement() {
   printf '%s:%s=%s\n' "$replacement" "$arch" "$version"
 }
 
+
+
 # Only documentation-only dependency packages for explicitly unavailable extensions qualify.
 function upgrade_php_is_obsolete_extension_meta() {
   local package=${1%%:*} mapping=$2 packages=$3 files
@@ -3298,11 +4115,11 @@ function upgrade_migrate_php_packages() {
     fi
     printf '%s:all\n' "$package" >> "$directory/apache.meta-removals" || return 1
   done < "$directory/packages.before"
-  while IFS= read -r package; do [ -z "$package" ] || installs+=("$package"); done < "$directory/install.packages"
+  while IFS= read -r package; do [ -z "$package" ] || installs=("${installs[@]}" "$package"); done < "$directory/install.packages"
   listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
-  while IFS= read -r package; do [ -z "$package" ] || removals+=("$package"); done <<< "$listed"
+  while IFS= read -r package; do [ -z "$package" ] || removals=("${removals[@]}" "$package"); done <<< "$listed"
   listed=$(upgrade_php_output_pending_removals "$directory/apache.remove" "$packages") || return 1
-  while IFS= read -r package; do [ -z "$package" ] || handoff_removals+=("$package"); done <<< "$listed"
+  while IFS= read -r package; do [ -z "$package" ] || handoff_removals=("${handoff_removals[@]}" "$package"); done <<< "$listed"
   if [ -f "$directory/apache.package" ]; then apache=$(cat "$directory/apache.package") || return 1; fi
   # Configured concrete default roles need no reinstall merely to add optional versionless metas.
   # Mapping/candidate checks above still reject unavailable roles; partial PHP state needs repair.
@@ -3331,13 +4148,13 @@ function upgrade_migrate_php_packages() {
   fi
   if ! $pending; then
     for file in etc/php etc/php5 etc/apache2 var/lib/dpkg/status var/lib/apt/extended_states var/lib/ucf/hashfile var/lib/ucf/registry; do
-      [ ! -e "/$file" ] && [ ! -L "/$file" ] || backups+=("$file")
+      [ ! -e "/$file" ] && [ ! -L "/$file" ] || backups=("${backups[@]}" "$file")
     done
     tar -C / -czpf "$directory/config-state.tar.gz" "${backups[@]}" || return 1
   fi
   arguments=("${installs[@]}")
-  [ -z "$apache" ] || arguments+=("$apache")
-  for package in "${removals[@]}"; do arguments+=("$package-"); done
+  [ -z "$apache" ] || arguments=("${arguments[@]}" "$apache")
+  for package in "${removals[@]}"; do arguments=("${arguments[@]}" "$package-"); done
   native=$(dpkg --print-architecture) || return 1
   [[ "$native" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
   # Resume exact replacements already selected by this migration, without widening removal approval.
@@ -3347,8 +4164,8 @@ function upgrade_migrate_php_packages() {
       case "$package" in lib*:"$native") :;; *) return 1;; esac
       [ "${replacement%%=*}" = "${package%%:*}t64:$native" ] || return 1
       [[ "${replacement#*=}" =~ ^[0-9A-Za-z.+:~_-]+$ ]] || return 1
-      t64_installs+=("$replacement")
-      arguments+=("$replacement")
+      t64_installs=("${t64_installs[@]}" "$replacement")
+      arguments=("${arguments[@]}" "$replacement")
     done < "$directory/t64.replacements"
   fi
   echo "dss:stage: Checking package changes for PHP $default" >&2
@@ -3369,7 +4186,7 @@ function upgrade_migrate_php_packages() {
   if [ ! -f "$directory/apache.excluded" ]; then
     upgrade_php_output_new_apache_packages "$apache_inventory" "$directory/normal-dist-upgrade.plan" > "$directory/apache.excluded" || return 1
   fi
-  while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done < "$directory/apache.excluded"
+  while IFS= read -r package; do [ -z "$package" ] || arguments=("${arguments[@]}" "$package-"); done < "$directory/apache.excluded"
   for ((attempt=0; attempt<8; attempt++)); do
     (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate --reinstall install "${arguments[@]}") > "$directory/install.plan" 2>&1 || return 1
     additions=$(upgrade_php_output_new_apache_packages "$apache_inventory" "$directory/install.plan") || return 1
@@ -3378,7 +4195,7 @@ function upgrade_migrate_php_packages() {
       while IFS= read -r package; do
         grep -qxF -- "$package" "$directory/apache.excluded" && { echo "dss:error: APT still selects excluded Apache package $package; inspect $directory/install.plan." >&2; return 1; }
         printf '%s\n' "$package" >> "$directory/apache.excluded" || return 1
-        arguments+=("$package-")
+        arguments=("${arguments[@]}" "$package-")
       done <<< "$additions"
       continue
     fi
@@ -3403,9 +4220,9 @@ function upgrade_migrate_php_packages() {
             printf '%s\n' "$package" >> "$directory/install.allowed-removals" || return 1
             printf '%s\n' "${replacement%%=*}" >> "$directory/install.packages" || return 1
             printf '%s\t%s\n' "$package" "$replacement" >> "$directory/t64.replacements" || return 1
-            installs+=("${replacement%%=*}")
-            t64_installs+=("$replacement")
-            arguments+=("$replacement")
+            installs=("${installs[@]}" "${replacement%%=*}")
+            t64_installs=("${t64_installs[@]}" "$replacement")
+            arguments=("${arguments[@]}" "$replacement")
             echo "dss:info: Preserving $package through verified archive replacement $replacement" >&2
             continue
           else
@@ -3416,15 +4233,15 @@ function upgrade_migrate_php_packages() {
         if [ "$status" -eq 1 ] && upgrade_php_is_obsolete_extension_meta "$package" "$directory/mapping" "$packages"; then
           printf '%s:all\n' "${package%%:*}" >> "$directory/remove.packages" || return 1
           printf '%s:all\n' "${package%%:*}" >> "$directory/install.allowed-removals" || return 1
-          arguments+=("${package%%:*}-")
+          arguments=("${arguments[@]}" "${package%%:*}-")
           echo "dss:warn: Removing obsolete PHP dependency package $package with its unavailable extension; configuration will not be purged." >&2
           continue
         fi
         echo "dss:error: No verified target candidate to preserve $package; inspect $directory/install.plan." >&2; return 1
       fi
       printf '%s\n' "$package" >> "$directory/install.packages" || return 1
-      installs+=("$package")
-      arguments+=("$package")
+      installs=("${installs[@]}" "$package")
+      arguments=("${arguments[@]}" "$package")
     done <<< "$preserved"
   done
   if [ "${#handoff_removals[@]}" -gt 0 ]; then
@@ -3433,7 +4250,7 @@ function upgrade_migrate_php_packages() {
     sort -u "$directory/apache.allowed-removals" -o "$directory/apache.allowed-removals" || return 1
     listed=$(upgrade_php_output_pending_removals "$directory/apache.allowed-removals" "$packages") || return 1
     handoff_removals=()
-    while IFS= read -r package; do [ -z "$package" ] || handoff_removals+=("$package"); done <<< "$listed"
+    while IFS= read -r package; do [ -z "$package" ] || handoff_removals=("${handoff_removals[@]}" "$package"); done <<< "$listed"
     (umask "$package_umask" && LC_ALL=C apt-get "${apt_options[@]}" -o APT::Get::Purge=false -o APT::Get::AutomaticRemove=false --simulate remove "${handoff_removals[@]}") > "$directory/remove.plan" 2>&1 || return 1
     if upgrade_php_check_apache_removal_plan "$directory" "$native" 2> "$directory/apache.remove.rejection"; then
       printf '%s\n' separate > "$directory/apache.transaction" || return 1
@@ -3466,9 +4283,9 @@ function upgrade_migrate_php_packages() {
     packages=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n') || return 1
     listed=$(upgrade_php_output_pending_removals "$directory/remove.packages" "$packages") || return 1
     arguments=("${installs[@]}" "${t64_installs[@]}")
-    [ -z "$apache" ] || arguments+=("$apache")
-    while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done <<< "$listed"
-    while IFS= read -r package; do [ -z "$package" ] || arguments+=("$package-"); done < "$directory/apache.excluded"
+    [ -z "$apache" ] || arguments=("${arguments[@]}" "$apache")
+    while IFS= read -r package; do [ -z "$package" ] || arguments=("${arguments[@]}" "$package-"); done <<< "$listed"
+    while IFS= read -r package; do [ -z "$package" ] || arguments=("${arguments[@]}" "$package-"); done < "$directory/apache.excluded"
   fi
   if $apache_combined && ! upgrade_php_apache_combined_guard_is_active "$directory"; then
     echo 'dss:error: Combined PHP transaction requires a verified persistent Apache mask and inactive service; package changes stopped.' >&2
@@ -3757,7 +4574,7 @@ function upgrade_php_runtime_collect_socket_findings() {
           # Expansion is data, never evaluation; unsupported whitespace/metacharacters were rejected.
           for match in $pattern; do
             [ -e "$match" ] || continue
-            found=true; files+=("$match"); depths+=("$((depth+1))")
+            found=true; files=("${files[@]}" "$match"); depths=("${depths[@]}" "$((depth+1))")
             if [ "${#files[@]}" -gt 200 ]; then break; fi
           done
           if ! $found; then
@@ -4888,12 +5705,12 @@ function upgrade_prepare_nss_lookup() {
 function crossgrade_check_apt_architecture_preferences() {
   local main=$1 parts=$2 file name
   local -a files=()
-  [ ! -f "$main" ] || files+=("$main")
+  [ ! -f "$main" ] || files=("${files[@]}" "$main")
   for file in "$parts/"*; do
     [ -f "$file" ] || continue
     name=${file##*/}
     case "$name" in .*|*[!a-zA-Z0-9_.-]*) continue;; *.*) case "$name" in *.pref) :;; *) continue;; esac;; esac
-    files+=("$file")
+    files=("${files[@]}" "$file")
   done
   for file in "${files[@]}"; do
     # Package/Pin/Pin-Priority stanzas: positive i386 pins and negative amd64 pins need review.
@@ -5463,7 +6280,7 @@ function upgrade_check_incompatible_packages() {
   local -a packages=()
   listed=$(upgrade_output_incompatible_packages "$family" "$current" "$target") || return 1
   [ -n "$listed" ] || return 0
-  while IFS= read -r package; do packages+=("$package"); done <<< "$listed"
+  while IFS= read -r package; do packages=("${packages[@]}" "$package"); done <<< "$listed"
   if ! $purge; then
     case " $listed " in *fail2ban*) print_uninstall_fail2ban;; esac
     if printf '%s\n' "$listed" | grep -q '^dovecot'; then
@@ -5733,14 +6550,17 @@ function packages_output_file_owner() {
 # before suppressing packaged migration paths; retain local edits and unverifiable files for review.
 # Only verified unchanged package content may be omitted; owner/mode are not compared.
 function packages_output_file_origin() {
-  local file=$1 backend=$2 root=${3:-} path owner status records checksum='' actual tool metadata size alias
+  local file=$1 backend=$2 root=${3:-} maximum_size=${4:-1048576} path owner status records checksum='' actual tool metadata size alias
   path=${file#"$root"}
   case "$path" in /*) :;; *) printf 'unknown\tunknown\n'; return 1;; esac
   case "$path" in *$'\n'*|*$'\r'*|*$'\t'*) printf 'unknown\tunknown\n'; return 1;; esac
   if [ -L "$file" ] || [ ! -f "$file" ] || [ ! -r "$file" ]; then printf 'unknown\tunknown\n'; return 0; fi
   size=$(stat -c %s -- "$file" 2>/dev/null) || { printf 'unknown\tunknown\n'; return 0; }
   case "$size" in ''|*[!0-9]*) printf 'unknown\tunknown\n'; return 0;; esac
-  if [ "$size" -gt 1048576 ]; then printf 'unknown\tunknown\n'; return 0; fi
+  # Migration inventory keeps its 1 MiB content bound. Only the executable-specific
+  # usrmerge verifier below selects the separately bounded 16 MiB allowance.
+  case "$maximum_size" in 1048576|16777216) :;; *) return 1;; esac
+  if [ "$size" -gt "$maximum_size" ]; then printf 'unknown\tunknown\n'; return 0; fi
   if owner=$(packages_output_file_owner "$path" "$backend"); then :
   else
     status=$?
@@ -5802,6 +6622,14 @@ function usrmerge_is_complete() {
   done
 }
 
+# A conventional packaged utility can exceed the inventory reader's 1 MiB bound.
+# Hash only a regular executable, with an explicit 16 MiB ceiling; callers still
+# verify ownership/permissions and archive both copies before moving a collision.
+function usrmerge_output_executable_origin() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -x "$1" ] || return 1
+  packages_output_file_origin "$1" dpkg "${2:-}" 16777216
+}
+
 # A package name alone does not establish which copy is safe to retain.
 # Require unchanged package bytes and root-controlled regular files on both sides.
 function usrmerge_collision_is_repairable() {
@@ -5810,7 +6638,7 @@ function usrmerge_collision_is_repairable() {
   current=$(packages_output_file_owner "$source"); status=$?
   [ "$status" -eq 1 ] || return 1
   current=$(packages_output_file_owner "$target") && [ "$current" = "$owner" ] || return 1
-  origin=$(packages_output_file_origin "$target" dpkg) || return 1
+  origin=$(usrmerge_output_executable_origin "$target") || return 1
   [ "$origin" = "packaged"$'\t'"$owner" ] || return 1
   for file in "$source" "$target"; do
     # stat -c '%u %a': "0 755" -> root, no group/other write bits.
@@ -6674,7 +7502,7 @@ function crossgrade_bookworm_download() {
       else status=$?; [ "$status" -eq 1 ] && continue; return 1; fi
       [ "${#learned[@]}" -lt 64 ] || return 1
       set -- "$@" "$package:amd64=$version"
-      learned+=("$package")
+      learned=("${learned[@]}" "$package")
       progress=true
       echo "dss:info: Selecting required native dependency $package:amd64=$version for crossgrade." >&2
     done <<< "$candidates"
@@ -6839,7 +7667,7 @@ function crossgrade_bookworm_record_archives() {
   local directory=$1 phase=$2 package version arch file
   local -a archives=()
   case "$phase" in bootstrap|remaining) :;; *) return 1;; esac
-  while IFS=$'\t' read -r package version arch file; do archives+=("$file"); done < "$directory/$phase.archives" || return 1
+  while IFS=$'\t' read -r package version arch file; do archives=("${archives[@]}" "$file"); done < "$directory/$phase.archives" || return 1
   [ "${#archives[@]}" -gt 0 ] || return 1
   (
     umask 077
@@ -6926,7 +7754,7 @@ function crossgrade_bookworm_apply_archives() {
   while IFS=$'\t' read -r package version arch file; do
     case "$file" in "$cache/"*.deb) :;; *) return 1;; esac
     [ -f "$file" ] && [ ! -L "$file" ] || return 1
-    archives+=("$file")
+    archives=("${archives[@]}" "$file")
   done < "$directory/$phase.archives" || return 1
   [ "${#archives[@]}" -gt 0 ] || return 1
   hashes=$(sha256sum -- "${archives[@]}") || return 1
@@ -6963,7 +7791,7 @@ function crossgrade_bookworm_apply_archives() {
         success=true; break
       fi
       retry=()
-      while IFS= read -r file; do retry+=("$file"); done <<< "$pending"
+      while IFS= read -r file; do retry=("${retry[@]}" "$file"); done <<< "$pending"
       if [ "$attempt" -ge 2 ] && [ "${#retry[@]}" -ge "$previous" ]; then
         echo 'dss:error: Raw package conversion stopped making progress; verified archives and the Apache maintenance mask were retained.' >&2; return 1
       fi
@@ -7117,7 +7945,7 @@ function crossgrade_bookworm_prepare_obsolete() {
         echo "dss:error: Obsolete package $package has an unverified payload; remove or migrate it manually." >&2; return 1;
       }
     fi
-    obsolete_packages+=("$package:i386")
+    obsolete_packages=("${obsolete_packages[@]}" "$package:i386")
   done <<< "$packages"
   if [ ! -s "$directory/pre-crossgrade.tar.gz" ] || [ -L "$directory/pre-crossgrade.tar.gz" ] || ! tar -tzf "$directory/pre-crossgrade.tar.gz" >/dev/null; then
     echo 'dss:error: Verified original configuration/package backup is required before obsolete package removal.' >&2
@@ -7263,7 +8091,7 @@ function crossgrade_debian_bookworm() {
     awk -F '\t' '$1 == "install ok installed" && $3 == "i386" { print $2 "\t" $4 "\t" ($5 == "yes" ? "yes" : "no") "\t" ($6 == "" ? "unknown" : $6) "\t" ($7 == "" ? "no" : $7) }' \
       "$directory/original.packages" > "$directory/original.i386.new" || return 1
     apt-mark showauto > "$directory/original.auto" || return 1
-    for file in etc var/lib/dpkg var/lib/apt/extended_states; do [ ! -e "/$file" ] || backups+=("$file"); done
+    for file in etc var/lib/dpkg var/lib/apt/extended_states; do [ ! -e "/$file" ] || backups=("${backups[@]}" "$file"); done
     (umask 077; tar -C / -czpf "$directory/pre-crossgrade.tar.gz" "${backups[@]}") || return 1
     mv "$directory/original.i386.new" "$directory/original.i386" || return 1
   fi
@@ -7327,10 +8155,10 @@ function crossgrade_debian_bookworm() {
   dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n' > "$directory/installed" || return 1
   foreign_replacements=$(crossgrade_bookworm_output_foreign_replacements "$directory/targets") || return 1
   while IFS=$'\t' read -r package candidate multi_arch; do
-    arguments+=("$package:amd64=$candidate")
+    arguments=("${arguments[@]}" "$package:amd64=$candidate")
     case $'\n'"$foreign_replacements"$'\n' in
-      *$'\n'"$package"$'\n'*) arguments+=("$package:i386-");;
-      *) [ "$multi_arch" = same ] || arguments+=("$package:i386-");;
+      *$'\n'"$package"$'\n'*) arguments=("${arguments[@]}" "$package:i386-");;
+      *) [ "$multi_arch" = same ] || arguments=("${arguments[@]}" "$package:i386-");;
     esac
   done < "$directory/targets"
   # A previous transaction may have removed an obsolete name that current indexes no longer know.
@@ -7339,12 +8167,12 @@ function crossgrade_debian_bookworm() {
     $3 == "i386" && $1 ~ / (installed|unpacked|half-configured|half-installed|triggers-awaited|triggers-pending)$/ && $2 in approved { print $2 }
   ' "$crossgrade_obsolete_approved" "$directory/installed") || return 1
   while IFS= read -r package; do
-    [ -z "$package" ] || arguments+=("$package:i386-")
+    [ -z "$package" ] || arguments=("${arguments[@]}" "$package:i386-")
   done <<< "$obsolete_removals"
   if [ "$native" = i386 ]; then
     bootstrap=(dpkg:amd64 tar:amd64 apt:amd64 dpkg:i386- tar:i386- apt:i386-)
     if awk -F '\t' '$2 == "apt-utils" && $1 == "install ok installed" { found=1 } END { exit !found }' "$directory/original.packages"; then
-      bootstrap+=(apt-utils:amd64 apt-utils:i386-)
+      bootstrap=("${bootstrap[@]}" apt-utils:amd64 apt-utils:i386-)
     fi
     crossgrade_bookworm_download "$directory" "$directory/targets" "$directory/installed" bootstrap "${bootstrap[@]}" || return 1
     for package in dpkg tar apt; do
@@ -7352,7 +8180,7 @@ function crossgrade_debian_bookworm() {
         echo "dss:error: Verified bootstrap archive missing: $package:amd64." >&2; return 1;
       }
     done
-    while IFS=$'\t' read -r package version status file; do archives+=("$file"); done < "$directory/bootstrap.archives"
+    while IFS=$'\t' read -r package version status file; do archives=("${archives[@]}" "$file"); done < "$directory/bootstrap.archives"
     [ "${#archives[@]}" -gt 0 ] || { echo 'dss:error: No verified bootstrap archives downloaded.' >&2; return 1; }
     crossgrade_bookworm_record_archives "$directory" bootstrap || return 1
     crossgrade_bookworm_apply_archives "$directory" bootstrap true || return 1
@@ -7378,7 +8206,7 @@ function crossgrade_debian_bookworm() {
   dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Essential}\n' > "$directory/installed" || return 1
   arguments=()
   while IFS=$'\t' read -r package candidate multi_arch; do
-    arguments+=("$package:amd64=$candidate")
+    arguments=("${arguments[@]}" "$package:amd64=$candidate")
   done < "$directory/targets"
   obsolete_removals=$(awk -F '\t' '
     FILENAME == ARGV[1] { wanted[$1]=1; next }
@@ -7394,13 +8222,13 @@ function crossgrade_debian_bookworm() {
     }
   ' "$directory/targets" "$crossgrade_obsolete_approved" "$directory/installed") || return 1
   while IFS= read -r package; do
-    [ -z "$package" ] || arguments+=("$package:i386-")
+    [ -z "$package" ] || arguments=("${arguments[@]}" "$package:i386-")
   done <<< "$obsolete_removals"
   crossgrade_bookworm_download "$directory" "$directory/targets" "$directory/installed" cleanup "${arguments[@]}" || return 1
   arguments=()
   while IFS= read -r package; do
     [ -n "$package" ] || return 1
-    arguments+=("$package")
+    arguments=("${arguments[@]}" "$package")
   done < "$directory/cleanup.arguments" || return 1
   [ "${#arguments[@]}" -gt 0 ] || return 1
   cache=$(cat "$directory/cleanup.cache") || return 1
@@ -7418,7 +8246,7 @@ function crossgrade_debian_bookworm() {
     { package=$0; sub(/:i386$/, "", package); if (package in converted) print package ":amd64" }
   ' "$directory/targets" "$directory/original.auto") || return 1
   while IFS= read -r oldmark; do
-    [ -z "$oldmark" ] || converted_auto+=("$oldmark")
+    [ -z "$oldmark" ] || converted_auto=("${converted_auto[@]}" "$oldmark")
   done <<< "$auto_marks"
   if [ -s "$directory/remaining.dependencies" ]; then
     auto_marks=$(dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\n') || return 1
@@ -7429,7 +8257,7 @@ function crossgrade_debian_bookworm() {
       }
     ' "$directory/remaining.dependencies" -) || return 1
     while IFS= read -r oldmark; do
-      [ -z "$oldmark" ] || converted_auto+=("$oldmark")
+      [ -z "$oldmark" ] || converted_auto=("${converted_auto[@]}" "$oldmark")
     done <<< "$auto_marks"
   fi
   if [ "${#converted_auto[@]}" -gt 0 ]; then
@@ -8354,9 +9182,9 @@ function upgrade_remove_retired_packages() {
   awk -F '\t' '$4 == "obsolete" { print $1 ":" $2 }' "$attempt/classifications" > "$attempt/obsolete" || return 1
   while IFS= read -r package; do
     [ -n "$package" ] || continue
-    if $qualified_packages; then obsolete+=("$package")
+    if $qualified_packages; then obsolete=("${obsolete[@]}" "$package")
     else
-      case "${package##*:}" in "$native"|all) obsolete+=("${package%:*}");; *) return 1;; esac
+      case "${package##*:}" in "$native"|all) obsolete=("${obsolete[@]}" "${package%:*}");; *) return 1;; esac
     fi
   done < "$attempt/obsolete"
   read -r -a options <<< "$APT_GET_INSTALL_OPTIONS"
@@ -8444,7 +9272,7 @@ function upgrade_remove_retired_packages() {
         return 0
       fi
       while IFS= read -r package; do
-        if query_package=$(upgrade_cleanup_output_safe_package "$package" "$native" "$qualified_packages" "$attempt/packages"); then selected+=("$query_package")
+        if query_package=$(upgrade_cleanup_output_safe_package "$package" "$native" "$qualified_packages" "$attempt/packages"); then selected=("${selected[@]}" "$query_package")
         else
           status=$?
           [ "$status" -eq 3 ] || return 1
@@ -8578,7 +9406,7 @@ function upgrade_autoremove_packages() {
   if [ -z "$removals" ]; then printf 'autoremove\tnone\t-\tunused packages retained by protected roots\n' >> "$directory/outcomes"; return $?; fi
   while IFS= read -r package; do
     query_package=$(upgrade_cleanup_output_safe_package "$package" "$native" "$qualified_packages" "$directory/packages.before") || return 1
-    selected+=("$query_package")
+    selected=("${selected[@]}" "$query_package")
   done <<< "$removals"
   LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
     -o APT::Get::AutomaticRemove=false --simulate remove "${selected[@]}" > "$directory/plan.final" 2>&1 || return 1
@@ -9386,7 +10214,7 @@ function config_state_capture() {
   files=$(find /etc -type f | awk '/.ucf-old|.ucf-diff|.dpkg-new|.dpkg-old|dpkg-dist|[.]rpmnew|[.]rpmsave/' | sort) || return 1
   printf 'Date: %s\n' "$now" >> "$file" || return 1
   if [ -n "$files" ]; then
-    while IFS= read -r config_file; do config_files+=("$config_file"); done <<< "$files"
+    while IFS= read -r config_file; do config_files=("${config_files[@]}" "$config_file"); done <<< "$files"
     ls -lrt -- "${config_files[@]}" | awk '{print "configfiles:" $0}' >> "$file" || return 1
   fi
   printf 'Listening ports:\n\n' >> "$file" || return 1
@@ -9727,6 +10555,9 @@ function apt_get_upgrade() {
   record_config_state || return $?
   upgrade_prepare_debian_locales || return $?
   echo "dss:info: Configuring pending packages before the package upgrade (dpkg --configure -a)." >&2
+  # A pending PowerDNS postinst may restart DNS here before APT gets another
+  # chance to select a plan. Migrate or block that exact unpacked version first.
+  upgrade_pdns_prepare_pending_configuration || return 1
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
   fi
@@ -9825,6 +10656,9 @@ function apt_get_dist_upgrade() {
     sed -i "s@^lc-messages-dir\(.*\)@#lc-messages-dir\1@" /etc/my/my.cnf
   fi
   echo "dss:info: Rechecking package configuration after the full upgrade (dpkg --configure -a)." >&2
+  # A pending PowerDNS postinst may restart DNS here before APT gets another
+  # chance to select a plan. Migrate or block that exact unpacked version first.
+  upgrade_pdns_prepare_pending_configuration || return 1
   if ! dpkg --configure -a --force-confnew --force-confmiss; then
     cacheable=false; apt_state_healthy=
   fi
@@ -10250,10 +11084,10 @@ function rpm_sources_prepare() {
     metadata=$(stat -c %s -- "$file") || return 1
     case "$metadata" in ''|*[!0-9]*) return 1;; esac
     if [ "$metadata" -gt 1048576 ]; then echo "dss:error: Repository file is too large to rewrite: $file" >&2; return 1; fi
-    repository_files+=("$file")
+    repository_files=("${repository_files[@]}" "$file")
     cp -p -- "$file" "$directory/repository-original/$name" && cp -p -- "$file" "$directory/repository-stage/$name" || return 1
     rpm_sources_output_vault_rewrite "$file" "$base" "$major" > "$directory/repository-stage/$name" || return 1
-    if ! cmp -s -- "$file" "$directory/repository-stage/$name"; then changed_repository_files+=("$file"); changed=true; fi
+    if ! cmp -s -- "$file" "$directory/repository-stage/$name"; then changed_repository_files=("${changed_repository_files[@]}" "$file"); changed=true; fi
   done
   if [ "$count" -eq 0 ]; then echo 'dss:error: No repository files found. Restore the native CentOS repository definitions and signing keys first.' >&2; return 1; fi
   $changed || return 0
@@ -10627,11 +11461,11 @@ function manifest_output_review_record() {
   local type=$1 key value
   shift
   # Process IDs and counts are transient observations, not migration configuration.
-  case "$type:${2:-}" in security_indicator:*|collection_status:*|collection_scope:*|probe_status:*|website_probe:*|capacity:*|upgrade_directory:*|language_consumer:process_comm|warning:security_*) return 0;; esac
+  case "$type:${2:-}" in collector_launch:*|security_indicator:*|collection_status:*|collection_scope:*|probe_status:*|website_probe:*|capacity:*|upgrade_directory:*|language_consumer:process_comm|warning:security_*) return 0;; esac
   printf '%s' "$type"
   while [ "$#" -ge 2 ]; do
     key=$1; value=$2; shift 2
-    case "$key" in generated_utc|version_file_modified|date_basis|dns|dns_addresses|dns_reason|daemon_process_count|query_status) continue;; esac
+    case "$key" in pid|parent_pid|generated_utc|version_file_modified|date_basis|dns|dns_addresses|dns_reason|daemon_process_count|query_status) continue;; esac
     printf '\t%s=' "$key"
     manifest_json_string "$value"
   done
@@ -10648,7 +11482,7 @@ function manifest_emit() {
       # Only reviewed general facts pass through; new fields default to redacted.
       # website:name=shop.example.invalid -> [redacted]; website:port=443 -> 443.
       case "$record_type:$key" in
-        system:package_backend|listener:service|listener:port|listener:application|listener:binding|listener:reachability|\
+        system:package_backend|ssh_host_key:status|ssh_host_key:key_type|listener:service|listener:port|listener:application|listener:binding|listener:reachability|\
         service:name|service:package|service:version|service:running|service:enabled|service:status_source|service:enabled_source|\
         package:name|package:version|package:architecture|package:package_backend|\
         runtime:kind|runtime:version|runtime:package|runtime:package_version|runtime:version_source|runtime:conditional|\
@@ -10669,7 +11503,7 @@ function manifest_emit() {
         migration_mount:filesystem|migration_mount:mounted|hosting_panel:name|hosting_panel:version|\
         panel_remnant:name|panel_remnant:installed|panel_remnant:running|panel_remnant:reason|\
         security_indicator:indicator|security_indicator:process_count|security_indicator:location|security_indicator:evidence|\
-        security_indicator:assessment|security_indicator:reason|security_indicator:line|\
+        security_indicator:assessment|security_indicator:reason|security_indicator:line|security_indicator:collector_process_count|security_indicator:collector_correlation|\
         warning:area|warning:reason|warning:unverified_paths|\
         probe_status:probe|probe_status:result|probe_status:command_status|probe_status:coverage|\
         collection_status:core_collectors_failed|collection_status:warning_count|collection_status:completeness) :;;
@@ -10678,7 +11512,7 @@ function manifest_emit() {
           case "$value" in unknown|php-fpm|php_disabled|apache-mod-php|fastcgi_handler_version_unknown|php_handler_version_unknown|static_files|cgi|scgi|reverse_proxy) :;; *) value='[redacted]';; esac;;
         *) case "$value" in ''|unknown) :;; *) value='[redacted]';; esac;;
       esac
-      public_record+=("$key" "$value")
+      public_record=("${public_record[@]}" "$key" "$value")
     done
     set -- "${public_record[@]}"
   fi
@@ -10771,6 +11605,7 @@ function manifest_listeners() {
       nginx*) application=nginx ;;
       caddy*) application=Caddy ;;
       lighttpd*) application=lighttpd ;;
+      proxysql*) application=ProxySQL ;;
     esac
     case "$port" in
       25|465|587) protocol=smtp ;;
@@ -10829,8 +11664,10 @@ function manifest_process_names() {
   local snapshot names reason
   manifest_processes_available=false
   manifest_processes=
-  if snapshot=$(LC_ALL=C manifest_run_bounded 5 ps -eo pid=,comm= 2>/dev/null); then
-    # ps -eo pid=,comm=: " 553 lighttpd" -> lighttpd; "PID COMMAND"
+  if snapshot=$(LC_ALL=C manifest_run_bounded 5 ps -eo pid= -o comm= 2>/dev/null); then
+    # Legacy procps can silently drop comma-separated output columns. Separate -o
+    # fields retain the PID/name contract without relaxing malformed-output checks.
+    # ps -eo pid= -o comm=: " 553 lighttpd" -> lighttpd; "PID COMMAND"
     # or "lighttpd 553" -> invalid, even when ps exits zero. Names may contain spaces.
     if names=$(LC_ALL=C awk '
       NR > 20000 { bad=1; next }
@@ -10868,8 +11705,9 @@ function manifest_process_names() {
 # Explicit C whitespace and escaped regex slashes also work with pre-POSIX-class AWK.
 # Detection examples are invented. USER, HIDDEN, URL, ENCODED and TOKEN are placeholders.
 function manifest_process_indicators() {
-  local records snapshot indicator count pid ppid uid reason
-  # ps -eww -o pid=,ppid=,uid=,vsz=,args=, for example:
+  local records snapshot indicator count pid ppid uid reason collector_count
+  # Separate -o arguments avoid legacy procps silently returning PID-only output.
+  # ps -eww -o pid= -o ppid= -o uid= -o vsz= -o args=, for example:
   # 101 50 1001 9000 tee -a /etc/sudoers -> sudoers_write_command.
   # 102 50 1001 4000 [kworker/0:0] 47128 -> userspace_kernel_name, not a kernel thread.
   # Legacy ps can exit zero with ",ppid=,uid=,vsz=,args=" followed by
@@ -10877,12 +11715,25 @@ function manifest_process_indicators() {
   # Finish ps before starting the parser: otherwise ps can collect AWK's own
   # regex program, whose mining examples match the heuristic. Do not exclude
   # descendants or generic awk processes; their arguments remain evidence.
-  if ! snapshot=$(LC_ALL=C manifest_run_bounded 5 ps -eww -o pid=,ppid=,uid=,vsz=,args= 2>/dev/null); then
+  if ! snapshot=$(LC_ALL=C manifest_run_bounded 5 ps -eww -o pid= -o ppid= -o uid= -o vsz= -o args= 2>/dev/null); then
     manifest_emit warning area security_processes reason 'Process snapshot failed or timed out; potential compromise indicators could not be evaluated.'
     manifest_collection_failed=true
     return
   fi
-  if ! records=$(set -o pipefail; LC_ALL=C awk '
+  if ! records=$(set -o pipefail; LC_ALL=C awk -v collector_pid="${manifest_collector_pid:-0}" -v collector_script="${manifest_collector_script:-}" '
+    # Matching descendants alone would hide unrelated temporary scripts. Require
+    # both exact launch ancestry and the same interpreter script path; emit the
+    # correlation as context while retaining every original indicator.
+    function correlated(pid, current, steps) {
+      if (!same_script[pid] || collector_pid == 0 || collector_script == "") return 0
+      current=pid
+      for (steps=0;steps<64;steps++) {
+        if (current==collector_pid) return 1
+        if (!(current in parent) || parent[current]==current) return 0
+        current=parent[current]
+      }
+      return 0
+    }
     function record(indicator, key) {
       key=indicator SUBSEP $2 SUBSEP $3
       if (!(key in counts)) {
@@ -10890,11 +11741,12 @@ function manifest_process_indicators() {
         groups++; kinds[key]=indicator; pids[key]=$1; parents[key]=$2; uids[key]=$3
       }
       counts[key]++
+      member_pid[++members]=$1; member_group[members]=key
     }
     NR > 20000 { limited=1; next }
     $1 !~ /^[0-9]+$/ || $1+0 == 0 || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || NF < 5 { bad=1; next }
     {
-      valid++
+      valid++; parent[$1]=$2
       args=$0; sub(/^[ \t\r\013\014]*[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+[0-9]+[ \t\r\013\014]+/, "", args)
       # printf RULE >> /etc/sudoers or tee -a /etc/sudoers -> sudoers_write_command.
       # cat /etc/sudoers > /tmp/example.txt -> no write indicator.
@@ -10927,13 +11779,15 @@ function manifest_process_indicators() {
           i++
         }
         if ($i == "--") i++
+        if ($i == collector_script && collector_script != "") same_script[$1]=1
         if ($i ~ /^\/(tmp|var\/tmp|dev\/shm)\//) record("temporary_script")
       }
     }
     END {
+      for (member=1;member<=members;member++) if (correlated(member_pid[member])) context[member_group[member]]++
       for (key in counts) {
         if (kinds[key] == "panel_worker_concentration" && counts[key] < 20) continue
-        printf "%s\t%d\t%s\t%s\t%s\n", kinds[key], counts[key], pids[key], parents[key], uids[key]
+        printf "%s\t%d\t%s\t%s\t%s\t%d\n", kinds[key], counts[key], pids[key], parents[key], uids[key], context[key]
       }
       if (limited) print "limit"
       if (bad || !valid) print "parse_failed"
@@ -10943,7 +11797,7 @@ function manifest_process_indicators() {
     manifest_collection_failed=true
     return
   fi
-  while IFS=$'\t' read -r indicator count pid ppid uid; do
+  while IFS=$'\t' read -r indicator count pid ppid uid collector_count; do
     case "$indicator" in
       '') continue;;
       limit) manifest_emit warning area security_processes reason 'Only the first 20000 processes and 200 indicator/parent/UID groups were examined; coverage is incomplete.'; continue;;
@@ -10957,7 +11811,7 @@ function manifest_process_indicators() {
       temporary_executable|temporary_script) reason='Executable or interpreter script starts from a temporary directory; legitimate installers can also do this.';;
       *) continue;;
     esac
-    manifest_emit security_indicator indicator "$indicator" process_count "$count" sample_pid "$pid" parent_pid "$ppid" uid "$uid" assessment requires_review reason "$reason"
+    manifest_emit security_indicator indicator "$indicator" process_count "$count" sample_pid "$pid" parent_pid "$ppid" uid "$uid" collector_process_count "${collector_count:-0}" collector_correlation exact_script_and_launch_ancestry assessment requires_review reason "$reason"
   done <<< "$records"
 }
 
@@ -11517,7 +12371,7 @@ function manifest_language_consumers() {
 # Fixed tool paths and allocated directory sizes support upgrade preparation.
 # Never run application commands, read directory contents or return du diagnostics.
 function manifest_upgrade_assets() {
-  local tool path directory records status size extra count=0
+  local tool path directory records status size extra operand count=0
   for tool in wp php mysql mysqld mysqldump rsync tar gzip systemd-run screen tmux; do
     path=$(type -P "$tool" 2>/dev/null)
     if [ -n "$path" ]; then
@@ -11539,7 +12393,18 @@ function manifest_upgrade_assets() {
       manifest_emit upgrade_directory path "$directory" status absent
       continue
     fi
-    records=$(LC_ALL=C manifest_run_bounded 10 du -skxH -- "$manifest_root$directory" 2>/dev/null)
+    # Old coreutils interprets -H as decimal human units, not operand symlinks.
+    # Resolve only the selected operand; du -skx keeps nested symlinks untraversed.
+    operand=$(readlink -f -- "$manifest_root$directory" 2>/dev/null) || operand=
+    if [ -n "$manifest_root" ]; then
+      case "$operand" in "$manifest_root"/*) :;; *) operand=;; esac
+    fi
+    if [ -z "$operand" ]; then
+      manifest_emit upgrade_directory path "$directory" status unresolved
+      manifest_emit warning probe upgrade_assets reason directory_operand_unresolved path "$directory"
+      continue
+    fi
+    records=$(LC_ALL=C manifest_run_bounded 10 du -skx -- "$operand" 2>/dev/null)
     status=$?
     if [ "$status" -ne 0 ]; then
       case "$status" in 124|142) status=timeout;; *) status=query_failed;; esac
@@ -11547,8 +12412,7 @@ function manifest_upgrade_assets() {
       manifest_emit warning probe upgrade_assets reason directory_size_failed path "$directory"
       continue
     fi
-    # -H follows only a directory symlink supplied as the operand; -x stays on its filesystem.
-    # du -skxH: 12345<TAB>/var/www -> allocated_kib=12345. Paths/diagnostics are discarded.
+    # du -skx: 12345<TAB>/var/www -> allocated_kib=12345. Paths/diagnostics are discarded.
     # Reject multiple records and nonnumeric sizes; never emit arbitrary command output.
     size=$(printf '%s\n' "$records" | awk 'NR == 1 && $1 ~ /^[0-9]+$/ { value=$1 } END { if (NR == 1 && value != "") print value }')
     if [ -n "$size" ]; then
@@ -11646,12 +12510,13 @@ function manifest_packages() {
     package=${package%%:*}
     case "$package" in
       libapache2-mod-php*|php|php-*|php[0-9]*|rh-php[0-9]*-php*)
-        manifest_php_packages+=("$package"); manifest_php_versions+=("$version")
+        manifest_php_packages=("${manifest_php_packages[@]}" "$package"); manifest_php_versions=("${manifest_php_versions[@]}" "$version")
         manifest_emit package name "$package" version "$version" architecture "${architecture:-unknown}" package_backend "$manifest_package_backend";;
     esac
     name=''
     case "$package" in
       apache2|apache2-bin|apache2.2-common) name=apache2;; httpd) name=httpd;; nginx|nginx-core|nginx-full|nginx-light|nginx-extras) name=nginx;;
+      proxysql|proxysql2|proxysql3) name=proxysql;;
       caddy|lighttpd|postfix|redis|redis-server|fail2ban) name=$package;; exim4*daemon*|exim4) name=exim4;; exim) name=exim;;
       sendmail|sendmail-bin) name=sendmail;; dovecot|dovecot-core|dovecot-common|dovecot-imapd|dovecot-pop3d) name=dovecot;; courier*) name=courier;; mailman*) name=mailman;;
       mysql-server|mysql-server-[0-9]*) name=mysql;; mariadb-server|mariadb-server-[0-9]*|MariaDB-server) name=mariadb;; postgresql-server) name=postgresql;; postgresql[0-9][0-9]-server)
@@ -11714,8 +12579,8 @@ function manifest_config_files() {
   esac
   # Conventional generated configuration paths; parse as text, without invoking panel tools.
   case "$kind" in
-    apache|apache-modules) files+=("$manifest_root"/etc/apache2/conf/httpd.conf "$manifest_root"/usr/local/apache/conf/httpd.conf "$manifest_root"/var/www/vhosts/system/*/conf/httpd.conf "$manifest_root"/usr/local/directadmin/data/users/*/httpd.conf);;
-    nginx) files+=("$manifest_root"/var/www/vhosts/system/*/conf/nginx.conf "$manifest_root"/usr/local/directadmin/data/users/*/nginx.conf);;
+    apache|apache-modules) files=("${files[@]}" "$manifest_root"/etc/apache2/conf/httpd.conf "$manifest_root"/usr/local/apache/conf/httpd.conf "$manifest_root"/var/www/vhosts/system/*/conf/httpd.conf "$manifest_root"/usr/local/directadmin/data/users/*/httpd.conf);;
+    nginx) files=("${files[@]}" "$manifest_root"/var/www/vhosts/system/*/conf/nginx.conf "$manifest_root"/usr/local/directadmin/data/users/*/nginx.conf);;
   esac
   for file in "${files[@]}"; do
     if [ ! -f "$file" ] || [ ! -r "$file" ]; then continue; fi
@@ -12184,10 +13049,10 @@ function manifest_fpm_pools() {
       END { output() }' <<< "$metadata") || { manifest_collection_failed=true; continue; }
     while IFS=$'\t' read -r pool socket user group chroot; do
       [ -n "$pool" ] || continue
-      manifest_fpm_sockets+=("$socket")
-      manifest_fpm_users+=("$user")
-      manifest_fpm_versions+=("$version")
-      manifest_fpm_packages+=("$package")
+      manifest_fpm_sockets=("${manifest_fpm_sockets[@]}" "$socket")
+      manifest_fpm_users=("${manifest_fpm_users[@]}" "$user")
+      manifest_fpm_versions=("${manifest_fpm_versions[@]}" "$version")
+      manifest_fpm_packages=("${manifest_fpm_packages[@]}" "$package")
       manifest_emit runtime kind php-fpm pool "$pool" listen "$socket" user "$user" version "$version" package "$package" package_version "$package_version" version_source "$source" group "$group" chroot "$chroot" config "${file#"$manifest_root"}"
     done <<< "$records"
   done <<< "$files"
@@ -12198,6 +13063,7 @@ function manifest_dns() {
   local domain="$1" address addresses='' match=false result reason i
   manifest_dns_addresses=unknown
   manifest_dns_result=unknown
+  if "${manifest_probe_queue_exceeded:-false}"; then manifest_dns_reason=priority_queue_limit; return; fi
   if ! $manifest_dns_enabled; then manifest_dns_reason=disabled; return; fi
   # example.invalid passes syntax checking; *.example.invalid and ${DOMAIN} remain unresolved names.
   if [[ ! "$domain" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[.][A-Za-z0-9-]+$ ]]; then
@@ -12218,6 +13084,9 @@ function manifest_dns() {
   if ! command -v timeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; then
     manifest_dns_reason=timeout_facility_unavailable; return
   fi
+  # Replaying saved site metadata must never issue requests after alias ordering
+  # is complete. Missing clients and ordinary domain-limit states remain distinct.
+  if "${manifest_probe_cache_only:-false}"; then manifest_dns_reason=priority_queue_limit; return; fi
   if command -v getent >/dev/null 2>&1 && addresses=$(manifest_run_bounded 2 getent ahosts "$domain" 2>/dev/null); then
     # 192.0.2.1 STREAM example.invalid plus a DGRAM row for the same address -> one 192.0.2.1.
     addresses=$(printf '%s\n' "$addresses" | awk '!seen[$1]++ { if (value != "") value=value ","; value=value $1 } END { print value }')
@@ -12269,8 +13138,8 @@ function manifest_dns() {
         esac;;
     esac
   fi
-  manifest_dns_names+=("$domain"); manifest_dns_values+=("$addresses")
-  manifest_dns_results+=("$result"); manifest_dns_reasons+=("$reason")
+  manifest_dns_names=("${manifest_dns_names[@]}" "$domain"); manifest_dns_values=("${manifest_dns_values[@]}" "$addresses")
+  manifest_dns_results=("${manifest_dns_results[@]}" "$result"); manifest_dns_reasons=("${manifest_dns_reasons[@]}" "$reason")
   manifest_dns_addresses="$addresses"; manifest_dns_result="$result"; manifest_dns_reason="$reason"
 }
 
@@ -12308,14 +13177,36 @@ function manifest_application() {
     file="$manifest_root$document_root/includes/constants.php"; application=phpBB; language=PHP
     # define("PHPBB_VERSION", "3.3.12"); -> version=3.3.12.
     version=$(awk '/define[ \t]*\([ \t]*[\047\042]PHPBB_VERSION[\047\042]/ { line=$0; sub(/^.*PHPBB_VERSION[\047\042][ \t]*,[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
+  elif [ -f "$manifest_root$document_root/includes/Defines.php" ] && grep -q 'MW_VERSION' <<< "$(manifest_read_metadata "$manifest_root$document_root/includes/Defines.php")"; then
+    file="$manifest_root$document_root/includes/Defines.php"; application=MediaWiki; language=PHP
+    # Modern MediaWiki moved the version out of DefaultSettings.php.
+    # define( 'MW_VERSION', '1.39.11' ); -> version=1.39.11; expressions stay unknown.
+    version=$(awk '/^[ \t]*define[ \t]*\([ \t]*[\047\042]MW_VERSION[\047\042][ \t]*,[ \t]*[\047\042]/ {
+      line=$0; sub(/^.*MW_VERSION[\047\042][ \t]*,[ \t]*[\047\042]/,"",line)
+      if (line !~ /^[^\047\042]*[\047\042][ \t]*\)[ \t]*;/) { print "unknown"; exit }
+      sub(/[\047\042].*$/,"",line); print line; exit
+    }' <<< "$(manifest_read_metadata "$file")")
+  elif [ -f "$manifest_root$document_root/includes/version_vbulletin.php" ]; then
+    file="$manifest_root$document_root/includes/version_vbulletin.php"; application=vBulletin; language=PHP
+    # Read only the named version marker, never forum config or application code.
+    # define('FILE_VERSION_VBULLETIN', '4.2.5'); -> 4.2.5; expressions stay unknown.
+    version=$(awk '/^[ \t]*define[ \t]*\([ \t]*[\047\042]FILE_VERSION_VBULLETIN[\047\042][ \t]*,[ \t]*[\047\042]/ {
+      line=$0; sub(/^.*FILE_VERSION_VBULLETIN[\047\042][ \t]*,[ \t]*[\047\042]/,"",line)
+      if (line !~ /^[^\047\042]*[\047\042][ \t]*\)[ \t]*;/) { print "unknown"; exit }
+      sub(/[\047\042].*$/,"",line); print line; exit
+    }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/includes/DefaultSettings.php" ] && grep -q "\\\$wgVersion" <<< "$(manifest_read_metadata "$manifest_root$document_root/includes/DefaultSettings.php")"; then
     file="$manifest_root$document_root/includes/DefaultSettings.php"; application=MediaWiki; language=PHP
     # $wgVersion = "1.41.0"; -> version=1.41.0.
     version=$(awk '/^[ \t]*\$wgVersion[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
   elif [ -f "$manifest_root$document_root/version.php" ] && [ -f "$manifest_root$document_root/lib/moodlelib.php" ]; then
     file="$manifest_root$document_root/version.php"; application=Moodle; language=PHP
-    # $release = "4.3.3"; -> version=4.3.3; a Build: suffix becomes unknown because the whitelist rejects colons.
+    # Moodle version.php: $release = "4.5.4+ (Build: 20250314)"; -> 4.5.4+.
+    # The former broad whitelist rejected the colon and lost a valid release.
+    # Remove only that exact eight-digit suffix; unrelated metadata stays unknown.
     version=$(awk '/^[ \t]*\$release[ \t]*=/ { line=$0; sub(/^[^=]*=[ \t]*[\047\042]/,"",line); sub(/[\047\042].*$/,"",line); print line; exit }' <<< "$(manifest_read_metadata "$file")")
+    local moodle_build_pattern=' [(]Build: [0-9]{8}[)]$'
+    if [[ "$version" =~ $moodle_build_pattern ]]; then version=${version% (Build: *)}; fi
   elif [ -f "$manifest_root$document_root/artisan" ]; then application=Laravel; language=PHP
   elif [ -f "$manifest_root$document_root/config.ru" ] || [ -f "$manifest_root$document_root/Gemfile" ]; then language=Ruby
   elif [ -f "$manifest_root$document_root/package.json" ]; then language=JavaScript
@@ -12325,6 +13216,10 @@ function manifest_application() {
   elif [ -f "$manifest_root$document_root/index.cgi" ]; then
     # First line #!/usr/bin/perl -> language=Perl; #!/usr/bin/python3 -> language=Python.
     language=$(awk 'NR == 1 { if ($0 ~ /^#!.*perl/) print "Perl"; else if ($0 ~ /^#!.*python/) print "Python"; else print "unknown"; exit }' <<< "$(manifest_read_metadata "$manifest_root$document_root/index.cgi")")
+  fi
+  if [ "$application" = vBulletin ]; then
+    local vbulletin_version_pattern='^[0-9]+([.][0-9]+){1,3}( Patch Level [0-9]+)?$'
+    [[ "$version" =~ $vbulletin_version_pattern ]] || version=unknown
   fi
   # A version is metadata, never an arbitrary expression or configuration value.
   # 6.5.3 and 6.5.3 (stable) pass; VERSION_CONSTANT and 6.5.3;extra become unknown.
@@ -12379,10 +13274,12 @@ function manifest_http() {
   case "|$manifest_http_seen|" in *"|$key|"*) return 0;; esac
   manifest_http_seen="$manifest_http_seen|$key"
   url="$key/"
-  if "${manifest_unprivileged:-false}"; then reason=skipped_unprivileged
+  if "${manifest_probe_queue_exceeded:-false}"; then reason=priority_queue_limit
+  elif "${manifest_unprivileged:-false}"; then reason=skipped_unprivileged
   elif ! "${manifest_http_enabled:-true}"; then reason=disabled
   elif ! command -v curl >/dev/null 2>&1; then reason=curl_unavailable
   elif [ "${manifest_http_count:-0}" -ge 40 ] || [ $((SECONDS - (${manifest_http_started:-$SECONDS}))) -ge 45 ]; then reason=probe_limit
+  elif "${manifest_probe_cache_only:-false}"; then reason=priority_queue_limit
   else
     manifest_http_count=$(( ${manifest_http_count:-0} + 1 ))
     # curl write-out: 301|192.0.2.10|0 -> status=301, remote_ip=192.0.2.10, tls_verify_result=0.
@@ -12406,6 +13303,125 @@ function manifest_http() {
   manifest_emit website_probe name "$name" protocol "$scheme" port "$port" url "$url" method HEAD http_status "$code" remote_ip "$address" tls_verify_result "$verify" curl_status "$status" reason "$reason"
 }
 
+# Configuration authority examples: example.invalid:8443 -> https,example.invalid,8443;
+# https://example.invalid overrides an inherited unknown scheme; *.example.invalid
+# stays unsupported. Values are parsed as data and never resolved by this helper.
+function manifest_website_probe_authority() {
+  local authority=$1 scheme=$2 port=$3
+  local authority_pattern='^([^:]+|\[[^]]+\]):([0-9]+)$'
+  local host_pattern='^([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])$'
+  case "$authority" in https://*) scheme=https; authority=${authority#https://};; http://*) scheme=http; authority=${authority#http://};; esac
+  if [[ "$authority" =~ $authority_pattern ]]; then
+    port=${BASH_REMATCH[2]}; authority=${BASH_REMATCH[1]}
+  elif [[ "$authority" == *:* ]] && [[ "$authority" != \[*\] ]]; then authority="[$authority]"; fi
+  [[ "$authority" =~ $host_pattern ]] && [ "$authority" != unknown ] || return 1
+  case "$scheme" in http|https|unknown) :;; *) return 1;; esac
+  if [ "$port" != unknown ]; then
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$((10#$port))" -ge 1 ] && [ "$((10#$port))" -le 65535 ] || return 1
+    port=$((10#$port))
+  fi
+  manifest_probe_name=$authority; manifest_probe_scheme=$scheme; manifest_probe_port=$port
+  return 0
+}
+
+# All protocols keep the existing fixed request budget. A separate HTTPS listener
+# on 8443 is distinct from 443; an unresolved protocol tries both on its own port.
+function manifest_website_probe_network() {
+  local name=$1 scheme=$2 port=$3
+  manifest_dns "$name"
+  case "$scheme:$port" in
+    http:80|https:443|*:unknown) manifest_http "$name" http 80; manifest_http "$name" https 443;;
+    unknown:*) manifest_http "$name" http "$port"; manifest_http "$name" https "$port";;
+    *) manifest_http "$name" "$scheme" "$port";;
+  esac
+}
+
+# Generated www/webmail/admin names on early sites previously exhausted DNS20 and
+# HTTP40 before a later streaming proxy was seen. Select one authority for each
+# actual mapping/listener group first, then spend only the remaining budget on
+# aliases. Website/application metadata is retained independently of this order.
+function manifest_website_queue_finish() {
+  local offset index group group_index priority_rank found rank label name names server root proxy runtime config scope port scheme key
+  local manifest_probe_name manifest_probe_scheme manifest_probe_port
+  local aliases=0 overflow=false network_started saved_web_started=${manifest_web_started:-$SECONDS}
+  local -a group_keys=() group_names=() group_schemes=() group_ports=() group_ranks=() alias_names=()
+  # A queue entry is twelve original manifest_website arguments, not executable
+  # shell text: apache | example.invalid,www.example.invalid | 443 | true | ...
+  # names are normalized individually so one alias's explicit port cannot leak
+  # into a later alias that inherits the configured listener.
+  for ((offset=0;offset<${#manifest_website_queue[@]};offset+=12)); do
+    server=${manifest_website_queue[offset]}; names=${manifest_website_queue[offset+1]}
+    root=${manifest_website_queue[offset+4]}; runtime=${manifest_website_queue[offset+6]}
+    config=${manifest_website_queue[offset+7]}; proxy=${manifest_website_queue[offset+9]}; scope=${manifest_website_queue[offset+10]}
+    alias_names=(); IFS=', ' read -r -a alias_names <<< "$names"
+    for name in "${alias_names[@]}"; do
+      port=${manifest_website_queue[offset+2]}
+      case "${manifest_website_queue[offset+3]}" in true) scheme=https;; false) scheme=http;; *) scheme=unknown;; esac
+      manifest_website_probe_authority "$name" "$scheme" "$port" || continue
+      name=$manifest_probe_name; scheme=$manifest_probe_scheme; port=$manifest_probe_port
+      # Length-prefixed fields avoid delimiter collisions in literal paths.
+      # Each configured invocation remains a separate vhost mapping, even when
+      # roots coincide. Its aliases share one representative per actual listener;
+      # authority caches deduplicate repeated routes without merging metadata.
+      key="$offset:$server:${#root}:$root:${#proxy}:$proxy:${#runtime}:$runtime:$scheme:$port"
+      if [ "$root:$proxy" = unknown:unknown ]; then key="$key:${#config}:$config:${#scope}:$scope:${#names}:$names"; fi
+      found=-1
+      for ((index=0;index<${#group_keys[@]};index++)); do
+        if [ "${group_keys[index]}" = "$key" ]; then found=$index; break; fi
+      done
+      # Hostname case does not change generated-prefix meaning. Fold only the
+      # rank key: WWW.Example.invalid -> www; keep the configured authority intact.
+      label=${name%%.*}; label=$(printf '%s' "$label" | LC_ALL=C tr 'A-Z' 'a-z'); rank=0
+      case "$label" in www|www[0-9]|webmail|admin|cpanel|whm|autoconfig|autodiscover|mail|ftp) rank=1;; esac
+      if [ "$found" -lt 0 ]; then
+        if [ "${#group_keys[@]}" -ge 2048 ]; then overflow=true; continue; fi
+        group_keys=("${group_keys[@]}" "$key"); group_names=("${group_names[@]}" "$name")
+        group_schemes=("${group_schemes[@]}" "$scheme"); group_ports=("${group_ports[@]}" "$port"); group_ranks=("${group_ranks[@]}" "$rank")
+      elif [ "$rank" -lt "${group_ranks[found]}" ]; then
+        group_names[found]=$name; group_schemes[found]=$scheme; group_ports[found]=$port; group_ranks[found]=$rank
+      fi
+    done
+  done
+  network_started=$SECONDS
+  manifest_http_started=$SECONDS
+  # Generated-only admin/webmail mappings can also precede later main vhosts.
+  # A representative-first pass alone still exhausted the budget on those maps;
+  # finish non-generated representatives before generated-only representatives.
+  for priority_rank in 0 1; do
+    for ((group_index=0;group_index<${#group_keys[@]};group_index++)); do
+      [ "${group_ranks[group_index]}" -eq "$priority_rank" ] || continue
+      manifest_website_probe_network "${group_names[group_index]}" "${group_schemes[group_index]}" "${group_ports[group_index]}"
+    done
+  done
+  for ((offset=0;offset<${#manifest_website_queue[@]};offset+=12)); do
+    names=${manifest_website_queue[offset+1]}
+    alias_names=(); IFS=', ' read -r -a alias_names <<< "$names"
+    for name in "${alias_names[@]}"; do
+      aliases=$((aliases+1))
+      if [ "$aliases" -gt 4096 ]; then overflow=true; break 2; fi
+      port=${manifest_website_queue[offset+2]}
+      case "${manifest_website_queue[offset+3]}" in true) scheme=https;; false) scheme=http;; *) scheme=unknown;; esac
+      manifest_website_probe_authority "$name" "$scheme" "$port" || continue
+      manifest_website_probe_network "$manifest_probe_name" "$manifest_probe_scheme" "$manifest_probe_port"
+    done
+  done
+  # Freeze the independent file-metadata budget across all DNS/HTTP waiting.
+  # HTTP alone already adjusts it for inline callers; replace that accumulated
+  # offset here so this deferred phase counts each elapsed second only once.
+  manifest_web_started=$((saved_web_started+SECONDS-network_started))
+  manifest_website_queue_active=false
+  local manifest_probe_cache_only=true
+  for ((offset=0;offset<${#manifest_website_queue[@]};offset+=12)); do
+    manifest_website "${manifest_website_queue[offset]}" "${manifest_website_queue[offset+1]}" "${manifest_website_queue[offset+2]}" "${manifest_website_queue[offset+3]}" \
+      "${manifest_website_queue[offset+4]}" "${manifest_website_queue[offset+5]}" "${manifest_website_queue[offset+6]}" "${manifest_website_queue[offset+7]}" \
+      "${manifest_website_queue[offset+8]}" "${manifest_website_queue[offset+9]}" "${manifest_website_queue[offset+10]}" "${manifest_website_queue[offset+11]}"
+  done
+  if $overflow; then
+    manifest_emit warning area website_probes reason 'Probe-priority queue coverage is bounded to 2048 mapping groups and 4096 configured names; omitted probes remain unknown.'
+  fi
+  return 0
+}
+
 # Infer the website runtime from its handler, FPM pool or Apache module.
 # The shell default php binary can serve a different purpose or version. Configured URLs still need application checks.
 function manifest_website() {
@@ -12415,6 +13431,31 @@ function manifest_website() {
   local certificate_file=${9:-unknown} certificate_file_present=unknown proxy=${10:-unknown} document_root_exists=unknown
   local configuration_scope=${11:-unknown} execution=${12:-unknown}
   local url_host_pattern='^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f:.]+\])$'
+  local configured_port=$port configured_scheme field queue_safe=true
+  local -a configured_names=()
+  if "${manifest_website_queue_active:-false}"; then
+    # Save bounded argument arrays, never a shell command. All applications and
+    # security metadata are sampled now, before any deferred network wait.
+    for field in "$server" "$port" "$tls" "$document_root" "$user" "$runtime" "$config" "$certificate_file" "$proxy" "$configuration_scope" "$execution"; do
+      [ "${#field}" -le 4096 ] || queue_safe=false
+      case "$field" in *$'\t'*|*$'\r'*|*$'\n'*) queue_safe=false;; esac
+    done
+    case "$names" in *$'\t'*|*$'\r'*|*$'\n'*) queue_safe=false;; esac
+    if $queue_safe && [ "${#names}" -le 8192 ] && [ "${#manifest_website_queue[@]}" -lt 6144 ]; then
+      manifest_website_queue=("${manifest_website_queue[@]}" "$server" "$names" "$port" "$tls" "$document_root" "$user" "$runtime" "$config" "$certificate_file" "$proxy" "$configuration_scope" "$execution")
+      case "|$manifest_seen_roots|" in *"|$document_root|"*) :;; *)
+        manifest_seen_roots="$manifest_seen_roots|$document_root"
+        manifest_application "$document_root" configured_document_root configured_document_root "$execution"
+        manifest_web_indicators "$document_root";;
+      esac
+      return 0
+    fi
+    # Retain all remaining website metadata if the bounded queue is full. These
+    # records are explicitly unknown, and their skipped probes cannot poison the
+    # saved seen-set for earlier queued authorities.
+    local manifest_probe_queue_exceeded=true manifest_http_seen=${manifest_http_seen:-}
+    manifest_emit warning area website_probes reason 'Probe-priority queue holds at most 512 site mappings with bounded fields; this mapping retains metadata with unknown network coverage.'
+  fi
   case "$document_root" in
     *'$'*|*'%'*|*'{'*|*'}'*) :;;
     /*) document_root_exists=false; [ ! -d "$manifest_root$document_root" ] || document_root_exists=true;;
@@ -12456,17 +13497,24 @@ function manifest_website() {
       runtime_source=enabled_module_inferred_for_php_site
     fi
   fi
-  [ "$tls" != true ] || scheme=https
+  # Unknown TLS previously caused HTTP-on-443 failures to masquerade as a broken
+  # website. Keep the URL unknown and probe both protocols at the actual port.
+  case "$tls" in true) scheme=https;; false) scheme=http;; *) scheme=unknown;; esac
+  configured_scheme=$scheme
   # Configs use comma-separated names internally; whitespace and controls are removed by the parsers.
   # example.invalid:8443 -> name=example.invalid, port=8443; [2001:db8::1]:443 keeps the brackets.
-  for name in ${names//,/ }; do
+  # read -a splits only literal configured separators; unlike an unquoted for
+  # expansion it cannot turn *.example.invalid into a local filename and probe it.
+  IFS=', ' read -r -a configured_names <<< "$names"
+  for name in "${configured_names[@]}"; do
+    port=$configured_port; scheme=$configured_scheme
     case "$name" in https://*) scheme=https; name=${name#https://} ;; http://*) scheme=http; name=${name#http://} ;; esac
     if [[ "$name" =~ $name_port_pattern ]]; then
       port=${BASH_REMATCH[2]}; name=${BASH_REMATCH[1]}
     elif [[ "$name" == *:* ]] && [[ "$name" != \[*\] ]]; then name="[$name]"; fi
     url="$scheme://$name"
     case "$scheme:$port" in http:80|https:443|*:unknown) ;; *) url="$url:$port" ;; esac
-    case "$name" in unknown|_) url=unknown;; esac
+    case "$name:$scheme" in unknown:*|_:*|*:unknown) url=unknown;; esac
     if $primary; then
       if [[ "$name" =~ $url_host_pattern ]]; then primary_url=$url; fi
       primary=false
@@ -12475,6 +13523,7 @@ function manifest_website() {
     manifest_emit website server "$server" name "$name" port "$port" tls "$tls" url "$url" primary_url "$primary_url" certificate_file "$certificate_file" certificate_file_present "$certificate_file_present" document_root "$document_root" document_root_exists "$document_root_exists" user "$user" runtime "$runtime" runtime_version "$runtime_version" runtime_version_source "$runtime_source" runtime_package "$runtime_package" config "$config" dns "$manifest_dns_result" dns_addresses "$manifest_dns_addresses" dns_reason "$manifest_dns_reason" proxy "$proxy" proxy_basis literal_config_authority_not_resolved configuration_scope "$configuration_scope" execution "$execution" activity unknown activity_basis configuration_not_live_requests
     case "$scheme:$port" in
       http:80|https:443|*:unknown) manifest_http "$name" http 80; manifest_http "$name" https 443;;
+      unknown:*) manifest_http "$name" http "$port"; manifest_http "$name" https "$port";;
       *) manifest_http "$name" "$scheme" "$port";;
     esac
   done
@@ -12487,7 +13536,7 @@ function manifest_website() {
 
 function manifest_websites() {
   local server file names port tls document_root user runtime certificate proxy default_user
-  local files records metadata
+  local files records metadata apache_defaults apache_name=unknown apache_root=unknown apache_tls=unknown apache_certificate=unknown apache_http_vhost=false apache_default_tls=false
   for server in apache nginx caddy; do
     default_user=unknown
     case "$server" in
@@ -12507,13 +13556,61 @@ function manifest_websites() {
         fi ;;
     esac
     files=$(manifest_config_files "$server") || { manifest_collection_failed=true; return; }
+    if [ "$server" = apache ]; then
+      # Main-server settings are inherited across files, not just within a vhost.
+      # Previously a global DocumentRoot was invisible, hiding whole applications.
+      # Apache lines: ServerName example.invalid / DocumentRoot /var/www/html
+      # and <VirtualHost *:443> without either -> inherit example.invalid,/var/www/html.
+      apache_defaults=$(set -o pipefail; while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        manifest_read_metadata "$file" || exit 1
+        printf '\n__DR_FILE_BOUNDARY__\n'
+      done <<< "$files" | awk '
+        BEGIN { name=root=tls=certificate="unknown"; in_vhost=0; http="false" }
+        $0 == "__DR_FILE_BOUNDARY__" { in_vhost=0; conditional=0; next }
+        /^[ \t]*#/ { next }
+        {
+          key=tolower($1)
+          if (key ~ /^<if(module|define|version)?$/) { conditional++; next }
+          if (key ~ /^<\/if(module|define|version)?>$/) { if(conditional>0) conditional--; next }
+          if (key=="<virtualhost") { in_vhost=1; if ($0 ~ /:80([ \t>]|$)/) http="true"; next }
+          if (key=="</virtualhost>") { in_vhost=0; next }
+          if (in_vhost) next
+          if (key=="servername" && $2 ~ /^[A-Za-z0-9][A-Za-z0-9.:-]*$/) name=$2
+          if (key=="documentroot" || key=="sslcertificatefile") {
+            value=$0; sub(/^[ \t]*[^ \t]+[ \t]+/,"",value); sub(/[ \t]+$/,"",value)
+            gsub(/^[\042\047]|[\042\047]$/,"",value)
+            if (value ~ /^\// && value !~ /[$%{}\t\r]/) {
+              if (key=="documentroot") root=value; else certificate=value
+            }
+          }
+          if (key=="sslengine") { if(conditional>0) tls="unknown"; else if (tolower($2)=="on") tls="true"; else if(tolower($2)=="off") tls="false" }
+        }
+        END { printf "%s\t%s\t%s\t%s\t%s\n",name,root,tls,certificate,http }
+      ') || { manifest_collection_failed=true; apache_defaults=; }
+      IFS=$'\t' read -r apache_name apache_root apache_tls apache_certificate apache_http_vhost <<< "$apache_defaults"
+      apache_name=${apache_name:-unknown}; apache_root=${apache_root:-unknown}; apache_tls=${apache_tls:-unknown}
+      apache_certificate=${apache_certificate:-unknown}; apache_http_vhost=${apache_http_vhost:-false}
+      if [ "$apache_http_vhost" = false ] && [ "$apache_root" != unknown ]; then
+        apache_default_tls=$apache_tls
+        [ "$apache_default_tls" != unknown ] || apache_default_tls=false
+        manifest_website apache "$apache_name" 80 "$apache_default_tls" "$apache_root" "$default_user" unknown global_apache_configuration unknown unknown inherited_main_server unknown
+        manifest_emit collection_scope probe applications subdirectories not_discovered reason top_level_markers_only
+      fi
+    fi
     while IFS= read -r file; do
       [ -n "$file" ] || continue
       metadata=$(manifest_read_metadata "$file") || { manifest_collection_failed=true; continue; }
-      records=$(awk -v server="$server" -v default_user="$default_user" '
-        function reset( i) { names="unknown"; port="unknown"; tls="unknown"; root="unknown"; user=default_user; runtime="unknown"; certificate="unknown"; proxy="unknown"; listeners=0; for (i in ports) delete ports[i]; for (i in secure) delete secure[i] }
+      records=$(awk -v server="$server" -v default_user="$default_user" -v apache_name="$apache_name" -v apache_root="$apache_root" -v apache_tls="$apache_tls" -v apache_certificate="$apache_certificate" '
+        function reset( i) { names="unknown"; port="unknown"; tls="unknown"; root="unknown"; user=default_user; runtime="unknown"; certificate="unknown"; proxy="unknown"; tls_ambiguous=0; listeners=0; for (i in ports) delete ports[i]; for (i in secure) delete secure[i] }
         function emit( i) {
           if (!active) return
+          if (server=="apache") {
+            if (names=="unknown") names=apache_name
+            if (root=="unknown") root=apache_root
+            if (tls=="unknown" && !tls_ambiguous) tls=apache_tls
+            if (certificate=="unknown") certificate=apache_certificate
+          }
           if (!listeners) print names "\t" port "\t" tls "\t" root "\t" user "\t" runtime "\t" certificate "\t" proxy
           else for (i=1; i<=listeners; i++) print names "\t" ports[i] "\t" secure[i] "\t" root "\t" user "\t" runtime "\t" certificate "\t" proxy
         }
@@ -12550,6 +13647,11 @@ function manifest_websites() {
             # <VirtualHost *:443>, ServerName example.invalid, DocumentRoot /var/www/html (separate lines)
             # -> names=example.invalid, port=443, root=/var/www/html; SSLEngine on sets tls=true.
             key=tolower($1)
+            # Conditional includes/modules are not evaluated by this text parser.
+            # <IfModule mod_ssl.c> SSLEngine on </IfModule> -> unknown TLS until
+            # live probes; unconditional SSLEngine off remains a definite false.
+            if (key ~ /^<if(module|define|version)?([ \t>]|$)/ || key ~ /^<if(module|define|version)?$/) { conditional_depth++; next }
+            if (key ~ /^<\/if(module|define|version)?>$/) { if(conditional_depth>0) conditional_depth--; next }
             if (key == "<virtualhost") { emit(); reset(); active=1; port=$2; gsub(/[>]/,"",port); sub(/^.*:/,"",port); next }
             if (key == "</virtualhost>") { emit(); active=0; next }
             if (!active) next
@@ -12563,7 +13665,11 @@ function manifest_websites() {
             if (key == "sslcertificatefile") record_certificate(certificate_path($0))
             if (key == "documentroot") { root=$0; sub(/^[ \t]*[^ \t]+[ \t]+/,"",root); gsub(/^[\042\047]|[\042\047][ \t]*$/,"",root) }
             if (key == "suexecusergroup" || key == "assignuserid") user=$2
-            if (key == "sslengine" && tolower($2) == "on") tls="true"
+            if (key == "sslengine") {
+              if (conditional_depth>0) { tls="unknown"; tls_ambiguous=1 }
+              else if (tolower($2)=="on") tls="true"
+              else if (tolower($2)=="off") tls="false"
+            }
             if ((key == "php_flag" || key == "php_admin_flag") && tolower($2) == "engine" && tolower($3) == "off") runtime="php_disabled"
             if (key == "sethandler" && tolower($2) ~ /^(none|default-handler)$/) runtime="php_disabled"
             if (key == "sethandler" || key == "proxypassmatch" || key == "fcgidwrapper") {
@@ -12697,12 +13803,13 @@ function manifest_lighttpd_handler() {
         else first=; fi
         # #!/usr/bin/env python3 -> interpreter=/usr/bin/env, language=Python;
         # #!/usr/bin/ruby -> interpreter=/usr/bin/ruby, language=Ruby. No script runs.
-        if [[ "$first" =~ ^\#![[:space:]]*(/[A-Za-z0-9_./+-]+) ]]; then
+        local shebang_pattern='^#![[:space:]]*(/[A-Za-z0-9_./+-]+)'
+        if [[ "$first" =~ $shebang_pattern ]]; then
           interpreter=${BASH_REMATCH[1]}
           case "$first" in '#!'*'/env python'*|'#!'*'/env -S python'*) language=Python;; '#!'*'/env ruby'*) language=Ruby;; '#!'*'/env perl'*) language=Perl;; esac
         fi
       fi
-      case "${interpreter##*/}" in php*|php-cgi) language=PHP;; python*) language=Python;; ruby*) language=Ruby;; perl*) language=Perl;; esac
+      case "${interpreter##*/}" in php*) language=PHP;; python*) language=Python;; ruby*) language=Ruby;; perl*) language=Perl;; esac
       # An env wrapper only identifies a language; its interpreter version stays unknown.
       actual=$(readlink -f -- "$manifest_root$interpreter" 2>/dev/null) || actual=
       if [ -n "$manifest_root" ]; then case "$actual" in "$manifest_root"/*) :;; *) actual=;; esac; fi
@@ -13180,8 +14287,142 @@ function manifest_migration() {
 }
 
 # FORMAT is text or json; ROOT is used only by isolated fixtures, never a chroot or executable source.
+# /proc/501/stat: 501 (java worker) S ... field22=123456 -> starttime=123456.
+# comm can contain spaces or parentheses; strip through its final closing ')',
+# then read the twentieth remaining field, without exposing other process data.
+function manifest_output_proc_starttime() {
+  local directory=$1 pid=${1##*/} metadata
+  metadata=$(manifest_read_metadata "$directory/stat") || return 1
+  printf '%s\n' "$metadata" | awk -v pid="$pid" '
+    NR==1 && $1==pid {
+      line=$0
+      if(line !~ /^[0-9]+ [(].*[)][ \t]+/) exit 1
+      sub(/^.*[)][ \t]+/,"",line); fields=split(line,value,/[ \t]+/)
+      if(fields<20 || value[20] !~ /^[0-9]+$/) exit 1
+      print value[20]; found=1
+    }
+    END { if(NR!=1 || !found) exit 1 }
+  '
+}
+
+# Custom JVM deployments can use a different JDK from the installed packages.
+# Inspect only Java PID metadata and named Catalina/JDK markers; never execute
+# java, source environment files or return arbitrary command arguments/resources.
+function manifest_tomcat() {
+  local directory pid status metadata executable java_home java_version base home argument version properties records host appbase library inode device deleted identity_before identity_after host_records library_records count=0 started=$SECONDS
+  [ -d "$manifest_root/proc" ] && [ ! -L "$manifest_root/proc" ] || return 0
+  for directory in "$manifest_root"/proc/[0-9]*; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] || continue
+    pid=${directory##*/}
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    count=$((count+1))
+    if [ "$count" -gt 20000 ] || [ $((SECONDS-started)) -ge 10 ]; then
+      manifest_emit warning area tomcat reason process_metadata_limit
+      break
+    fi
+    metadata=$(manifest_read_metadata "$directory/status") || continue
+    # /proc/501/status: Name:<TAB>java / Pid:<TAB>501 -> the selected Java PID.
+    # An expired/mismatched PID or a non-Java process does not authorize argv reads.
+    status=$(printf '%s\n' "$metadata" | awk -v pid="$pid" -F '\t' '
+      $1=="Name:" { name=$2 } $1=="Pid:" { found=$2 }
+      END { if(name=="java" && found==pid) print "java" }
+    ')
+    [ "$status" = java ] || continue
+    # A PID can exit or be reused while argv/maps are read. Buffer all selected
+    # facts until the kernel starttime still matches, so mixed processes cannot
+    # become a claimed running Tomcat/JDK association or enter a comparison file.
+    identity_before=$(manifest_output_proc_starttime "$directory") || {
+      manifest_emit warning area tomcat reason java_process_identity_unavailable
+      continue
+    }
+    executable=$(readlink -- "$directory/exe" 2>/dev/null) || executable=unknown
+    case "$executable" in /*/bin/java) java_home=${executable%/bin/java};; *) java_home=unknown;; esac
+    home=unknown; base=unknown
+    # Java cmdline is NUL-delimited: java<NUL>-Dcatalina.base=/srv/tomcat<NUL>
+    # -> catalina_base=/srv/tomcat; -Dpassword=SECRET and all other fields vanish.
+    while IFS= read -r -d '' argument; do
+      case "$argument" in
+        -Dcatalina.base=/*) base=${argument#*=};;
+        -Dcatalina.home=/*) home=${argument#*=};;
+      esac
+    done < <(head -c 1048576 -- "$directory/cmdline" 2>/dev/null)
+    case "$base:$home" in unknown:unknown) continue;; esac
+    case "$base" in *'$'*|*'%'*|*'{'*|*'}'*|*$'\t'*|*$'\n'*|*$'\r'*) base=unknown;; esac
+    case "$home" in *'$'*|*'%'*|*'{'*|*'}'*|*$'\t'*|*$'\n'*|*$'\r'*) home=unknown;; esac
+    [ "$base" != unknown ] || base=$home
+    [ "$home" != unknown ] || home=$base
+    java_version=unknown
+    if [ "$java_home" != unknown ]; then
+      # JDK release: JAVA_VERSION="27.0.1" -> 27.0.1; no other release field returns.
+      metadata=$(manifest_read_metadata "$manifest_root$java_home/release") || metadata=
+      java_version=$(printf '%s\n' "$metadata" | awk -F '"' '/^JAVA_VERSION="[0-9][A-Za-z0-9.+_-]*"$/ { print $2; exit }')
+      [ -n "$java_version" ] || java_version=unknown
+    fi
+    version=unknown; properties=
+    for library in "$manifest_root$home/lib/org/apache/catalina/util/ServerInfo.properties" "$manifest_root$home/server/lib/org/apache/catalina/util/ServerInfo.properties"; do
+      [ -f "$library" ] || continue
+      properties=$(manifest_read_metadata "$library") || properties=
+      break
+    done
+    if [ -z "$properties" ] && [ -f "$manifest_root$home/lib/catalina.jar" ] && command -v unzip >/dev/null 2>&1; then
+      properties=$(manifest_run_bounded 3 unzip -p "$manifest_root$home/lib/catalina.jar" org/apache/catalina/util/ServerInfo.properties 2>/dev/null | head -c 65536) || properties=
+    fi
+    # ServerInfo.properties: server.info=Apache Tomcat/9.0.114 -> 9.0.114.
+    version=$(printf '%s\n' "$properties" | awk -F '/' '/^server.info=Apache Tomcat\/[0-9][A-Za-z0-9.+_-]*$/ { print $2; exit }')
+    [ -n "$version" ] || version=unknown
+    metadata=$(manifest_read_metadata "$manifest_root$base/conf/server.xml") || metadata=
+    # server.xml: <Host name="example.invalid" appBase="apps"> -> name/appBase only.
+    # XML entities, variables, nested resources and credentials are not expanded.
+    records=$(printf '%s\n' "$metadata" | awk 'BEGIN { RS="<" }
+      /^Host[ \t\r\n]/ {
+        name=base="unknown"
+        if(match($0,/name[ \t\r\n]*=[ \t\r\n]*[\042\047][^\042\047]*[\042\047]/)) {
+          name=substr($0,RSTART,RLENGTH); sub(/^[^=]*=[ \t\r\n]*[\042\047]/,"",name); sub(/[\042\047]$/,"",name)
+        }
+        if(match($0,/appBase[ \t\r\n]*=[ \t\r\n]*[\042\047][^\042\047]*[\042\047]/)) {
+          base=substr($0,RSTART,RLENGTH); sub(/^[^=]*=[ \t\r\n]*[\042\047]/,"",base); sub(/[\042\047]$/,"",base)
+        }
+        if(name !~ /^[A-Za-z0-9][A-Za-z0-9.-]*$/ || length(name)>253) name="unknown"
+        if(base=="" || length(base)>4096 || base ~ /[$%{}&\t\r\n]/) base="unknown"
+        if(++hosts>128) next
+        printf "%s\t%s\n",name,base
+      }
+    ')
+    host_records=$records
+    # /proc/PID/maps: ... 08:01 123 /usr/lib/.../libssl.so.3 (deleted)
+    # -> library path + device/inode + replaced=yes; memory addresses/content vanish.
+    metadata=$(manifest_read_metadata "$directory/maps") || metadata=
+    records=$(printf '%s\n' "$metadata" | awk '
+      NF>=6 && $4 ~ /^[0-9a-fA-F]+:[0-9a-fA-F]+$/ && $5 ~ /^[0-9]+$/ {
+        path=$6; deleted=($7=="(deleted)" ? "yes" : "no")
+        if(path !~ /^\// || path !~ /\/(libjvm|libjava|libc|libssl|libcrypto|libapr)[-.][A-Za-z0-9._-]+$/) next
+        key=path SUBSEP $4 SUBSEP $5 SUBSEP deleted
+        if(!seen[key]++ && ++libraries<=128 && length(path)<=4096) printf "%s\t%s\t%s\t%s\n",path,$4,$5,deleted
+      }
+    ')
+    library_records=$records
+    identity_after=$(manifest_output_proc_starttime "$directory") || identity_after=
+    if [ "$identity_before" != "$identity_after" ]; then
+      manifest_emit warning area tomcat reason java_process_disappeared_or_reused
+      continue
+    fi
+    manifest_emit runtime kind Java version "$java_version" executable "$executable" java_home "$java_home" source live_process pid "$pid" package unknown
+    manifest_emit application application Tomcat version "$version" language Java language_version "$java_version" pid "$pid" catalina_home "$home" catalina_base "$base" activity running activity_basis verified_java_pid_and_catalina_arguments
+    while IFS=$'\t' read -r host appbase; do
+      [ -n "$host" ] || continue
+      case "$appbase" in unknown|/*) :;; *) appbase="$base/$appbase";; esac
+      manifest_emit java_application_root pid "$pid" name "$host" app_base "$appbase" activity unknown activity_basis configured_host_not_live_request
+    done <<< "$host_records"
+    while IFS=$'\t' read -r library device inode deleted; do
+      [ -n "$library" ] || continue
+      manifest_emit runtime_library pid "$pid" library "$library" device "$device" inode "$inode" replaced "$deleted" source proc_maps
+    done <<< "$library_records"
+  done
+  return 0
+}
+
 function manifest_hosting_panels() {
-  local panels panel version
+  local panels panel version file
   panels=$(upgrade_panel_output_installed "$manifest_root") || return 1
   if [ -e "$manifest_root/etc/webmin/virtual-server/config" ] &&
       [ ! -f "$manifest_root/usr/share/webmin/virtual-server/module.info" ] &&
@@ -13192,6 +14433,17 @@ function manifest_hosting_panels() {
     [ -n "$panel" ] || continue
     manifest_emit hosting_panel name "$panel" version "$version"
   done <<< "$panels"
+  # Standalone Webmin lacks Virtualmin modules but remains an administration
+  # workload. A version file proves installation, not that a generic Perl or
+  # port-10000 listener belongs to it, so runtime state stays unknown here.
+  for file in /etc/webmin/version /usr/libexec/webmin/version /usr/share/webmin/version; do
+    [ -f "$manifest_root$file" ] || continue
+    version=$(manifest_read_metadata "$manifest_root$file") || version=unknown
+    case "$version" in ''|*[!0-9.]*|.*) version=unknown;; esac
+    [ "${#version}" -le 32 ] || version=unknown
+    manifest_emit hosting_panel name webmin version "$version" version_file "$file" installed yes running unknown runtime_basis version_metadata_only
+    break
+  done
 }
 
 # A successful command can still return partial evidence. Per-probe outcomes
@@ -13248,6 +14500,12 @@ function manifest_ssh_host_keys() {
       continue;;
     esac
     if ! output=$(printf '%s %s\n' "$key_type" "$key_data" | LC_ALL=C ssh-keygen -l -E sha256 -f - 2>/dev/null); then
+      # New OpenSSH can retire DSA while active Ed25519/RSA keys remain healthy.
+      # Keep supported-key failures visible; a retained DSA key never changes trust.
+      if [ "$key_type" = ssh-dss ]; then
+        manifest_emit ssh_host_key path "${file#"$manifest_root"}" key_type "$key_type" fingerprint unknown source public_key_file active unknown status unsupported_legacy_algorithm
+        continue
+      fi
       manifest_emit warning area ssh_host_keys reason 'SHA256 fingerprinting failed; the key may be invalid or this ssh-keygen may lack SHA256 support.'
       continue
     fi
@@ -13270,6 +14528,10 @@ function manifest_output() (
   local manifest_unprivileged=${DR_UNPRIVILEGED:-false} manifest_redact=${MANIFEST_REDACT:-false}
   case "$manifest_unprivileged:$manifest_redact" in true:true|true:false|false:true|false:false) :;; *) return 1;; esac
   [ "$(id -u)" = 0 ] || manifest_unprivileged=true
+  # BASHPID identifies this collection subshell; Bash 3 uses the parent shell ID.
+  # Retain that weaker fallback explicitly instead of claiming arbitrary children.
+  local manifest_collector_pid=${BASHPID:-$$} manifest_collector_parent=$PPID manifest_collector_script
+  manifest_collector_script=$(readlink -f -- "$0" 2>/dev/null) || manifest_collector_script=
   local manifest_processes='' manifest_processes_available=false manifest_package_backend=unknown
   local manifest_separator='' manifest_local_addresses='' manifest_seen_roots='' manifest_mail_seen='' manifest_mail_inodes='' manifest_mail_count=0
   local manifest_review_file=${4:-} manifest_collection_failed=false manifest_warning_count=0
@@ -13289,6 +14551,8 @@ function manifest_output() (
   local -a manifest_dns_values=()
   local -a manifest_dns_results=()
   local -a manifest_dns_reasons=()
+  local -a manifest_website_queue=()
+  local manifest_website_queue_active=false
   case "$manifest_format:$manifest_dns_enabled" in
     text:true|text:false|json:true|json:false) ;;
     *) printf '%s\n' 'dss:error: invalid manifest format or boolean control' >&2; return 1 ;;
@@ -13306,6 +14570,7 @@ function manifest_output() (
   if $manifest_unprivileged; then
     manifest_emit warning area privileges reason 'Unprivileged collection: service status scripts, listener process ownership and mail size scans are skipped. Unreadable configuration, application files, private cron jobs and mail stores may be omitted; missing results are unknown.'
   fi
+  manifest_emit collector_launch pid "$manifest_collector_pid" parent_pid "$manifest_collector_parent" script "$manifest_collector_script" identity_basis shell_pid_and_source_path
   manifest_probe ssh_host_keys manifest_ssh_host_keys
   manifest_probe hosting_panels manifest_hosting_panels || manifest_collection_failed=true
   manifest_probe listeners manifest_listeners
@@ -13318,6 +14583,7 @@ function manifest_output() (
   manifest_probe capacity manifest_capacity
   manifest_probe upgrade_assets manifest_upgrade_assets
   manifest_probe language_consumers manifest_language_consumers
+  manifest_probe tomcat manifest_tomcat
   manifest_probe packages manifest_packages
   manifest_probe service_states manifest_service_states
   manifest_probe package_review manifest_package_review
@@ -13326,7 +14592,9 @@ function manifest_output() (
   manifest_probe mail manifest_mail
   manifest_web_started=$SECONDS
   manifest_http_started=$SECONDS
+  manifest_website_queue_active=true
   manifest_probe websites manifest_websites
+  manifest_website_queue_finish
   manifest_probe packaged_wordpress manifest_packaged_wordpress
   if $manifest_web_incomplete; then
     manifest_emit warning area security_websites reason 'Website security sampling is incomplete: unreadable, large or indirect files, failed probes or limits (20 roots, 200 files/findings, 256 KiB per file, 15 seconds plus the final probe). Only top-level files and common upload/cache and WordPress plugin directories to depth 3 are sampled.'
@@ -14245,9 +15513,15 @@ function distrorejuve_run() {
       --verbose) LOG_VERBOSE=true;;
       --trace) LOG_TRACE=true;;
       --crossgrade) UPGRADE_CROSSGRADE=true;;
-      *) arguments+=("$argument");;
+      *) arguments=("${arguments[@]}" "$argument");;
     esac
   done
+  # Operator actions describe ordinary workflow phases. Internal checks run
+  # from those phases; unknown explicit checks must not inherit a mutating action.
+  case "${arguments[0]:-}" in
+    --check-upgrade) :;;
+    --check-*) echo 'dss:error: Unknown check action. Use --check-upgrade for readiness or --upgrade-report for assessment.' >&2; return 1;;
+  esac
   action=${DR_ACTION:-${arguments[0]:-}}
   case "${arguments[0]:-}" in --support-report|--check-upgrade|--capture-baseline|--refresh-stale-systemd|--resume-stage) action=${arguments[0]};; esac
   if $MANIFEST_REDACT; then

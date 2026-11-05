@@ -39,3 +39,16 @@ unchanged executable hash and clean package audit afterward. It does not reexec
 from a manifest or readiness request. Repeat normal readiness checks before
 continuing the recorded release stage. The operation changes PID 1; it requires
 the job's execution scope and is never a fixture test on a real server.
+
+## Packaged executable collisions
+
+The migration inventory reader retains its 1 MiB content bound. The separate
+usrmerge executable verifier permits a regular executable up to 16 MiB, so a
+large unchanged packaged utility can be verified using its stored package digest.
+Both copies still require root-controlled ownership and permissions, and both
+are archived before any collision is moved. Modified, nonexecutable, oversized
+or ambiguous files retain the manual stop.
+
+For exact vendor-build and controlled dependency checks, see
+[reviewed vendors](reviewed-vendors.md). These read-only checks do not alter
+repository definitions, install packages or weaken workload acceptance.

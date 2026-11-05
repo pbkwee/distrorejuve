@@ -52,3 +52,12 @@ stops the release upgrade before the next release's repositories are selected.
 Run `bash distrorejuve.sh --help` for all options.
 Upgrade commands keep private detailed logs in `/root/distrorejuveinfo/runs` and show concise progress.
 Add `--verbose` to display command output, or `--trace` to retain a separate Bash trace.
+
+## Automatic compatibility findings
+
+Use the ordinary readiness, assessment and upgrade actions. Known package/source
+compatibility checks run within those phases; internal validators are not separate
+operator tasks. Readiness/report output explains [PowerDNS version-boundary changes](pdns-upgrades.md)
+and the explicit migration setting. Ordinary package planning reports verified
+t64 replacements and applies the selected dependency transaction. Reviewed vendor
+build assertions are part of [normal source and package acceptance](reviewed-vendors.md).

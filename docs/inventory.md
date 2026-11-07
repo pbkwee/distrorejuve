@@ -41,6 +41,12 @@ and `--list-leftover-packages` (which can install a helper) require root outside
 DNS checks report each configured hostname's addresses and whether they match
 this server. Different addresses can identify another destination or a proxy.
 
+Resolver inventory accepts a regular `/etc/resolv.conf` with completely parsed
+non-loopback nameservers when an installed `resolvectl` fails and a bounded
+unit-state check proves `systemd-resolved` inactive. It records the inactive
+service and failed query status. Stub, incomplete, timed-out and ambiguous
+resolver observations still require review.
+
 DNS website observations distinguish missing prerequisites from network results:
 `resolver_client_unavailable` means neither `getent` nor `host` is available;
 `timeout_facility_unavailable` means neither `timeout` nor the Perl fallback is
@@ -62,10 +68,82 @@ Full root collection includes these records:
 - `upgrade_tool` and `upgrade_directory`: fixed upgrade/backup/WP-CLI tool availability and bounded sizes for conventional application, database, package-cache, journal, system and backup directories (including `/var/cache/apt` and `/var/log/journal`).
 - `language_consumer`: observed interpreter process counts and direct cron interpreter references, with source file/line and interpreter name. Command bodies and arguments remain private.
 
+Apache main-server `ServerName` and `DocumentRoot` settings are retained across
+conventional configuration files. Virtual hosts inherit missing fields, and a
+main-server site is emitted when no port-80 virtual host supplies that mapping.
+Only top-level application markers are checked: an HTML root does not establish
+that subdirectories contain no applications. Conditional TLS settings remain
+unknown rather than treating port 443 as proof; bounded probes try both protocols
+at the configured port when the protocol is unresolved.
+
+Application markers include modern MediaWiki `MW_VERSION`, Moodle release strings
+with a conventional eight-digit Build suffix, and vBulletin's named version file.
+The vBulletin parser supports only a literal `FILE_VERSION_VBULLETIN` definition,
+such as `define('FILE_VERSION_VBULLETIN', '4.2.5');`, optionally with a numeric
+`Patch Level` suffix. Synthetic fixtures verify that exact contract; no claim is
+made for every vendor release layout. Other formats remain version-unknown.
+Application PHP files are never executed to obtain a version.
+
+Standalone Webmin has its own `hosting_panel` record from conventional plain
+version files. Its runtime remains unknown from version metadata alone. ProxySQL
+is identified in package/service/listener records rather than as an unnamed TCP
+frontend; administrative routing metadata requires separately approved client
+access.
+
+Custom Tomcat collection selects Java PIDs from status metadata and extracts only
+literal Catalina home/base arguments. It reports the actual executable/JDK,
+validated JDK release and Tomcat ServerInfo metadata, literal Host/appBase mappings,
+and selected loaded JVM/libc/TLS/APR library identities with deleted-file state.
+A before/after kernel starttime check binds these records to one process; vanished
+or reused PIDs discard buffered facts and produce a fixed warning.
+It reads no environment values or JNDI resource attributes and executes neither
+Java nor application code. These process and named configuration/version-marker
+categories require the job's agreed collection scope. The scan has a ten-second
+budget and 20000-PID ceiling; each metadata read is capped at 1 MiB, Host/library
+records at 128 each. Missing optional `unzip` or custom layouts leave version
+unknown. Loaded-library records identify this process's files, not successful
+application requests or complete runtime activation.
+
+`collector_launch` records identify the collection shell and source path.
+Process indicators retain every finding and add an exact-script/launch-ancestry
+correlation count; unrelated descendants remain findings requiring review.
+Collector launch identity and PIDs are excluded from stable comparison records.
+On Bash 3 the launch PID falls back to the parent shell ID, so correlation can be
+incomplete. Separate `ps -o` columns avoid legacy procps silently dropping fields.
+
+Directory-size collection resolves only each selected operand before numeric
+`du -skx`; it does not follow nested directory symlinks. This preserves KiB units
+on old coreutils where `-H` meant decimal human-readable output.
+
 Apache, Nginx and Caddy use their conventional configurations. Apache/Nginx
 collection also reads conventional generated cPanel, Plesk and DirectAdmin vhost
 files under the existing file/count limits. This path-based discovery needs no
 panel API credentials. Custom include layouts can be added after a targeted review.
+
+Standard website collection queues configured Apache, Nginx, Caddy and Lighttpd
+mappings before spending DNS/HTTP budgets. It selects a configured representative
+for each vhost mapping and listener first, preferring a non-generated authority
+over its `www`, `webmail` or `admin` aliases. Prefix ranking ignores hostname
+case while preserving the configured name. Non-generated representatives run
+before generated-only mappings, then remaining aliases use the fixed budget. No unconfigured hostname is invented; a `www`-only site
+keeps that authority. Distinct vhosts and ports retain separate mapping identity,
+while DNS names and HTTP protocol/authority pairs reuse their existing caches.
+
+Applications and website-file metadata are collected before this deferred network
+phase. Website records are then emitted with cached DNS outcomes; skipped network
+work remains explicitly unknown. Network waiting does not consume the separate
+file-sampling budget. A fast last-listed streaming proxy can therefore receive
+its representative checks before aliases of the first site, while slow requests
+can still exhaust the unchanged time limit. HTTPS verification failures retain
+their curl/TLS status.
+
+The internal queue retains at most 512 site mappings, each with bounded argument
+fields, and schedules at most 2048 mapping/listener groups and 4096 configured
+names. Overflow retains website/application metadata with
+`dns_reason=priority_queue_limit` and skipped `website_probe` records; it never
+falls back to unbounded requests. These are fixed implementation limits, not new
+operator switches. Wildcards and dynamic names are never expanded as local paths
+or treated as literal network authorities.
 
 HTTP probing is enabled in normal root collection. Set `DR_MANIFEST_HTTP=false`
 to disable it; reduced collection skips HTTP requests. Each request has a two-second
@@ -82,7 +160,8 @@ collection first; reserve job-specific checks for consequential gaps.
 `ssh_host_key` records report SHA256 fingerprints, key types, bit sizes and paths
 from readable conventional `/etc/ssh/ssh_host_*_key.pub` files. Private keys and
 comments are not collected. Symlinks are skipped; missing/unreadable files or
-unsupported SHA256 tooling produce warnings. These are file observations with
+unsupported SHA256 tooling produce warnings. A rejected retained DSA public key
+gets `status=unsupported_legacy_algorithm`; supported-key failures still warn. These are file observations with
 `active=unknown`, not confirmation of the keys served by sshd. Fingerprints and
 paths are hidden by `--redact`. See [using manifest fingerprints](assessment-intake.md#manifest-fingerprints)
 for trusted customer submissions and the first-connection trust limitation.

@@ -2,9 +2,10 @@
 
 Apply these rules on the source, destination, workstation/runner and restored
 copies. They cover direct file reads and tools that read files indirectly.
-Read-only access can still disclose secrets or customer data. SSH/root access,
-a private directory, Git ignore rules or a general assessment request does not
-by itself authorize sensitive-data access or disclosure to an AI service.
+Read-only access can still disclose secrets or customer data. SSH/root access, a private directory or Git ignore rules do not authorize
+unrestricted sensitive-data reads or disclosure to an AI service. For an
+operator-requested agent collection, use the bounded assessment discovery scope
+below and record its source, purpose, returned fields and processing route once.
 
 ## Start with non-secret evidence
 
@@ -92,3 +93,36 @@ incident/retention procedure and obtain a decision about credential rotation or
 cleanup when needed. Do not silently delete evidence or rotate production secrets.
 Record the permission reference, approved non-secret findings and remaining gaps
 in the private job; keep raw secrets out of the record.
+
+## Bounded follow-up discovery for agent-collected assessments
+
+When an authorized operator requests agent collection for a designated, verified
+source, the default assessment scope includes the non-secret metadata necessary
+to explain its workloads. Record this scope once at intake and reuse it when the
+standard manifest leaves a material gap. A new file in an already covered category
+does not require another general permission exchange.
+
+The covered categories are service/configuration structure, virtual-host names,
+site roots and handlers, application/version markers, service availability, public
+host-key metadata, and literal database engine/host/port/schema identifiers needed
+to map an application. Custom Tomcat metadata includes only the Java executable,
+`catalina.home`/`catalina.base`, named JDK release and Tomcat ServerInfo version
+markers, Host name/appBase, and selected mapped-library path/device/inode/deleted
+state. It excludes environment and JNDI/resource/query values.
+Approved local allowlist extractors may read relevant
+service/application settings to return only these fields. Validate literal values;
+keep raw configuration, environment values and arbitrary arguments out of output.
+Record unavailable or nonliteral settings as unknown rather than evaluating code.
+
+The scope excludes raw credentials, private keys, `.env` values, customer records,
+mail, database rows/dumps, stored application queries and unrelated logs/content.
+Authenticated database metadata requires an approved client credential reference
+and bounded metadata query category; use the client without exposing credentials.
+Security-content sampling or broader collector inputs retain their separately
+recorded scope. Reuse any narrower exclusions and AI-processing limits supplied
+by the operator. Ask only when required evidence expands those categories, target,
+purpose or returned fields, or the existing authority is missing or withdrawn.
+
+A supplied manifest alone permits offline analysis. Addresses inside it do not
+authorize a connection. Assessment discovery does not authorize service changes,
+resource purchases, backup transfers or external correspondence.

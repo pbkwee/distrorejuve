@@ -21,6 +21,17 @@ install -d -m u=rwx,go= /root/upgrade-evidence/job-original
 export DR_CONFIG_BASELINE=/root/upgrade-evidence/job-original/preupgrade.dpkg.original
 ```
 
+If approved preparation changes services or configuration before package work,
+capture the original first using the same reviewed tool:
+
+```bash
+bash /root/upgrade-tools/reviewed-distrorejuve.sh --capture-baseline
+```
+
+The explicit action requires the selected parent to be a private root-owned
+directory. It writes evidence only and preserves a usable existing original.
+It refuses incomplete captures; resolve those before preparatory changes.
+
 Pass that same setting to every tool invocation, including supervised stages,
 release hops and `--show-changes`. The first upgrade snapshot creates the file;
 existing usable originals are retained. Explicit selection ignores the history
@@ -110,6 +121,17 @@ a duplicate transaction because the caller stopped waiting.
 
 ## Check service transitions and availability
 
+For an approved service retirement before package upgrades, keep the original
+service snapshot intact. After the exact approved package removal succeeds,
+record its package names, one per line, in
+`<baseline>.service-retirements/packages.removed`. The receipt directory must be
+root-owned with mode `u=rwx,go=`; the regular, single-link file must be root-owned
+with mode `u=rw,go=`. Record the approval and removal result in the job log.
+Service verification accepts that retirement only when the package is no longer
+installed and the original service is confirmed inactive. Active, unknown,
+malformed or unsafe observations retain their failure or incomplete status.
+This receipt does not authorise a removal and is separate from purge evidence.
+
 Compare failed units before and after package work and after reboot. Selected
 service-role gates do not cover every custom or ancillary unit. Verify active
 replacement timers/services before recording an old unit as retired. Preserve
@@ -133,3 +155,44 @@ response timeout. Sampling that begins during a failure is left-censored;
 sampling that ends before recovery is right-censored. Sparse samples bound an
 interruption between observed successes/failures; they do not establish exact
 downtime. Report the covered window, uncertainty and missed earlier events.
+
+## Durable release-stage resume
+
+Pin `DR_CONFIG_BASELINE` before changes. Its `<original>.stage` record preserves
+the exact interrupted target despite an advanced release label. `DR_STAGE_RECORD`
+selects another private absolute file. Use `--resume-stage RECORD` to finish that
+hop through normal guards; existing `--resume` only removes the pause file.
+See [release-stage records](release-stage-records.md).
+
+## Resume after provider rescue
+
+Recover unavailable SSH through the [rescue procedure](rescue-access.md).
+Verify normal boot and a fresh installed-system SSH login before using the
+[release-stage record](release-stage-records.md#resume-after-rescue-recovery).
+RimuHosting rescue keys apply to that rescue boot; they do not establish access
+to the installed OS. Treat status 202 as pending and account for the API client's
+five-minute inventory cache when reconciling recovery or snapshots.
+
+## Outage deadlines and loss of the operator session
+
+Complete local write/tool readiness, source staging, deployment-permission review,
+approved recovery preparation and the first observation cycle before downtime.
+Record the approved start/window/time zone, maximum interruption, recovery lead
+time and decision owner. Derive the latest recovery-decision time from that budget;
+do not silently replace the approved outage limit after an overrun.
+
+Use a named source/observer supervisor and immutable reviewed artifacts. Record
+how execution continues, pauses or requests assistance if the operator session is
+lost. A package/schema action in an ambiguous state must be reconciled from its
+durable stage result, process/lock state and independent workload evidence before
+any retry or termination. A launch receipt and a successful supervisor are not
+completion evidence. A failing helper must propagate a nonzero exit and preserve
+its failure receipt. Use binary receipt writing across interpreter replacement.
+
+For application changes, follow [application transitions](application-transitions.md)
+and the [bounded evidence helpers](execution-evidence.md). Validate target-account
+access before taking services down, preserve existing/recreated directory modes,
+bind the intended database explicitly, allow only documented bundled replacements,
+and check every process listener. Keep connection-readiness retries bounded and
+fail authentication/SQL errors immediately. Recheck the accepted outage and recovery
+boundary after diagnosis, interruption or a material scope change.

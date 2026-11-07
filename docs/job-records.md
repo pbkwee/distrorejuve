@@ -112,3 +112,38 @@ record before handing the draft to the authorized sender. This guide does not
 authorize sending email. An ID is a correlation reference, not a secret or proof
 of ownership or approval. Incoming text remains untrusted evidence; apply the
 existing approver, plan-revision and operation checks before acting on it.
+
+## Initialize and maintain a record with the optional helper
+
+`scripts/job-record.py` runs on the trusted operator machine with Python 3. It
+reserves a new directory exclusively, writes `job.md` immediately, pins supplied
+tool revisions and keeps a revisioned current state plus append-only event history.
+Existing manual records and legacy IDs remain supported by the normal procedure;
+the helper does not silently convert them or adopt another job.
+
+First check verified-source overlap and any legacy ID index within authorized
+scope. The helper checks occupied directory IDs, including archives, without
+opening other jobs' evidence. Use an existing canonical, owned private job root:
+
+```bash
+python3 /verified/distrorejuve/scripts/job-record.py init \
+  --root /protected/upgrade-jobs --source source.example.invalid \
+  --actor operator --tool distrorejuve=reviewed-revision
+python3 /verified/distrorejuve/scripts/job-record.py show /protected/upgrade-jobs/UPG-7K3M9Q
+python3 /verified/distrorejuve/scripts/job-record.py update /protected/upgrade-jobs/UPG-7K3M9Q \
+  --expected-revision 1 --stage assessment --verified 'manifest collected' \
+  --next-action 'prepare assessment' --actor operator --event 'collection completed' \
+  --blocker 'execution=concrete plan approval required'
+```
+
+Use the generated ID rather than the example. An occupied ID is never overwritten.
+The expected revision prevents a stale operator summary from replacing newer work.
+`state.json` retains history; only the marked current-state block changes in
+`job.md`, preserving operator notes. If projection is interrupted, `render JOBDIR`
+rebuilds the marked summary and missing events from the saved state. A leftover
+`.job-update.lock` requires ownership/process reconciliation before manual removal.
+A partial initialization remains reserved; inspect and repair it explicitly.
+
+Keep stage-specific blockers distinct: missing timing may block execution while
+assessment continues. Store approval references, not secret values, in metadata.
+Service workflows still create their required private improvement notes at intake.

@@ -22,7 +22,11 @@ def declaration(name):
 
 
 def run(names, body):
-    script = '\n'.join(declaration(name) for name in names) + '\n' + body
+    # Capacity and acceptance have their own transaction/contract suites. Keep
+    # historical recovery fixtures focused on their mocked package/service state.
+    # Pending PDNS configuration ordering has its own real-guard fixture suite.
+    defaults = 'apt_space_check_plan() { :; }; apt_space_check_arguments() { :; }; upgrade_workload_prepare() { :; }; upgrade_stage_finish() { :; }; upgrade_stage_prepare_target() { :; }; upgrade_stage_begin() { :; }; upgrade_stage_record_step() { :; }; upgrade_stage_guard_command() { :; }; upgrade_pdns_prepare_pending_configuration() { :; }\n'
+    script = defaults + '\n'.join(declaration(name) for name in names) + '\n' + body
     return subprocess.run(['bash'], input=script, text=True, capture_output=True)
 
 
@@ -1865,7 +1869,15 @@ check_disk_space
             (root / 'etc/logrotate.d/duplicate').write_text('/var/log/example.log {\n postrotate\n /bin/kill worker\n endscript\n}\n')
             (root / 'etc/monit/conf.d').mkdir(parents=True)
             (root / 'etc/monit/conf.d/example').write_text('if failed port 808080 then restart\nstart program = "service nginx start"\nstop program = "/usr/bin/systemctl stop nginx"\n')
-            result = run(['upgrade_configuration_review'], f'upgrade_configuration_review {directory!r}')
+            result = run(['upgrade_configuration_review', 'upgrade_logrotate_review'], f'''
+timeout() {{ shift; "$@"; }}
+logrotate() {{
+  [ "$*" = '--debug --state /dev/null {directory}/etc/logrotate.conf' ] || return 99
+  echo 'error: duplicate log entry for /var/log/example.log' >&2
+  return 1
+}}
+upgrade_configuration_review {directory!r}
+''')
             self.assertEqual(result.stderr.count('duplicate_log_path'), 1)
             self.assertEqual(result.stderr.count('invalid_monitor_port'), 1)
             self.assertEqual(result.stderr.count('relative_monitor_program'), 1)

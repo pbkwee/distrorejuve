@@ -73,6 +73,7 @@ sudo env DR_MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --to-latest
 | `DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK` | `false`; bypass current-release repository checks. Does not bypass release-transition vendor checks. |
 | `DR_SKIP_OLD_PACKAGE_CHECK` | `false`; bypass the old-package precondition for crossgrades. |
 | `DR_SKIP_DOVECOT_MIGRATION_CHECK` | `false`; override the Dovecot 2.4 configuration guard after manual review. |
+| `DR_MIGRATE_PDNS_ROLE_SETTINGS` | `false`; set to `true` to rename PowerDNS `master`/`slave` settings to `primary`/`secondary` during the affected package upgrade. Read-only checks warn without editing. See [PowerDNS upgrades](pdns-upgrades.md). |
 | `DR_REMOVE_X11_PACKAGES` | `false`; enable X11 package removal during upgrade preflight. `--check-upgrade` never removes packages. |
 | `DR_ENABLE_UBUNTU_CROSSGRADE` | `false`; permit the experimental Ubuntu crossgrade path. |
 | `DR_PANEL_UPGRADE` | Unset; select `plesk` or `cpanel` for a supported single-release vendor OS upgrade. |
@@ -83,6 +84,7 @@ sudo env DR_MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --to-latest
 | `DR_ACTION` | Unset; override the action selected from command-line arguments. Prefer a command-line action. |
 | `DR_CONFIGURATION_HISTORY_DAYS` | `7`; days to look back for the pre-upgrade comparison baseline when no explicit path is selected. |
 | `DR_CONFIG_BASELINE` | Unset; absolute source-local file path for the job's original configuration snapshot. Existing usable originals are retained without an age limit; new captures require an existing private parent. Current reports are written beside it. Other log/recovery locations are unchanged. |
+| `DR_REVIEWED_VENDOR_CONTRACT` | Unset; agent-maintained private vendor acceptance evidence, checked automatically by normal source/readiness and final package checks. Operators do not assemble it or run a separate check action. See [vendor checks](reviewed-vendors.md). |
 | `DR_DATABASE_DEFAULTS_FILE` | Unset; absolute path to an explicitly authorized MySQL/MariaDB client option file for maintenance checks. Passed directly as the first client option, preserving its account and socket. An unavailable file or failed authentication stops the check. |
 | `UCF_FORCE_CONFFOLD` | Unset; retain the caller's explicit ucf keep-old-configuration policy. |
 
@@ -94,3 +96,23 @@ Virtualmin, ISPConfig and standalone Webmin use normal distro upgrade checks.
 Other detected hosting panels use a separate vendor upgrade procedure.
 See [hosting-panel upgrades](hosting-panels.md) for supported Plesk/cPanel paths and
 manual upgrade or migration guidance for other detected panels.
+
+## Transaction and workload controls
+
+`DR_MIN_FREE_BOOT_MIB` (128), `DR_DISK_SAFETY_PERCENT` (20), and
+`DR_KERNEL_INITRAMFS_RESERVE_MIB` (512) complement `DR_MIN_FREE_DISK_MIB`
+for [per-filesystem transaction space](transaction-space.md). Unknown package
+metadata or nonstandard cache placement stops execution rather than guessing.
+
+`DR_WORKLOAD_CONTRACT` selects the private approved TSV
+[acceptance contract](workload-acceptance.md). `DR_WORKLOAD_EXCEPTIONS` selects
+explicit final exceptions bound to the original and frozen contract digests.
+Missing contracts leave workload completion unknown.
+
+## Durable release-stage resume
+
+Pin `DR_CONFIG_BASELINE` before changes. Its `<original>.stage` record preserves
+the exact interrupted target despite an advanced release label. `DR_STAGE_RECORD`
+selects another private absolute file. Use `--resume-stage RECORD` to finish that
+hop through normal guards; existing `--resume` only removes the pause file.
+See [release-stage records](release-stage-records.md).

@@ -107,6 +107,73 @@ manifest_resolver
         self.assertIn('source resolvectl_dns address_count 1 status partial unparsed_count 1', result.stdout)
         self.assertNotIn('SECRET', result.stdout)
 
+    def inactive_service(self, addresses='192.0.2.53', state='inactive', load='loaded', query_status=1, unit_status=0, config_kind='regular'):
+        return run(f"""
+manifest_root=
+manifest_unprivileged=false
+manifest_collection_failed=false
+# Mock path existence as well as file reads; never depend on the runner resolver.
+function [() {{
+  case "$1:$2" in
+    -L:/etc/resolv.conf) test {shlex.quote(config_kind)} = symlink;;
+    -f:/etc/resolv.conf) test {shlex.quote(config_kind)} = regular;;
+    *) builtin [ "$@";;
+  esac
+}}
+manifest_emit() {{ printf '%s\\n' "$*"; }}
+head() {{ case "$*" in *'/etc/resolv.conf') printf '%s\\n' {shlex.quote(''.join('nameserver ' + address + chr(10) for address in addresses.split()))};; *) command head "$@";; esac; }}
+resolvectl() {{ :; }}
+systemctl() {{ :; }}
+manifest_run_bounded() {{
+  case "$1:$2" in
+    3:resolvectl) return {query_status};;
+    2:systemctl) printf 'LoadState=%s\\nActiveState=%s\\n' {shlex.quote(load)} {shlex.quote(state)}; return {unit_status};;
+    *) return 99;;
+  esac
+}}
+manifest_resolver
+result=$?
+printf 'collection_failed=%s\\n' "$manifest_collection_failed"
+exit "$result"
+""")
+
+    def test_static_nameservers_with_proven_inactive_optional_service(self):
+        result = self.inactive_service('192.0.2.53 2001:db8::53')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('source resolv_conf address_count 2 status observed', result.stdout)
+        self.assertIn('source resolvectl_dns status inactive query_status 1 state_source systemctl', result.stdout)
+        self.assertIn('collection_failed=false', result.stdout)
+        self.assertNotIn('query_failed', result.stdout)
+
+    def test_inactive_exception_preserves_ambiguous_and_failed_queries(self):
+        cases = [
+            {'config_kind': 'symlink'},
+            {'config_kind': 'absent'},
+            {'addresses': '127.0.0.53'},
+            {'addresses': '192.0.2.53 127.0.0.54'},
+            {'addresses': '::1'},
+            {'addresses': ''},
+            {'addresses': '999.2.3.4'},
+            {'state': 'failed'},
+            {'state': 'active'},
+            {'state': 'activating'},
+            {'state': ''},
+            {'load': 'not-found'},
+            {'unit_status': 1},
+            {'query_status': 2},
+            {'query_status': 125},
+            {'query_status': 126},
+            {'query_status': 127},
+            {'query_status': 124},
+            {'query_status': 137},
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                result = self.inactive_service(**case)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('status query_failed', result.stdout)
+                self.assertIn('collection_failed=true', result.stdout)
+
     def test_timeout_malformed_and_output_limits(self):
         result = self.upstream('Global: 192.0.2.53\nSECRET', status=124)
         self.assertEqual(result.returncode, 1, result.stderr)

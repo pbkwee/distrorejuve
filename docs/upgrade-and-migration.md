@@ -476,3 +476,17 @@ failure that makes continuation unsafe; use recovery within existing authority o
 seek the missing decision. Leave the record resumable, with last verified state,
 operation/artifact references, outstanding issues and next permitted action.
 Record useful tool/workflow improvements without customer details in public proposals.
+
+## Reusable assessment and application checks
+
+Use the [bounded follow-up discovery scope](sensitive-data.md#bounded-follow-up-discovery-for-agent-collected-assessments)
+for requested agent collection and [access diagnostics](access-diagnostics.md)
+for blocked access. Use [job records](job-records.md) to preserve the current state
+and original identity through handoffs.
+
+Before application transitions, apply [application transition checks](application-transitions.md)
+and [outage/recovery checkpoints](execution-checkpoints.md#outage-deadlines-and-loss-of-the-operator-session).
+Optional [execution evidence helpers](execution-evidence.md) operate only within
+approved metadata and execution scope. Review actual running runtimes, database
+engines, deployed permissions and listener bindings rather than substituting package
+versions or daemon health for workload acceptance.

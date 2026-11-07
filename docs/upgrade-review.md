@@ -311,6 +311,7 @@ Offline regression checks (no production operations):
 bash -n distrorejuve.sh
 python3 tests/test-upgrade-review.py
 python3 tests/test-run-lessons.py
+python3 tests/test-capture-baseline.py
 python3 tests/test-manifest-firstpass.py
 python3 tests/test-manifest-upgrade-assets.py
 python3 tests/test-manifest-packaged-wordpress.py
@@ -428,3 +429,36 @@ older helper stops the action. The tool retains a pinned prerequisite simulation
 and status for review; it does not execute that separate proposal. This catches
 transitions where target package scripts use newer helper syntax while their
 unversioned dependencies still permit the installed helper.
+
+## Workload and native readiness
+
+Use the [workload acceptance contract](workload-acceptance.md) before service
+changes and at final completion. Database engine, schema, clients, topology and
+maintenance checks stay separate. Read [native readiness](native-readiness.md)
+for SSH socket activation, logrotate semantics and the verified usrmerge remedy.
+Peak package space is checked for the [selected transaction](transaction-space.md).
+
+## Reviewed vendor and legacy package checks
+
+Ordinary source/readiness and final checks validate the agent-maintained
+[reviewed vendor evidence](reviewed-vendors.md). Equal package versions across
+distro builds require a discriminating installed-payload check. Normal package
+planning reports verified t64 replacements, and [PowerDNS upgrade handling](pdns-upgrades.md)
+offers the explicit setting for role-name migration at the affected version.
+The agent runs covered checks and maintains private evidence within the approved
+scope; operators do not prepare projections or invoke separate diagnostic actions.
+
+Generated canonical Debian archive/live URIs use HTTPS, preserving suites,
+components and signing policy. Read-only legacy manifest intake parses under
+Bash 3.0; this compatibility does not expand the supported mutation platforms.
+
+Focused isolated checks:
+
+```bash
+python3 tests/test-package-compatibility.py
+python3 tests/test-reviewed-vendors.py
+python3 tests/test-normal-workflow-checks.py
+python3 tests/test-pdns-migration.py
+python3 tests/test-transaction-space.py
+python3 tests/test-usrmerge.py
+```

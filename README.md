@@ -53,3 +53,9 @@ For a new RimuHosting destination, see [account and API setup](docs/rimuhosting.
 Developed by the team at [RimuHosting](https://rimuhosting.com/), where we use it
 to help maintain Linux virtual machines. We also offer
 [server upgrade and migration assistance](https://blog.rimuhosting.com/2021/07/12/distro-upgrade-as-a-service/).
+
+Workload acceptance, exact-stage recovery, transaction capacity and status-only
+observations are described in [workload acceptance](docs/workload-acceptance.md),
+[release-stage records](docs/release-stage-records.md),
+[transaction space](docs/transaction-space.md), [native readiness](docs/native-readiness.md)
+and [availability monitoring](docs/availability-monitoring.md).

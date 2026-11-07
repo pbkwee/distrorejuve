@@ -220,3 +220,11 @@ suggested `kill -TERM PID` command. Interrupting installation/configuration can
 leave packages unfinished. The script never stops the owner or removes a lock
 file. Warnings leave operation status unchanged, and APT/dpkg still enforce their
 locks. Missing/unreadable lock or process metadata yields no age warning.
+
+## Classify an assisted-assessment access failure
+
+Follow [bounded SSH diagnostics](access-diagnostics.md) before changing access
+policy or requesting new keys. Distinguish local execution permission, designated
+agent responsiveness, route, host identity and authentication. Client-side denial
+cannot establish whether an offered key was blocked by an account/source rule.
+Reuse the job's working route and trust store through uploads and reconnects.

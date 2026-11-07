@@ -105,3 +105,21 @@ Save the context, collection scope, access route, host-key policy/trust basis,
 constraints and checkpoint preferences in `job.md`. Preserve these through
 handoffs, retries and later phases. Ask again only when scope changes, evidence
 conflicts, authority expires/is withdrawn, or a real new decision is needed.
+
+## Reuse the bounded discovery decision
+
+For requested agent collection, record the default
+[bounded assessment categories](sensitive-data.md#bounded-follow-up-discovery-for-agent-collected-assessments)
+and any narrower exclusions with the designated source and AI-processing route.
+Use that decision for necessary follow-up site, handler, version and endpoint
+metadata when the manifest omits them. Do not ask again for a covered category.
+For supplied-manifest analysis, stay offline until collection is requested.
+
+Record a partial reply according to what it establishes: an authority attestation
+does not invent an outage window or recovery decision. Resolve those execution
+values in a concrete plan while continuing useful covered assessment work.
+
+Use the [bounded access sequence](access-diagnostics.md) to identify the failed
+layer. Batch only genuinely missing agent/route/trust details, and preserve working
+answers through retries. An offered public key followed by denial does not identify
+which server access rule caused it.

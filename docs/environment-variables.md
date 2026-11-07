@@ -11,7 +11,7 @@ transaction peak estimate; raise it after reviewing downloads and installed grow
 `DR_UNPRIVILEGED` defaults to `true` for a non-root effective user and `false` for root.
 `--unprivileged` forces it to `true`. Setting it to `false` cannot override a non-root
 identity. The script never tries sudo; request elevation explicitly when needed.
-See [migration inventory](inventory.md) for reduced coverage.
+See [manifest privileges](manifest.md) for the coverage comparison.
 
 An explicit `--support-report` remains available even when an inherited upgrade
 setting is invalid.

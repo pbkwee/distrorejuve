@@ -313,10 +313,8 @@ or selective application migration; hosting provider clone flags may only accept
 hosting provider's own images/orders. Follow the hosting provider's boot, SSH and networking
 requirements before a restore. For a clean install keep the new OS intact.
 
-Restrict egress before copied services start. Suppress copied mail, cron/timers,
-workers, database events, containers, payments, callbacks, monitoring and backup
-jobs that could affect production. A broad HTTP/HTTPS exception still permits
-callbacks; arrange controlled package retrieval. Keep the live source authoritative.
+Apply [copy isolation and activation](#copy-isolation-and-activation) before the
+first boot or start of copied services. Keep the live source authoritative.
 Use a vendor migration sequence where required, checking its source/DNS side effects.
 Carry the observed site/application activity into the destination configuration;
 do not enable dormant virtual hosts, handlers or legacy startup scripts merely
@@ -333,13 +331,97 @@ writers, sessions and deployment/configuration drift. A live database-directory
 copy is not a general database migration method. Record defects, durations and
 customer acceptance; the rehearsal will become stale.
 
+### Copy isolation and activation
+
+Keep automatic production activity paused on the destination during preparation
+and customer testing. Keep the source serving production until the agreed cutover.
+Ask which business activities run automatically: email, billing, payments, orders,
+shipping, exports, callbacks and remote updates. Combine customer answers with
+scoped inventory; non-root manifests can omit private schedules and service state.
+Record gaps and resolve consequential unknowns before running copied code.
+
+Before the first boot or copied-service start, establish restrictive network
+access, preferably outside the copied OS. If that is unavailable, use an offline
+or rescue preparation step to establish equivalent controls before normal boot.
+Block production ingress and access to live databases, queues, APIs and shared
+storage as well as outgoing mail. A new IP or unchanged DNS does not prevent
+copied credentials from reaching production. Arrange controlled package retrieval;
+a broad HTTP/HTTPS exception also permits payments and callbacks.
+
+Pause the relevant launchers and running work. Inspect system and user cron,
+anacron, queued at jobs, system and user timers, queue workers, application
+schedulers, database events, containers and startup scripts. Include outgoing mail
+queues, replication, monitoring remediation and backup jobs that could overwrite
+or prune production storage. Check application requests and inbound callbacks
+that can initiate the same actions. Prefer sandbox integrations and captured test
+mail for customer testing; keep production credentials and endpoints isolated.
+
+A blanket cron pause is reasonable while reviewing copied jobs. Grant exceptions
+by reviewed function and destination, rather than exempting whole cron directories
+or all OS timers. Retain administration, networking, local logging and time
+synchronisation. Permit local housekeeping only after checking paths and effects.
+Monitoring needs a separate identity and controlled alert/remediation behaviour;
+backups need a separate destination and retention scope. Record and verify each
+network or service exception.
+
+Record interventions in the private job record before changing them. For each
+service, job or network control, retain the original active/enabled state,
+intervention, reason, restore action, owner and verification time/evidence.
+Distinguish pre-existing disabled items from changes made by this job. Record
+unresolved coverage and the agreed activation order. For example:
+
+| Activity and target | Original state | Current control and reason | Restore action and approval | Owner and last verification |
+| --- | --- | --- | --- | --- |
+| Destination billing worker | Running and enabled | Stopped; startup blocked during testing | Restore recorded state at approved activation | Operator; evidence reference and time |
+
+Use controls that survive reboot and prevent unintended activation. Stopping or
+disabling a systemd unit alone can leave other activation routes; stop and mask
+units where supported, or use a reviewed equivalent for local/custom units.
+See [systemctl activation controls](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html).
+Recheck controls after package changes, reboot, container restart and every data
+or configuration refresh. A refresh must preserve isolation. Verify both the
+control settings and the absence of unintended production activity within scope.
+
+Keep an explicit status in each progress/system update report, acceptance report
+and final handoff while anything remains paused. Name the server, affected
+activities, reason, last verification, next action and owner. Separate intentional
+pauses from failed services and unverified state. For example:
+
+> Awaiting activation: cron, billing workers and outbound email remain paused on
+> the new server during customer testing. Production processing continues on the
+> original server. Next action: the operator will confirm cutover and activation
+> with the customer. Last verified: <timestamp and evidence reference>.
+
+At the agreed cutover checkpoint, present the actual paused list and ask:
+
+> The new server has been accepted. Are you ready to activate these activities
+> on the new server after we verify they are stopped on the old server?
+
+Reuse recorded final cutover approval if it explicitly covers that list and
+activation sequence; ask only for missing or changed authority. If activation is
+deferred, retain the controls and record the next owner/action. Customer testing
+or acceptance alone must leave the controls in place until activation is approved.
+
+After verifying the corresponding source writers are stopped and final sync is
+complete, review copied mail queues, pending transactions and missed schedules.
+Agree whether to resume, reconcile or discard specific pending work; preserve
+unresolved work. Persistent systemd timers can trigger missed work on activation;
+see [timer catch-up behaviour](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html).
+Restore only the recorded job interventions in the approved order. Preserve
+pre-existing disabled items and remove temporary network controls only as needed
+for approved production operation. Verify destination processing and continued
+source inactivity. Record actual activation, failures and any remaining pauses;
+refresh reports after activation. Keep one production processor for each activity.
+
 ## Final synchronisation and cutover
 
 After customer testing, obtain final authority for the production pause, resync
 and selected switch. Recheck identity, source drift, backups, window, costs and
 recovery readiness. Pause and verify all relevant writers, including external
 callbacks and deployments. Transfer consistent data and agreed file changes;
-verify invariants before enabling destination writers.
+verify invariants before enabling destination writers. Follow the recorded
+[activation sequence](#copy-isolation-and-activation), including its approval,
+pending-work review and verification of source inactivity.
 
 Switch the agreed DNS/traffic path, accounting for IPv4/IPv6, proxies, PTR, mail,
 SPF/DKIM, TLS and allowlists. Keep one authoritative writable system during

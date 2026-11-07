@@ -29,8 +29,9 @@ reduce what the collector reads, disable DNS queries, sanitize existing files or
 upload anything. Keep normal manifests, upgrade reports and logs private.
 Upgrade comparison snapshots retain their full detail.
 
-The manifest can run as a non-privileged user. See [manifest privileges](manifest.md)
-for the differences in service checks, listener details, mail measurements and file access.
+The manifest automatically uses reduced collection for non-root users.
+`--unprivileged` forces this mode for any account. See [manifest privileges](manifest.md)
+for the coverage comparison and when fuller root collection is useful.
 
 Upgrade/removal commands, pause/resume, `--show-changes` (which writes a snapshot)
 and `--list-leftover-packages` (which can install a helper) require root outside reduced mode.

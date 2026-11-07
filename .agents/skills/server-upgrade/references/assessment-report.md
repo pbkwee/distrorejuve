@@ -193,7 +193,10 @@ assumptions into executable instructions. Include relevant detail only:
   and arguments are known; otherwise name the unresolved task. Cover baseline
   checks, release/application work, reboots/reconnection and post-upgrade checks.
   For a separate server include isolation, refresh/schema/test-data handling,
-  customer acceptance, final consistent resync and the chosen switch.
+  customer acceptance, final consistent resync and the chosen switch. Use the
+  [copy isolation and activation procedure](../../../../docs/upgrade-and-migration.md#copy-isolation-and-activation)
+  to plan paused activities, reviewed exceptions, reporting and activation approval.
+  Treat omitted private schedules in reduced manifests as unknown.
 - **Recovery and handoff:** backup scope/exclusions and restore evidence, database
   consistency, console/rescue access, and recovery after new writes. Record planned
   remaining work with owners/checks and the next permitted action. Unknown windows,

@@ -26,7 +26,9 @@ Do not describe a site as working because its web server starts or core files
 pass checksums. Report its actual application result.
 
 Summarise relevant verification and recovery arrangements. Give the owner a few
-specific checks or decisions for their own sites. Keep internal runner paths,
+specific checks or decisions for their own sites. If activity remains paused,
+state which server and business functions are affected, why, and who will arrange
+activation. Label the result as awaiting activation where applicable. Keep internal runner paths,
 credentials, raw manifests, package lists and command history in the private
 technical record.
 
@@ -57,7 +59,12 @@ Finish with a short server-specific checklist. Each open item needs an action,
 expected result and responsible role. Include operational details that can catch
 the next administrator: deliberately stopped databases, an old active theme,
 missing document roots, retained boot arrangements, temporary access or backup
-retention. Explain where private logs, manifests and recovery references live.
+retention. Include the [isolation and activation record](../../../../docs/upgrade-and-migration.md#copy-isolation-and-activation):
+original and current states, controls/exceptions, approval, restore actions,
+source-stop and destination-activation evidence, last verification, and owners
+for anything still paused. Preserve pre-existing disabled items. Refresh both
+reports after activation or a changed pause. Explain where private logs,
+manifests and recovery references live.
 
 ## Next-run improvements
 

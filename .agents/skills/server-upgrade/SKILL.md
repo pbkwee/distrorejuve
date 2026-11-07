@@ -140,7 +140,15 @@ before acting. Follow only the relevant procedure sections:
   for supported release/panel gates and application/database/reboot verification.
 - [Separate-server preparation](../../../docs/upgrade-and-migration.md#prepare-a-separate-server)
   for cloning or clean installation, isolation and tested data refresh. Keep a
-  fresh OS intact rather than restoring the old root over it.
+  fresh OS intact rather than restoring the old root over it. Apply
+  [copy isolation and activation](../../../docs/upgrade-and-migration.md#copy-isolation-and-activation):
+  establish controls before first boot/service start, record paused activities and
+  reviewed exceptions, and recheck after upgrades, reboot and refresh. Resolve
+  consequential schedule gaps in non-root manifests. Keep pauses visible in
+  progress/system update reports. At cutover, obtain or reuse explicit activation
+  approval for the recorded list, verify source inactivity and final sync, review
+  pending work, then restore and verify only this job's interventions. Recover
+  this record on continuation; retain controls when activation is deferred.
 - [Cutover](../../../docs/upgrade-and-migration.md#final-synchronisation-and-cutover)
   after testing and final confirmation. Keep one authoritative writer; account
   for writes accepted after switching in any recovery plan.

@@ -12,7 +12,8 @@
 | `--to-64bit` | Attempt an experimental crossgrade from 32-bit to 64-bit. |
 | `--support-report [RUN_DIRECTORY]` | Print a minimal report for a public bug report. Review it before posting. |
 | `--upgrade-report` | Collect a read-only developer handover with package, repository, configuration and application facts. |
-| `--manifest` / `--manifest-json` | Report applications, service state, websites, mail storage and migration hints as text or JSON (dpkg or RPM). |
+| `--manifest` / `--manifest-json` | Report applications, service state, websites, mail storage and migration hints as text or JSON (dpkg or RPM). Works without root; see [manifest privileges](manifest.md). |
+| `--unprivileged` | Force reduced collection, which is automatic for non-root users. Keeps the account's existing permissions; see [coverage differences](manifest.md). |
 | `--redact` | Add to `--manifest` or `--manifest-json` to replace server/website identifiers while retaining general inventory facts. Review before posting; see [inventory privacy](inventory.md). |
 | `--show-changes` | Report differences from the pre-upgrade configuration and system state. |
 | `--list-leftover-packages` | List packages left over from older releases or architectures. |

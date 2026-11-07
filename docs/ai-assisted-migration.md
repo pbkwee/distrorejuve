@@ -51,11 +51,12 @@ env -u DR_ACTION -u BASH_ENV -u ENV \
   /bin/bash /path/to/reviewed/distrorejuve.sh --unprivileged --manifest-json > manifest.json
 ```
 
-Use a trusted shell and command path; see the
-[collection precautions](upgrade-and-migration.md#collect-evidence).
-This uses reduced collection, even if your shell is root. It does not drop root
-privileges. Missing or unreadable information will remain unknown. See
-[manifest privileges](manifest.md). Text from `--manifest` is also accepted.
+Run this as your normal user; sudo is not needed. Use a trusted shell and command
+path; see the [collection precautions](upgrade-and-migration.md#collect-evidence).
+This command forces reduced collection, even when run as root, and keeps the
+account's existing permissions. Missing or skipped information remains unknown.
+See [manifest privileges](manifest.md) for the coverage comparison and fuller root
+collection. Text from `--manifest` is also accepted.
 
 Check the output for collection warnings and sensitive details. Share it through
 a private channel you trust for AI processing. Keep manifests out of public

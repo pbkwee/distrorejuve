@@ -198,3 +198,53 @@ new-account review prerequisite is RimuHosting's requirement supplied for this
 workflow; internal review checks remain with support. Authenticated key-screen
 details and live provisioning were not tested. Client command/configuration
 behaviour was checked against the local RimuHosting API README and source.
+
+## Recover access with rescue boot
+
+For an existing RimuHosting VM, the API client's `vmctl.py rescueboot` can give
+an assistant temporary root SSH access when the installed OS is inaccessible.
+Use a client revision with this command and confirm the server has the
+rescue-boot API endpoint deployed. Verify the intended API account, exact order
+ID and addresses. The job must authorize the service interruption and repairs;
+API credentials or assessment permission alone do not authorize a restart.
+
+From the trusted operator machine, with that client's protected configuration,
+replace the example order ID and public-key path:
+
+```bash
+python3 vmctl.py rescueboot --order_oid 123456 --ssh_public_key_file /path/to/job-key.pub
+```
+
+Alternatively, pass the public key text directly:
+
+```bash
+python3 vmctl.py rescueboot --order_oid 123456 --ssh_public_key 'ssh-ed25519 AAAA… job-key'
+```
+
+The key text above is a placeholder; supply a complete valid public key.
+Repeat either option for multiple keys. `--is_add_users_ssh_keys` also includes
+the account's saved keys; enable it only when that additional access is intended.
+One-off keys are installed in rescue, not saved to the account or installed OS.
+Keep the matching private key on the connecting machine.
+
+The result supplies `ssh_host`, `ssh_port`, `rescue_messages` and
+`running_vps_info.is_rescue_boot`. Connect as root after verifying rescue's
+separate host identity. Follow [rescue access recovery](rescue-access.md) to
+identify and mount the installed root, then repair the approved keys,
+permissions, SSH settings or networking there. This is a recovery option for
+assessments and upgrades, not an automatic repair or a rollback facility.
+
+After leaving any chroot and syncing/unmounting the filesystems you added,
+return to the installed OS through the host-controlled API restart:
+
+```bash
+python3 vmctl.py restart --order_oid 123456
+python3 vmctl.py status --order_oid 123456
+```
+
+Use this restart rather than relying on `reboot` inside rescue. Status can reuse
+inventory up to five minutes old; establish actual state after a timeout before
+retrying. Verify a fresh SSH login and normal services after boot. See the
+[API client's rescue instructions](https://github.com/pbkwee/RimuHostingAPI#rescue-boot-for-repairs)
+for the current contract. If the endpoint is unavailable, use the provider's
+supported console/support recovery route instead.

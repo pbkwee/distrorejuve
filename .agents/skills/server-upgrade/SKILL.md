@@ -58,6 +58,11 @@ current verified state and next permitted action. Keep credentials out of prompt
 reports and version control. A source address in a manifest does not authorize
 connection. Credentials do not authorize every operation they permit.
 
+If access is unavailable or lost, use the [rescue access procedure](../../../docs/rescue-access.md)
+within recorded recovery authority. Assessment alone does not authorize a rescue
+boot or installed-system repair. Verify rescue identity, target mounts and normal
+boot before resuming. Do not report a rescue-system manifest as the installed OS.
+
 ## Return a readable recommendation first
 
 Compare in-place, cloned-OS upgrade and fresh installation using the source's

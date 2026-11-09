@@ -39,8 +39,9 @@ class Usrmerge(unittest.TestCase):
 
     def run_fixture(self, action='check_usrmerge', extra=''):
         names = ['usrmerge_output_executable_origin', 'usrmerge_collision_is_repairable', 'usrmerge_output_collisions',
-                 'usrmerge_check_collisions', 'usrmerge_archive_collisions', 'check_usrmerge',
-                 'upgrade_print_check']
+                 'usrmerge_check_collisions', 'usrmerge_archive_collisions', 'usrmerge_prepare_skip_marker',
+                 'usrmerge_check_mounts', 'usrmerge_check_upgrade_path', 'usrmerge_recover_pending',
+                 'check_usrmerge', 'upgrade_print_check', 'is_distro_name_older', 'upgrade_check_path']
         functions = '\n'.join(declaration(name) for name in names)
         functions = functions.replace('directory="/$name"', 'directory="$fixture_root/$name"')
         functions = functions.replace('target="/usr/$name/', 'target="$fixture_root/usr/$name/')
@@ -53,7 +54,9 @@ class Usrmerge(unittest.TestCase):
 fixture_root={str(self.root)!r}
 fixture_uid=0
 fixture_left_status=1; fixture_left_owner=''; fixture_right_status=0; fixture_right_owner=example-package
-unset DR_PREFER_PACKAGED_USRMERGE_FILES
+unset DR_PREFER_PACKAGED_USRMERGE_FILES DR_ACCEPT_USRMERGE_SKIP_MARKER DR_REFRESH_STALE_SYSTEMD
+ALL_DEBIAN='bullseye bookworm trixie'
+ALL_UBUNTU='bionic focal groovy hirsute jammy noble'
 packages_output_file_owner() {{
   case "$1" in
     "$fixture_root/bin/replace"|/bin/replace) printf '%s' "$fixture_left_owner"; return "$fixture_left_status";;
@@ -84,6 +87,8 @@ dpkg() {{
 }}
 usrmerge_is_complete() {{ test -f "$fixture_root/merged"; }}
 pause_check() {{ :; }}
+mountpoint() {{ return 32; }}
+systemd_prepare_usrmerge_init() {{ :; }}
 apt_get_update() {{ echo unexpected-apt-update >> "$fixture_root/events"; return 99; }}
 apt_get_install() {{ echo unexpected-apt-install >> "$fixture_root/events"; return 99; }}
 apt-get() {{ echo unexpected-apt >> "$fixture_root/events"; return 99; }}
@@ -117,6 +122,120 @@ apt-get() {{ echo unexpected-apt >> "$fixture_root/events"; return 99; }}
         result = self.run_fixture()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.event_lines(), ['baseline', 'convert', 'configure'])
+
+    def test_generic_marker_is_archived_automatically_before_conversion(self):
+        self.source.unlink()
+        marker = self.root / 'skip-conversion'
+        content = 'this system will not be supported in the future\n'
+        marker.write_text(content)
+        marker.chmod(0o644)
+        result = self.run_fixture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
+        saved = list(self.root.glob('baseline/*.usrmerge/skip-marker.*/unsupported-skip-usrmerge-conversion'))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].read_text(), content)
+        self.assertEqual(saved[0].parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.event_lines(), ['baseline', 'convert', 'configure'])
+
+    def test_custom_marker_needs_explicit_acceptance_and_preserves_contents(self):
+        self.source.unlink()
+        marker = self.root / 'skip-conversion'
+        marker.write_text('custom boot requirements; review before converting\n')
+        marker.chmod(0o644)
+        for action in ('usrmerge_check_upgrade_path debian bookworm trixie', 'check_usrmerge'):
+            result = self.run_fixture(action=action)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('DR_ACCEPT_USRMERGE_SKIP_MARKER=true', result.stderr)
+            self.assertTrue(marker.exists())
+            self.assertEqual(self.event_lines(), [])
+        result = self.run_fixture(extra='DR_ACCEPT_USRMERGE_SKIP_MARKER=true')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        saved = next(self.root.glob('baseline/*.usrmerge/skip-marker.*/unsupported-skip-usrmerge-conversion'))
+        self.assertEqual(saved.read_text(), 'custom boot requirements; review before converting\n')
+
+    def test_custom_marker_preflight_suggests_the_original_command_with_acceptance(self):
+        marker = self.root / 'skip-conversion'
+        marker.write_text('review the custom reason\n')
+        marker.chmod(0o644)
+        result = self.run_fixture(action='upgrade_check_path debian bookworm trixie', extra='''
+upgrade_panel_refuse_generic() { :; }
+upgrade_output_crossgrade_release() { return 0; }
+upgrade_output_compatibility_issues() { :; }
+dpkg() { echo amd64; }
+upgrade_retry_command=(bash /root/distrorejuve.sh --to-debian-release 13)
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Suggested retry: DR_ACCEPT_USRMERGE_SKIP_MARKER=true bash /root/distrorejuve.sh --to-debian-release 13', result.stderr)
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.event_lines(), [])
+
+    def test_marker_symlinks_and_untrusted_permissions_block_even_with_acceptance(self):
+        self.source.unlink()
+        marker = self.root / 'skip-conversion'
+        other = self.root / 'other'
+        other.write_text('this system will not be supported in the future\n')
+        marker.symlink_to(other)
+        result = self.run_fixture(extra='DR_ACCEPT_USRMERGE_SKIP_MARKER=true')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(marker.is_symlink())
+        marker.unlink()
+        marker.write_text(other.read_text())
+        marker.chmod(0o644)
+        marker.chmod(0o666)
+        result = self.run_fixture(extra='DR_ACCEPT_USRMERGE_SKIP_MARKER=true')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.event_lines(), [])
+        self.assertTrue(marker.exists())
+
+    def test_marker_archive_failure_and_concurrent_change_stop_before_conversion(self):
+        self.source.unlink()
+        marker = self.root / 'skip-conversion'
+        for extra in ('mv() { return 25; }',
+                      'record_config_state() { printf changed > "$fixture_root/skip-conversion"; }',
+                      'record_config_state() { chmod g+w "$fixture_root/skip-conversion"; }'):
+            marker.write_text('this system will not be supported in the future\n')
+            marker.chmod(0o644)
+            result = self.run_fixture(extra=extra)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(marker.exists())
+            self.assertNotIn('convert', self.event_lines())
+
+    def test_debian_and_ubuntu_readiness_report_default_preparation_without_mutations(self):
+        marker = self.root / 'skip-conversion'
+        marker.write_text('this system will not be supported in the future\n')
+        marker.chmod(0o644)
+        for family, current, target in [('debian', 'bullseye', 'bookworm'),
+                                        ('debian', 'bookworm', 'trixie'),
+                                        ('debian', 'bookworm', 'bookworm'),
+                                        ('ubuntu', 'focal', 'jammy'), ('ubuntu', 'jammy', 'noble')]:
+            with self.subTest(family=family, target=target):
+                result = self.run_fixture(action=f'usrmerge_check_upgrade_path {family} {current} {target}')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('will archive the skip-conversion marker', result.stderr)
+                self.assertTrue(marker.exists())
+                self.assertTrue(self.source.exists())
+                self.assertEqual(self.event_lines(), [])
+        result = self.run_fixture(action='usrmerge_check_upgrade_path ubuntu bionic focal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('skip-conversion marker', result.stderr)
+
+    def test_mount_blocker_reports_inspection_and_unmount_commands_without_mutation(self):
+        result = self.run_fixture(extra='mountpoint() { [ "${!#}" = /lib/modules ]; }')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('findmnt --mountpoint /lib/modules', result.stderr)
+        self.assertIn('sudo umount -- /lib/modules', result.stderr)
+        self.assertEqual(self.event_lines(), [])
+        self.assertTrue(self.source.exists())
+
+    def test_verified_init_preparation_runs_after_conversion_and_on_completed_retry(self):
+        extra = 'systemd_prepare_usrmerge_init() { test -f "$fixture_root/merged" || return 99; echo init >> "$fixture_root/events"; }'
+        result = self.run_fixture(extra=extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.event_lines(), ['baseline', 'convert', 'configure', 'init'])
+        result = self.run_fixture(action='usrmerge_recover_pending', extra=extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.event_lines(), ['baseline', 'convert', 'configure', 'init', 'init'])
 
     def test_large_packaged_executable_uses_separate_bound_and_rejects_modification(self):
         payload = b"packaged executable\n" * 200000
@@ -166,9 +285,10 @@ upgrade_precondition_checks() { :; }
 upgrade_check_path() { usrmerge_check_collisions; }
 dpkg() { case "$*" in --print-architecture) echo amd64;; --audit) :;; *) return 99;; esac; }
 ''')
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.source.exists())
         self.assertEqual(self.event_lines(), [])
+        self.assertIn('will archive unowned', result.stderr)
         self.assertIn('Read-only review', result.stdout)
 
     def test_modified_or_ambiguous_files_never_reach_backup_or_converter(self):

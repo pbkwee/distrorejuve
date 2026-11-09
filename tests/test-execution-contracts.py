@@ -37,7 +37,7 @@ id() { echo 0; }
 
 @unittest.skipUnless(pathlib.Path('/usr/lib/systemd/systemd').is_file(), 'requires a local executable fixture path')
 class StaleInit(unittest.TestCase):
-    names = ['systemd_verify_stale_usrmerge_init', 'systemd_refresh_stale_usrmerge_init', 'check_systemd_install_matches_init']
+    names = ['systemd_verify_stale_usrmerge_init', 'systemd_refresh_stale_usrmerge_init', 'check_systemd_install_matches_init', 'systemd_prepare_usrmerge_init']
 
     def test_readiness_explains_verified_remedy_without_mutation(self):
         r = run(self.names, SYSTEMD + '\ncheck_systemd_install_matches_init')
@@ -68,6 +68,38 @@ dpkg-query() {
 systemd_refresh_stale_usrmerge_init
 """)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_normal_execution_refreshes_verified_stale_init_by_default(self):
+        r = run(self.names, SYSTEMD + '\nsystemd_prepare_usrmerge_init')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), 'MUTATED')
+        self.assertIn('Refreshing verified stale', r.stderr)
+
+    def test_readonly_preparation_reports_refresh_without_mutating(self):
+        r = run(self.names, SYSTEMD + '\nsystemd_prepare_usrmerge_init review')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('MUTATED', r.stdout)
+        self.assertIn('refreshed automatically', r.stderr)
+
+    def test_disabled_or_unverified_refresh_stops_with_remedy(self):
+        for change in ('DR_REFRESH_STALE_SYSTEMD=false', 'fixture_hash=bbb',
+                       'dpkg() { echo audit-error; }'):
+            with self.subTest(change=change):
+                r = run(self.names, SYSTEMD + '\n' + change + '\nsystemd_prepare_usrmerge_init')
+                self.assertNotEqual(r.returncode, 0)
+                self.assertNotIn('MUTATED', r.stdout)
+                self.assertTrue('--refresh-stale-systemd' in r.stderr or 'dpkg --audit' in r.stderr)
+
+    def test_automatic_refresh_failure_retains_status_and_stops(self):
+        r = run(self.names, SYSTEMD + '\nfixture_refresh=23\nsystemd_prepare_usrmerge_init')
+        self.assertEqual(r.returncode, 23, r.stderr)
+        self.assertIn('Automatic PID 1 refresh failed', r.stderr)
+
+    def test_canonical_and_other_deleted_paths_are_not_automatically_refreshed(self):
+        for path in ('/usr/lib/systemd/systemd', '/usr/lib/systemd/systemd (deleted)'):
+            r = run(self.names, SYSTEMD + '\nfixture_pid=' + shlex.quote(path) + '\nsystemd_prepare_usrmerge_init')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn('MUTATED', r.stdout)
 
     def test_refresh_failure_and_unchanged_path_fail(self):
         for change in ('fixture_refresh=1', 'systemctl() { return 0; }'):

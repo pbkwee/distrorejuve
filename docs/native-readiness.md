@@ -24,10 +24,13 @@ raw configuration diagnostics are not copied into a shareable report.
 The precise stale path `/lib~~delete~usrmerge~~/systemd/systemd (deleted)` is
 recognized only when `/sbin/init` selects a canonical systemd executable, its
 owning `systemd` package is configured, package audit is clean, and its SHA256
-matches `/proc/1/exe`. A read-only check explains the remedy and stops.
-Unrecognized paths, missing metadata or different binary bytes remain blocked.
+matches `/proc/1/exe`. Upgrade execution refreshes this verified state automatically
+with `DR_REFRESH_STALE_SYSTEMD=true`, the default. Read-only readiness explains
+that planned refresh and leaves PID 1 unchanged. Unrecognized usrmerge states,
+missing metadata or different binary bytes remain blocked with inspection commands.
 
-During approved execution, use:
+Set `DR_REFRESH_STALE_SYSTEMD=false` to require a separate refresh. During approved
+execution, use:
 
 ```bash
 sudo bash distrorejuve.sh --refresh-stale-systemd
@@ -35,8 +38,9 @@ sudo bash distrorejuve.sh --refresh-stale-systemd
 
 This separate root-only logged action repeats the identity and package checks,
 runs a bounded `systemctl daemon-reexec`, and verifies the canonical running path,
-unchanged executable hash and clean package audit afterward. It does not reexec
-from a manifest or readiness request. Repeat normal readiness checks before
+unchanged executable hash and clean package audit afterward. Both automatic and
+explicit recovery use these same checks. Failed refresh stops package work and
+retains the failure status. Repeat readiness after a separate refresh before
 continuing the recorded release stage. The operation changes PID 1; it requires
 the job's execution scope and is never a fixture test on a real server.
 

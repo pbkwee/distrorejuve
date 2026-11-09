@@ -10,6 +10,7 @@ function environment_validate_settings() {
   for name in DR_ALLOW_BACKPORTS DR_ALLOW_CROSSGRADE_BLOCKERS DR_ALLOW_UNAUTHENTICATED_ARCHIVES \
       DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_HTTP DR_MANIFEST_MAIL_METRICS \
       DR_UPGRADE_MANIFEST DR_PRECOMPILED_LOCALES DR_PREFER_PACKAGED_USRMERGE_FILES \
+      DR_ACCEPT_USRMERGE_SKIP_MARKER DR_REFRESH_STALE_SYSTEMD \
       DR_PURGE_INCOMPATIBLE_PACKAGES DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES DR_REMOVE_X11_PACKAGES \
       DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK DR_SKIP_DISK_SPACE_CHECK DR_SKIP_DOVECOT_MIGRATION_CHECK DR_MIGRATE_PDNS_ROLE_SETTINGS \
       DR_SKIP_KERNEL_CHECK DR_SKIP_OLD_PACKAGE_CHECK DR_SKIP_X11_CHECK DR_UNPRIVILEGED; do
@@ -1624,16 +1625,21 @@ function apt_space_output_plan_records() {
   awk '
     /^Inst / {
       # APT 2.2: Inst sample [1.0] (2.0 Debian:stable [amd64]) [perl:amd64 ]
-      # -> sample,2.0,amd64,1.0; [] is also a valid package-list annotation.
-      # Reject malformed/trailing text rather than broadening the complete-plan gate.
+      # APT 2.6 also emits [perl:amd64 on perlapi-5.36.0:amd64] before that list.
+      # Both yield sample,2.0,amd64,1.0; [] is a valid empty package list.
       line=$0
       if (match(line, /\)[ \t]+\[/)) {
         annotation=substr(line,RSTART+RLENGTH-1)
-        if (annotation !~ /^\[[^][]*\]$/) { bad=1; next }
-        sub(/^\[/,"",annotation); sub(/\]$/,"",annotation)
-        sub(/^[ \t]+/,"",annotation); sub(/[ \t]+$/,"",annotation)
-        n=split(annotation, packages, /[ \t]+/)
-        for (i=1;i<=n;i++) if (packages[i] !~ /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/) bad=1
+        package_pattern="[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?"
+        while (match(annotation, "^\\[" package_pattern " on " package_pattern "\\]([ \t]+|$)"))
+          annotation=substr(annotation,RLENGTH+1)
+        if (annotation != "") {
+          if (annotation !~ /^\[[^][]*\]$/) { bad=1; next }
+          sub(/^\[/,"",annotation); sub(/\]$/,"",annotation)
+          sub(/^[ \t]+/,"",annotation); sub(/[ \t]+$/,"",annotation)
+          n=split(annotation, packages, /[ \t]+/)
+          for (i=1;i<=n;i++) if (packages[i] == "on" || packages[i] !~ /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/) bad=1
+        }
         sub(/\)[ \t]+\[.*$/, ")", line)
       }
       name=$2; old="-"; version=line; arch=line
@@ -6099,7 +6105,7 @@ function upgrade_check_path() {
   local family=$1 current=$2 target=$3 issues action rule boundary packages remedy arch crossgrade_release blocked=false
   local purge=${DR_PURGE_INCOMPATIBLE_PACKAGES:-false} retry_purge=false retry_crossgrade=false
   # The collision checker records whether the packaged-file preference would help.
-  local usrmerge_preference_needed=false
+  local usrmerge_preference_needed=false usrmerge_marker_acceptance_needed=false
   local remove_obsolete=${DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES:-true} obsolete
   local releases
   case "$family" in debian) releases=$ALL_DEBIAN;; ubuntu) releases=$ALL_UBUNTU;; *) return 1;; esac
@@ -6159,12 +6165,13 @@ function upgrade_check_path() {
     fi
     if [ "${4:-requested}" = requested ]; then
       upgrade_preflight_blocked=true
-      if [ "${#upgrade_retry_command[@]}" -gt 0 ] && { $retry_purge || $usrmerge_preference_needed || $retry_crossgrade; }; then
+      if [ "${#upgrade_retry_command[@]}" -gt 0 ] && { $retry_purge || $usrmerge_preference_needed || $usrmerge_marker_acceptance_needed || $retry_crossgrade; }; then
         printf '%s\n' 'dss:stage: Review the choices above before retrying; resolve any remaining manual checks.' >&2
         {
           printf 'dss:stage: Suggested retry: '
           if $purge || $retry_purge; then printf 'DR_PURGE_INCOMPATIBLE_PACKAGES=true '; fi
           if "${DR_PREFER_PACKAGED_USRMERGE_FILES:-false}" || $usrmerge_preference_needed; then printf 'DR_PREFER_PACKAGED_USRMERGE_FILES=true '; fi
+          if $usrmerge_marker_acceptance_needed || "${DR_ACCEPT_USRMERGE_SKIP_MARKER:-false}"; then printf 'DR_ACCEPT_USRMERGE_SKIP_MARKER=true '; fi
           if [ -n "${DR_ACTION:-}" ]; then printf 'DR_ACTION=%q ' "$DR_ACTION"; fi
           printf '%q' "${upgrade_retry_command[0]}"
           printf ' %q' "${upgrade_retry_command[@]:1}"
@@ -6699,6 +6706,9 @@ function usrmerge_check_collisions() {
       if [ "$action" = archive ]; then
         echo 'dss:error: DR_PREFER_PACKAGED_USRMERGE_FILES=false requires manual resolution; true archives the unowned executable and keeps the verified packaged counterpart.' >&2
         usrmerge_preference_needed=true
+      else
+        printf 'dss:error: Inspect conflicting paths: ls -ld -- %q %q; dpkg-query -S -- %q %q\n' "$source" "$target" "$source" "$target" >&2
+        echo 'dss:error: Back up both copies and resolve which file must serve both paths, then retry. Unverified content/type conflicts require that choice before conversion.' >&2
       fi
       blocked=true
     fi
@@ -6706,17 +6716,81 @@ function usrmerge_check_collisions() {
   ! $blocked
 }
 
-function usrmerge_check_upgrade_path() {
-  local family=$1 current=$2 target=$3 boundary
-  case "$family" in debian) boundary=bookworm;; ubuntu) boundary=hirsute;; *) return 1;; esac
-  is_distro_name_older "$current" "$target" || return 0
-  is_distro_name_older "$target" "$boundary" && return 0
-  if { [ -e "/etc/unsupported-skip-usrmerge-conversion" ] || [ -L "/etc/unsupported-skip-usrmerge-conversion" ]; } && ! usrmerge_is_complete; then
-    echo 'dss:error: Requested path requires usrmerge (merged /usr directories), but /etc/unsupported-skip-usrmerge-conversion disables it; review that marker manually before upgrading.' >&2
-    echo 'dss:error: usrmerge moves system files from /bin, /sbin and /lib into /usr and replaces those directories with symbolic links. Review why conversion was disabled before removing the marker.' >&2
+# Only the standard provisioning warning is accepted automatically. Preserve the
+# marker beside the original baseline before allowing the packaged converter.
+function usrmerge_prepare_skip_marker() {
+  local mode=${1:-review} accept=${DR_ACCEPT_USRMERGE_SKIP_MARKER:-false}
+  local marker=/etc/unsupported-skip-usrmerge-conversion metadata uid permissions status checksum baseline parent directory
+  case "$mode:$accept" in review:true|review:false|apply:true|apply:false) :;; *) return 1;; esac
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  if [ ! -f "$marker" ] || [ -L "$marker" ]; then
+    echo "dss:error: Cannot automatically archive non-regular/symlink usrmerge marker $marker. Inspect it with: ls -ld -- $marker; resolve its target/type manually before retrying." >&2
     return 1
   fi
-  usrmerge_check_collisions
+  metadata=$(stat -c '%u %a' -- "$marker") || return 1
+  read -r uid permissions <<< "$metadata"
+  case "$permissions" in ''|*[!0-7]*) return 1;; esac
+  if [ "$uid" != 0 ] || [ "$((8#$permissions & 0022))" -ne 0 ]; then
+    echo "dss:error: Usrmerge marker must be root-owned without group/other write permission. Review: stat -- $marker; after verifying its provenance, correct ownership/permissions before retrying." >&2
+    return 1
+  fi
+  if cmp -s -- "$marker" <(printf '%s\n' 'this system will not be supported in the future'); then :
+  else
+    status=$?
+    [ "$status" -eq 1 ] || { echo "dss:error: Cannot read usrmerge marker $marker; resolve the read error before retrying." >&2; return 1; }
+    if ! $accept; then
+      echo "dss:error: Usrmerge was disabled with a custom/empty marker. Inspect locally: sudo cat -- $marker" >&2
+      echo 'dss:error: After resolving its reason, retry the upgrade with DR_ACCEPT_USRMERGE_SKIP_MARKER=true to archive that marker and accept conversion. File, mount and package checks remain enabled.' >&2
+      usrmerge_marker_acceptance_needed=true
+      return 1
+    fi
+  fi
+  if [ "$mode" = review ]; then
+    echo 'dss:info: Usrmerge will archive the skip-conversion marker and convert the directory layout during execution; this check leaves it unchanged.' >&2
+    return 0
+  fi
+  checksum=$(sha256sum -- "$marker") || return 1
+  record_config_state >&2 || return 1
+  baseline=$(config_state_output_baseline) || return 1
+  parent="$baseline.usrmerge"
+  [ ! -L "$parent" ] || return 1
+  mkdir -p -- "$parent" && chmod u=rwx,go= -- "$parent" || return 1
+  directory=$(umask 077; mktemp -d "$parent/skip-marker.XXXXXX") || return 1
+  if [ -L "$marker" ] || [ "$(stat -c '%u %a' -- "$marker")" != "$metadata" ] ||
+      ! printf '%s\n' "$checksum" | sha256sum --check --status; then
+    echo 'dss:error: Usrmerge marker changed during preparation; inspect it before retrying.' >&2
+    return 1
+  fi
+  mv --no-clobber -- "$marker" "$directory/unsupported-skip-usrmerge-conversion" || return 1
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] && [ -f "$directory/unsupported-skip-usrmerge-conversion" ] || return 1
+  echo "dss:stage: Archived usrmerge skip-conversion marker at $directory/unsupported-skip-usrmerge-conversion" >&2
+}
+
+function usrmerge_check_mounts() {
+  local directory blocked=false
+  command -v mountpoint >/dev/null 2>&1 || return 0
+  for directory in /bin /sbin /lib /lib32 /lib64 /libo32 /libx32 /lib/modules; do
+    [ -L "$directory" ] && continue
+    if mountpoint -q -- "$directory"; then
+      echo "dss:error: Usrmerge cannot convert while $directory is a mount point. Inspect: findmnt --mountpoint $directory" >&2
+      echo "dss:error: Review the mount's boot/kernel/service requirements; unmount it with sudo umount -- $directory only when appropriate, then retry. No automatic unmount was attempted." >&2
+      blocked=true
+    fi
+  done
+  ! $blocked
+}
+
+function usrmerge_check_upgrade_path() {
+  local family=$1 target=$3 boundary blocked=false
+  case "$family" in debian) boundary=bookworm;; ubuntu) boundary=hirsute;; *) return 1;; esac
+  is_distro_name_older "$target" "$boundary" && return 0
+  systemd_prepare_usrmerge_init review || blocked=true
+  if ! usrmerge_is_complete; then
+    usrmerge_prepare_skip_marker review || blocked=true
+    usrmerge_check_mounts || blocked=true
+    usrmerge_check_collisions || blocked=true
+  fi
+  ! $blocked
 }
 
 function usrmerge_archive_collisions() {
@@ -6764,12 +6838,12 @@ function check_usrmerge() {
   else status=$?; [ "$status" -eq 1 ] || return "$status"; info=; fi
   if usrmerge_is_complete; then
     case "$info" in *' ok unpacked'|*' ok half-configured') dpkg --configure usrmerge || return $?;; esac
-    return 0
-  fi
-  if [ -e "/etc/unsupported-skip-usrmerge-conversion" ] || [ -L "/etc/unsupported-skip-usrmerge-conversion" ]; then
-    echo 'dss:error: usrmerge conversion was explicitly disabled; review /etc/unsupported-skip-usrmerge-conversion manually.' >&2; return 1
+    systemd_prepare_usrmerge_init
+    return $?
   fi
   pause_check || return 1
+  usrmerge_prepare_skip_marker review || return 1
+  usrmerge_check_mounts || return 1
   usrmerge_check_collisions || return 1
   collisions=$(usrmerge_output_collisions) || return 1
   if [ -n "$collisions" ]; then
@@ -6777,11 +6851,17 @@ function check_usrmerge() {
     collisions=$(usrmerge_output_collisions) || return 1
     [ -z "$collisions" ] || { echo 'dss:error: New usrmerge collisions appeared; no converter or APT operation attempted. Review the saved attempt before retrying.' >&2; return 1; }
   fi
+  usrmerge_prepare_skip_marker apply || { echo 'dss:error: Cannot archive usrmerge marker; conversion stopped. Review the marker and reported archive path before retrying.' >&2; return 1; }
   if [ -x "/usr/lib/usrmerge/convert-usrmerge" ]; then
     # Retry the packaged converter before APT can configure other packages on a partial merge.
     files=$(dpkg-query -L usrmerge) || return 1
     grep -Fxq -- "/usr/lib/usrmerge/convert-usrmerge" <<< "$files" || return 1
-    "/usr/lib/usrmerge/convert-usrmerge" || return $?
+    if "/usr/lib/usrmerge/convert-usrmerge"; then :
+    else
+      status=$?
+      echo 'dss:error: Resolve the converter error above, then run: sudo /usr/lib/usrmerge/convert-usrmerge && sudo dpkg --configure usrmerge. Finish conversion before further package upgrades.' >&2
+      return "$status"
+    fi
     usrmerge_is_complete || { echo 'dss:error: usrmerge converter returned without canonical /bin, /sbin and /lib links; inspect manually before package work.' >&2; return 1; }
     # Configuring an already configured package fails, even after a successful filesystem repair.
     case "$info" in *' ok unpacked'|*' ok half-configured') dpkg --configure usrmerge || return $?;; esac
@@ -6789,9 +6869,15 @@ function check_usrmerge() {
     case "$info" in *' ok installed'|*' ok unpacked'|*' ok half-configured') echo 'dss:error: Installed/partial usrmerge has no executable packaged converter; restore the package manually before further package work.' >&2; return 1;; esac
     # Restored systems may have no indexes, or source preparation may have changed mirrors.
     apt_get_update || return $?
-    apt_get_install usrmerge || return $?
+    if apt_get_install usrmerge; then :
+    else
+      status=$?
+      echo 'dss:error: Usrmerge installation/conversion failed. If the converter is installed, resolve its first error and run: sudo /usr/lib/usrmerge/convert-usrmerge && sudo dpkg --configure usrmerge; then retry the upgrade.' >&2
+      return "$status"
+    fi
   fi
   usrmerge_is_complete || { echo 'dss:error: Usrmerge link check failed for the expected /usr layout; inspect /bin, /sbin and /lib* before package work.' >&2; return 1; }
+  systemd_prepare_usrmerge_init || return $?
   echo 'dss:trace:check_usrmerge completed.' >&2
 }
 
@@ -6801,7 +6887,7 @@ function usrmerge_recover_pending() {
   if info=$(dpkg-query -W -f='${Status}' usrmerge 2>/dev/null); then :
   else status=$?; [ "$status" -eq 1 ] && return 0; return "$status"; fi
   case "$info" in *' ok unpacked'|*' ok half-configured') check_usrmerge;;
-    *' ok installed') usrmerge_is_complete || check_usrmerge;;
+    *' ok installed') check_usrmerge;;
     *) return 0;;
   esac
 }
@@ -7291,7 +7377,7 @@ function check_systemd_install_matches_init() {
     '/lib~~delete~usrmerge~~/systemd/systemd (deleted)')
       if systemd_verify_stale_usrmerge_init; then
         echo 'dss:error: Verified stale PID 1 path after usrmerge. During approved execution run: sudo bash distrorejuve.sh --refresh-stale-systemd; then repeat readiness checks. This check did not change PID 1.' >&2
-      else echo 'dss:error: Stale usrmerge PID 1 could not be independently verified; inspect binaries and package health before continuing.' >&2; fi
+      else echo 'dss:error: Stale usrmerge PID 1 could not be independently verified. Inspect: readlink /proc/1/exe; sha256sum /proc/1/exe /usr/lib/systemd/systemd; dpkg --audit. Repair package/init state before retrying.' >&2; fi
       return 1;;
   esac
   # Package upgrades can unlink the running binary; its old path still identifies the init family.
@@ -7350,13 +7436,33 @@ function systemd_refresh_stale_usrmerge_init() {
   command -v timeout >/dev/null 2>&1 || return 1
   systemd_verify_stale_usrmerge_init || { echo 'dss:error: Refusing PID 1 refresh: the precise usrmerge state, executable identity or package health was not verified.' >&2; return 1; }
   before=$(sha256sum /proc/1/exe) || return 1
-  LC_ALL=C timeout 30 systemctl daemon-reexec || return 1
+  LC_ALL=C timeout 30 systemctl daemon-reexec || return $?
   selected=$(readlink -f /sbin/init) || return 1
   [ "$(readlink /proc/1/exe)" = "$selected" ] || { echo 'dss:error: PID 1 did not refresh to the selected canonical path.' >&2; return 1; }
   after=$(sha256sum /proc/1/exe) || return 1
   [ "${before%% *}" = "${after%% *}" ] || return 1
   audit=$(LC_ALL=C dpkg --audit) && [ -z "$audit" ] || return 1
   check_systemd_install_matches_init
+}
+
+# Readiness describes the verified repair; only upgrade execution reexecutes PID 1.
+function systemd_prepare_usrmerge_init() {
+  local mode=${1:-apply} refresh=${DR_REFRESH_STALE_SYSTEMD:-true} running status
+  case "$mode:$refresh" in review:true|review:false|apply:true|apply:false) :;; *) return 1;; esac
+  running=$(readlink /proc/1/exe) || { echo 'dss:error: Cannot inspect PID 1 before usrmerge recovery; review /proc/1/exe and running init.' >&2; return 1; }
+  [ "$running" = '/lib~~delete~usrmerge~~/systemd/systemd (deleted)' ] || return 0
+  if ! $refresh || ! systemd_verify_stale_usrmerge_init; then
+    check_systemd_install_matches_init
+    return 1
+  fi
+  if [ "$mode" = review ]; then
+    echo 'dss:info: Verified stale usrmerge PID 1 will be refreshed automatically during execution (DR_REFRESH_STALE_SYSTEMD=true); this check leaves PID 1 unchanged.' >&2
+    return 0
+  fi
+  echo 'dss:stage: Refreshing verified stale systemd PID 1 after usrmerge' >&2
+  if systemd_refresh_stale_usrmerge_init; then return 0; else status=$?; fi
+  echo 'dss:error: Automatic PID 1 refresh failed; inspect the refresh error and package/service state before retrying or rebooting.' >&2
+  return "$status"
 }
 
 # shellcheck shell=bash
@@ -14726,10 +14832,10 @@ function manifest_compare_baseline() {
 
 function upgrade_print_check() {
   local backend family current target native audit status=0 identity id version variant
-  # Checks must report removals/conversions as blockers, never apply inherited repair controls.
+  # Checks describe automatic usrmerge preparation without applying repairs/removals.
   local DR_REMOVE_X11_PACKAGES=false DR_PURGE_INCOMPATIBLE_PACKAGES=false DR_ALLOW_CROSSGRADE_BLOCKERS=false
   local UPGRADE_CROSSGRADE=false
-  local DR_PREFER_PACKAGED_USRMERGE_FILES=false DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=false
+  local DR_REMOVE_OBSOLETE_CROSSGRADE_PACKAGES=false
   local DR_SKIP_DOVECOT_MIGRATION_CHECK=false DR_SKIP_KERNEL_CHECK=false DR_SKIP_X11_CHECK=false
   local DR_SKIP_DISK_SPACE_CHECK=false DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK=false DR_ALLOW_BACKPORTS=false
   backend=$(packages_output_backend) || { echo 'dss:error: Cannot identify the package backend.' >&2; return 1; }

@@ -21,7 +21,17 @@ class PackageCompatibility(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             plan = pathlib.Path(directory) / 'plan'
             for suffix, allowed in [('', True), (' []', True), (' [perl:amd64 ]', True),
-                                    (' [perl:amd64 libc6:amd64 ]', True), (' [perl:amd64] junk', False),
+                                    (' [perl:amd64 libc6:amd64 ]', True),
+                                    (' [perl:amd64 on perlapi-5.36.0:amd64] [perl:amd64 ]', True),
+                                    (' [perl:amd64 on perlapi-5.36.0:amd64]', True),
+                                    (' [perl:amd64 on perlapi-5.36.0:amd64] []', True),
+                                    (' [perl:amd64 on perlapi-5.36.0:amd64] [python3:amd64 on python3-minimal:amd64] []', True),
+                                    (' [perl:amd64 on ]', False), (' [on perl:amd64]', False),
+                                    (' [perl:amd64 on lib;run] []', False),
+                                    (' [perl:amd64 on libc6:amd64] [] junk', False),
+                                    (' [perl:amd64 on libc6:amd64] [[perl]]', False),
+                                    (' [perl:amd64] [libc6:amd64]', False),
+                                    (' [perl:amd64] junk', False),
                                     (' [perl;run]', False), (' [[perl]]', False), (' [perl', False)]:
                 with self.subTest(suffix=suffix):
                     plan.write_text('1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n'

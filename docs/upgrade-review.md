@@ -116,12 +116,29 @@ Resolve the collision, then rerun the packaged converter before installing or
 updating other packages. See [Debian's release notes](https://www.debian.org/releases/bookworm/amd64/release-notes/ch-information.en.html#a-merged-usr-is-now-required)
 and [converter implementation](https://sources.debian.org/src/usrmerge/39%2Bnmu2/convert-usrmerge/).
 
+The Debian and Ubuntu release-upgrade paths perform required conversion using the
+packaged `usrmerge` converter before switching release sources. The standard
+`/etc/unsupported-skip-usrmerge-conversion` provisioning marker, containing exactly
+`this system will not be supported in the future` and a newline, is archived
+under `<baseline>.usrmerge/skip-marker.*` automatically. A custom or empty marker
+stops with an inspection command and a suggested retry using
+`DR_ACCEPT_USRMERGE_SKIP_MARKER=true`. That setting accepts the marker's opt-out
+consequence after review; file, mount and package checks remain active. Symlink
+markers and markers without root-controlled ownership/permissions require repair.
+
+Readiness reports conversion and verified repairs without changing files. Mounted
+source directories or `/lib/modules` stop with `findmnt` and operator-reviewed
+`umount` instructions. The tool never automatically unmounts them. After conversion,
+a precisely verified stale systemd PID 1 is refreshed automatically; see
+[init recovery and its manual control](native-readiness.md#verified-usrmerge-pid-1-remedy).
+
 distrorejuve's default policy now automates a bounded case: exactly one top-level
 `/bin` or `/sbin` executable is unowned and the other belongs to one configured
 package. The retained file must match the package's stored digest. Both must be
-root-owned regular files without group/other write permission. The existing
-digest probe limits the retained file and md5sums input to 1 MiB; missing or unverifiable digests
-require manual review. The packaged copy can be at either path.
+root-owned regular files without group/other write permission. The executable
+probe permits up to 16 MiB while package digest metadata retains its 1 MiB bound.
+Missing or unverifiable digests require manual review. The packaged copy can be
+at either path.
 
 Before moving anything, the tool records its baseline, package inventory and
 SHA256 hashes. A private attempt under `<baseline>.usrmerge/files.*` holds an
@@ -140,11 +157,15 @@ before conversion. A later failure leaves the private attempt and moved original
 available for review; do not restore them blindly over a converted filesystem.
 
 Set `DR_PREFER_PACKAGED_USRMERGE_FILES=false` to require manual resolution instead.
-Read-only `--check-upgrade` reports required collision repair without moving files,
-even when the preference is inherited as true. Two owned copies, two unowned
-copies, modified packaged files, unrelated symlinks and library/nested collisions
-remain outside this automatic recipe. Follow the converter's diagnostics for
-those cases; do not use broad deletion or `dpkg --force-overwrite` as a repair.
+Read-only `--check-upgrade` reports the default collision repair without moving
+files; selecting `false` also makes readiness require manual resolution. Two owned
+copies, two unowned copies, modified packaged files, unrelated symlinks and
+library/nested collisions remain outside this automatic recipe. Reported conflicts
+include commands to inspect paths and package ownership. Preserve both copies and
+choose the required file before retrying. Converter failures print the recovery
+command `sudo /usr/lib/usrmerge/convert-usrmerge && sudo dpkg --configure usrmerge`.
+Complete conversion before other package upgrades; broad deletion and
+`dpkg --force-overwrite` do not resolve which contents should be retained.
 
 ## Precompiled Debian locales
 

@@ -699,6 +699,11 @@ function apt_sources_rewrite() {
     index=$((index+1))
   done < <(apt_sources_files)
   if ! $changed; then rm -r -- "$stage"; return 0; fi
+  # Older APT needs apt-transport-https before canonical Debian sources can use HTTPS.
+  if [ "$family" = debian ] && { [ ! -f "/usr/lib/apt/methods/https" ] || [ ! -x "/usr/lib/apt/methods/https" ]; }; then
+    echo 'dss:error: APT HTTPS transport is unavailable. Install apt-transport-https using the existing repositories, then retry; APT sources were preserved.' >&2
+    rm -r -- "$stage"; return 1
+  fi
   mkdir -p "/root/distrorejuveinfo/apt-sources" || { rm -r -- "$stage"; return 1; }
   backup=$(mktemp -d "/root/distrorejuveinfo/apt-sources/change.XXXXXX") || { rm -r -- "$stage"; return 1; }
   for index in "${!source_files[@]}"; do

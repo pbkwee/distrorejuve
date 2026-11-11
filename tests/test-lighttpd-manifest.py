@@ -15,7 +15,7 @@ NAMES = [
     'manifest_lighttpd_tokens', 'manifest_lighttpd_output_configuration',
     'manifest_lighttpd_handler', 'manifest_lighttpd_frontends', 'manifest_lighttpd_websites',
     'manifest_website', 'manifest_website_assets', 'manifest_application', 'manifest_dns',
-    'manifest_packages', 'manifest_service', 'manifest_listeners',
+    'manifest_packages', 'manifest_service', 'manifest_listeners', 'manifest_listener_rows',
 ]
 
 
@@ -181,7 +181,7 @@ manifest_fpm_packages=(php8.2-fpm php8.4-fpm)
     def test_module_and_service_recognition(self):
         data = self.collect('''manifest_processes=lighttpd
 packages_output_inventory() { printf 'lighttpd\\t1.4.79-2\\tinstall ok installed\\tamd64\\n'; }
-ss() { printf 'State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\\nLISTEN 0 128 192.0.2.10:80 *:* users:(("lighttpd",pid=101,fd=3))\\n'; }
+manifest_run_bounded() { [ "$2:$3" = ss:-lntp ] || return 0; printf 'State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\\nLISTEN 0 128 192.0.2.10:80 *:* users:(("lighttpd",pid=101,fd=3))\\n'; }
 ''', body='manifest_packages\nmanifest_listeners')
         service = next(r for r in data['records'] if r['type'] == 'service')
         self.assertEqual(service['name'], 'lighttpd')

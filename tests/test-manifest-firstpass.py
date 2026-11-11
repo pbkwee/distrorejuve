@@ -80,6 +80,45 @@ manifest_language_consumers
         self.assertIn('cron skipped_unprivileged', result.stdout)
         self.assertNotIn('SECRET', result.stdout)
 
+    def test_tcp_and_udp_listeners_preserve_transport_and_ownership(self):
+        result = run(['manifest_listeners', 'manifest_listener_rows'], r'''
+manifest_emit() { printf '%s\n' "$*"; }
+manifest_run_bounded() {
+  case "$2:$3" in
+    ss:-lntp) printf '%s\n' 'LISTEN 0 128 127.0.0.1:25 *:* users:(("master",pid=12,fd=3))';;
+    ss:-lnup) printf '%s\n' 'UNCONN 0 0 [::]:9987 [::]:* users:(("ts3server",pid=42,fd=3))' 'UNCONN 0 0 0.0.0.0:443 0.0.0.0:*' 'UNCONN 0 0 missing-port *:*' 'ESTAB 0 0 127.0.0.1:53 192.0.2.10:123';;
+    ss:-lnt) printf '%s\n' 'Recv-Q Send-Q Local Address:Port Peer Address:Port' '0 128 *:10011 *:*';;
+    ss:-lnu) return 1;;
+    netstat:-lnu) printf '%s\n' 'udp6 0 0 :::9987 :::*' 'udp 0 0 127.0.0.1:53 0.0.0.0:*';;
+    *) return 1;;
+  esac
+}
+manifest_listeners
+manifest_unprivileged=true
+manifest_listeners
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('service smtp transport tcp address 127.0.0.1 port 25 program master', result.stdout)
+        self.assertIn('service udp transport udp address [::] port 9987 program ts3server', result.stdout)
+        self.assertIn('service udp transport udp address 0.0.0.0 port 443 program unknown', result.stdout)
+        self.assertIn('service tcp transport tcp address * port 10011 program unknown', result.stdout)
+        self.assertIn('service udp transport udp address :: port 9987 program unknown', result.stdout)
+        self.assertIn('service udp transport udp address 127.0.0.1 port 53 program unknown', result.stdout)
+        self.assertEqual(result.stdout.count('reachability unknown'), 6)
+
+    def test_mariadb_tls_manifest_finding_is_advisory(self):
+        result = run(['manifest_service'], r'''
+manifest_emit() { printf '%s\n' "$*"; }
+manifest_root=/nonexistent-fixture
+manifest_unprivileged=true
+manifest_processes=mariadbd
+manifest_service mariadb mariadb-server 10.11
+manifest_service mysql mysql-server 8.0
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count('warning area mariadb_client_tls'), 1)
+        self.assertIn('verify application and replication clients', result.stdout)
+
     def test_service_state_failures_preserve_partial_rows_and_fail_probe(self):
         with tempfile.TemporaryDirectory() as directory:
             (pathlib.Path(directory) / 'run/systemd/system').mkdir(parents=True)

@@ -133,6 +133,16 @@ recovery/data-consistency arrangements, tests and owners. Reuse valid existing
 authority rather than asking for every covered command. Resolve material changes
 before acting. Follow only the relevant procedure sections:
 
+At phase start, recover recorded answers and ask the remaining decisions in one
+exchange. Cover all planned release hops, recovery contingencies and acceptance
+limits together where the evidence permits. Use agreed defaults and continue
+covered work without waiting for another response. A routine release hop needs
+its normal checks; raise a new decision at hop start only when it could not be
+settled earlier. Surface a mid-phase decision only for missing authority, a
+material change, unresolved unsafe conditions or ambiguous state. Pause the
+affected step and continue independent work. Collect advisory findings for the
+next checkpoint or handoff.
+
 - [Recovery and acceptance](../../../docs/upgrade-and-migration.md#prepare-recovery-and-acceptance)
   for every route. S2I system archives and provider root snapshots are not complete
   application/data rollback. Read the selected S2I revision's instructions.

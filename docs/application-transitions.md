@@ -31,6 +31,56 @@ interface values did not disable those listeners. Verify the target's supported
 UNIX-only/private bindings before exposing it. Keep an approved network namespace
 or bind guard during rehearsal so acceptance does not itself permit public binds.
 
+### Vendor maintenance observations
+
+The engine can accept connections before a package's background maintenance
+finishes. At the normal post-package checkpoint, take one read-only observation
+of the known unit and any maintenance child processes already in scope. On
+Debian MariaDB, `debian-start` can still be running after the server is ready.
+Where unit or process evidence is missing, record maintenance as unknown.
+Keep moving through independent steps and report unfinished advisory checks
+with an owner. Avoid polling, waiting or adding a new migration gate for these
+observations. Schedule any separately required explicit maintenance after its
+vendor task exits to avoid two writers working on the same schema.
+
+### MariaDB client TLS compatibility
+
+For an upgrade to MariaDB 11.4 or later, review the
+[server TLS defaults](https://mariadb.com/docs/server/security/encryption/data-in-transit-encryption/zero-configuration-ssl).
+Automatic TLS behavior depends on the client's connector and authentication.
+Inventory the relevant application, JDBC, proxy and replication clients using
+approved version and connection-mode metadata. Keep credentials, connection
+strings and certificate private keys outside the report. Rehearse the actual
+client or its reviewed replacement against the target server defaults, including
+verified trust and a bounded functional connection check. Prefer upgrading or
+configuring the client to work with the target defaults. A manifest advisory
+identifies planning work without asserting client compatibility.
+
+### Database recovery coverage and cold copies
+
+Before pausing writes, bind the recovery point to the original job, server,
+database engine/build and writer/replica role. Within the agreed metadata scope,
+record the datadir, whether binary logging is enabled, the active log basename
+and index, and any engine data or tablespaces outside the datadir. Where the
+selected recovery method needs those logs, resolve index entries using that
+server version's path semantics and include every referenced log, the index and
+required external engine/state files. Verify that paths resolve to the approved
+storage, belong to this database and are present. Unexpected or missing paths
+leave that part of recovery incomplete. A datadir or root-disk copy may omit
+external files. Record any deliberate exclusions and the resulting recovery
+boundary, including point-in-time or replication limits.
+
+Measure a representative transfer over the approved storage route before downtime.
+Include all selected files and reserve time for copy verification and recovery.
+Use the [cold-copy evidence](execution-evidence.md#size-and-verify-a-cold-copy) to
+set the deadline and detect an infeasible pause in preparation. Keep the writer
+stopped and each partial attempt private and explicitly incomplete. Reuse a
+partial only after verifying its prefix against the same stopped original.
+Continue with the reviewed copy tool and verify the completed files, expected
+metadata and full recovery inventory before recording a usable recovery point.
+If continuity or identity is uncertain, follow the planned fallback and keep
+the partial receipt for reconciliation.
+
 ## Permissions before an application upgrade
 
 Scope restrictive umasks to private records and recovery artifacts. Select the
@@ -47,6 +97,11 @@ The helper adds their existing parent directories. It reads metadata only,
 without recursively discovering application data or reading file contents.
 Symlinks, hardlinked files, escapes, `.git` paths and special objects require
 separate handling. Keep configuration and mutable data outside replacement scope.
+
+Use the shared capture for readiness contracts too. It preserves the entire
+permission mode, including setuid, setgid and sticky bits. A directory mode of
+`02775` must not be frozen as `0775`. Compare with `capture-modes --expected`
+for a read-only recheck against the original capture.
 
 After replacement, restore the saved modes:
 

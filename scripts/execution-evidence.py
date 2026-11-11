@@ -2,6 +2,8 @@
 """Bounded execution evidence for explicitly approved application transitions."""
 
 import argparse
+from contextlib import ExitStack
+from decimal import Decimal
 import hashlib
 import ipaddress
 import json
@@ -549,6 +551,75 @@ def restore_modes(root, snapshot):
     return {'status': 'passed', 'restored_paths': len(selected)}
 
 
+def compare_database_retention(before, after):
+    allowed = {'expire_logs_days', 'binlog_expire_logs_seconds'}
+    if not isinstance(before, dict) or not isinstance(after, dict) or not before or before.keys() != after.keys() or before.keys() - allowed:
+        raise ValueError('use matching approved numeric database settings')
+    changed = []
+    for name in sorted(before):
+        values = []
+        for value in (before[name], after[name]):
+            if type(value) is int:
+                value = str(value)
+            # MariaDB batch output: expire_logs_days<TAB>10.000000 -> Decimal(10).
+            # Preserve real fractions; reject float input that may already be rounded.
+            if not isinstance(value, str) or not re.fullmatch(r'[0-9]{1,32}(?:[.][0-9]{1,32})?', value):
+                raise ValueError('retention value must be a nonnegative decimal string or integer')
+            values.append(Decimal(value))
+        if values[0] != values[1]:
+            changed.append(name)
+    return {'status': 'failed' if changed else 'passed', 'changed_settings': changed}
+
+
+def cold_copy_budget(size_bytes, sample_bytes, sample_seconds, available_seconds):
+    size_bytes = positive_int(size_bytes, 2**63 - 1)
+    sample_bytes = positive_int(sample_bytes, 2**63 - 1)
+    for value in (sample_seconds, available_seconds):
+        if not math.isfinite(value) or not 0 < value <= 7 * 86400:
+            raise ValueError('cold-copy durations must be positive and bounded')
+    # Use a representative transfer over the actual storage route. Reserve
+    # another measured copy duration for variability; recovery and verification
+    # allowances are deducted by the plan before supplying available_seconds.
+    estimated = math.ceil(size_bytes * sample_seconds / sample_bytes)
+    budget = 2 * estimated
+    return {'status': 'passed' if budget <= available_seconds else 'failed',
+            'estimated_seconds': estimated, 'copy_budget_seconds': budget,
+            'available_seconds': available_seconds}
+
+
+def verify_copy_prefix(source, destination, complete=False):
+    # While writes stay stopped, verify the entire existing prefix before
+    # allowing a retry. A smaller partial cannot count as a recovery point.
+    with ExitStack() as stack:
+        streams = []
+        for path in (source, destination):
+            if not path.is_absolute() or path.parent.resolve() != path.parent:
+                raise ValueError('copy verification needs canonical absolute file paths')
+            fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            stack.callback(os.close, fd)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError('copy verification needs regular files')
+            streams.append(stack.enter_context(os.fdopen(fd, 'rb', closefd=False)))
+        original, copied = streams
+        original_stat, copied_stat = [os.fstat(stream.fileno()) for stream in streams]
+        if os.path.samestat(original_stat, copied_stat):
+            raise ValueError('copy verification needs two distinct regular files')
+        remaining = copied_stat.st_size
+        matches = remaining <= original_stat.st_size and (not complete or remaining == original_stat.st_size)
+        while matches and remaining:
+            count = min(remaining, MAX_INPUT)
+            chunk = copied.read(count)
+            matches = len(chunk) == count and chunk == original.read(count)
+            remaining -= count
+        for stream, path, before in zip(streams, (source, destination), (original_stat, copied_stat)):
+            after = os.fstat(stream.fileno())
+            if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (before.st_size, before.st_mtime_ns, before.st_ctime_ns) or not os.path.samestat(after, path.lstat()):
+                matches = False
+        return {'status': 'passed' if matches else 'failed', 'source_bytes': original_stat.st_size,
+                'copied_bytes': copied_stat.st_size,
+                'complete': matches and original_stat.st_size == copied_stat.st_size}
+
+
 def component_acceptance(before, after, replacements, migration_root):
     if not isinstance(before, dict) or not isinstance(after, dict) or not isinstance(replacements, list) or len(before) > 10000 or len(replacements) > 128:
         raise ValueError('component metadata outside bounds')
@@ -720,6 +791,19 @@ def main(argv=None):
     command = sub.add_parser('capture-modes')
     command.add_argument('--root', type=Path, required=True)
     command.add_argument('--paths', type=Path, required=True)
+    command.add_argument('--expected', type=Path, help='private capture-modes receipt to check without changing files')
+    command = sub.add_parser('database-retention')
+    command.add_argument('--before', type=Path, required=True)
+    command.add_argument('--after', type=Path, required=True)
+    command = sub.add_parser('cold-copy-budget')
+    command.add_argument('--size-bytes', type=int, required=True)
+    command.add_argument('--sample-bytes', type=int, required=True)
+    command.add_argument('--sample-seconds', type=float, required=True)
+    command.add_argument('--available-seconds', type=float, required=True)
+    command = sub.add_parser('verify-copy-prefix')
+    command.add_argument('--source', type=Path, required=True)
+    command.add_argument('--destination', type=Path, required=True)
+    command.add_argument('--complete', action='store_true', help='require a full byte-for-byte copy')
     command = sub.add_parser('restore-modes')
     command.add_argument('--root', type=Path, required=True)
     command.add_argument('--snapshot', type=Path, required=True)
@@ -777,6 +861,14 @@ def main(argv=None):
             value = stale_process(args.pid, args.installed, read_json(args.manager_state))
         elif args.action == 'capture-modes':
             value = capture_modes(args.root, read_json(args.paths))
+            if args.expected:
+                value['status'] = 'passed' if value == private_json(args.expected) else 'failed'
+        elif args.action == 'database-retention':
+            value = compare_database_retention(private_json(args.before), private_json(args.after))
+        elif args.action == 'cold-copy-budget':
+            value = cold_copy_budget(args.size_bytes, args.sample_bytes, args.sample_seconds, args.available_seconds)
+        elif args.action == 'verify-copy-prefix':
+            value = verify_copy_prefix(args.source, args.destination, args.complete)
         elif args.action == 'restore-modes':
             value = restore_modes(args.root, private_json(args.snapshot))
         elif args.action == 'components':

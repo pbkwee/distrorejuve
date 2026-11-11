@@ -110,6 +110,14 @@ for at most the current bounded probe and writes `summary.json`; it never change
 a monitored service. An uncatchable kill or runner loss can leave no summary;
 retain `samples.jsonl` and report that unfinished observation explicitly.
 
+The sampler publishes JSON receipts atomically. A storage failure can leave a
+final sample line incomplete or prevent the summary entirely. Retain the
+original sample log and supervisor outcome. After a restart, use a new output
+directory and keep each attempt's outcome. For each target and observer, combine
+the last complete sample of the old attempt and first complete sample of the
+replacement as the boundaries of an unobserved interval. If either boundary
+is missing, report it as unknown. Do not join failure windows across the gap.
+
 The new directory uses `u=rwx,go=` and files use `u=rw,go=`:
 
 - `monitor.json`: approved target metadata and sampling bounds.

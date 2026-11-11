@@ -15,6 +15,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 
@@ -297,10 +298,18 @@ def summarize(records, targets, observer, started, finished, interval, stopped=N
 
 
 def write_json(path, value):
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-        json.dump(value, stream, indent=2, sort_keys=True, allow_nan=False)
-        stream.write('\n')
+    # A full filesystem used to leave final filenames containing partial JSON.
+    # Publish only after a complete write, preserving exclusive creation.
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(value, stream, indent=2, sort_keys=True, allow_nan=False)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+    finally:
+        os.unlink(temporary)
 
 
 def run(config, output, duration, interval, timeout, max_samples=10000, stop=None,
@@ -352,9 +361,9 @@ def run(config, output, duration, interval, timeout, max_samples=10000, stop=Non
                     for key in ('reason', 'http_status', 'dns_rcode'):
                         if key in answer:
                             row[key] = answer[key]
-                    records.append(row)
                     stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + '\n')
                     stream.flush()
+                    records.append(row)
                 if first_cycle and len(records) == len(config['targets']):
                     write_json(output / 'ready.json', {'observer': config['observer'], 'first_cycle_complete_at': now(),
                                                        'baseline_healthy': all(row['status'] == 'ok' for row in records),
@@ -371,14 +380,18 @@ def run(config, output, duration, interval, timeout, max_samples=10000, stop=Non
                 wait_until = min(schedule, deadline)
                 while monotonic() < wait_until and not stop.requested:
                     sleep(min(0.1, wait_until - monotonic()))
-    except BaseException:
-        reason = 'monitor_error'
+    except BaseException as error:
+        reason = 'storage_error' if isinstance(error, OSError) and error.errno in (errno.ENOSPC, errno.EDQUOT) else 'monitor_error'
+        try:
+            summary = summarize(records, config['targets'], config['observer'], started, now(), interval, reason)
+            write_json(output / 'summary.json', summary)
+        except OSError:
+            print('Observer summary could not be saved after ' + reason + '.', file=sys.stderr)
         raise
-    finally:
-        if stop.requested:
-            reason = stop.signal_name or 'cancelled'
-        summary = summarize(records, config['targets'], config['observer'], started, now(), interval, reason)
-        write_json(output / 'summary.json', summary)
+    if stop.requested:
+        reason = stop.signal_name or 'cancelled'
+    summary = summarize(records, config['targets'], config['observer'], started, now(), interval, reason)
+    write_json(output / 'summary.json', summary)
     return summary
 
 

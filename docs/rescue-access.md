@@ -17,6 +17,12 @@ provider only its public key. Check support for that key's algorithm.
 Rescue boot interrupts the server. Plan the recovery work and outage with the
 operator, using the job's existing recovery arrangements.
 
+Prepare a short, allowlisted audit that can run with the rescue image's existing
+shell and metadata tools. Check whether its interpreter is available. Where
+Python is absent, use the minimal commands or the installed interpreter inside
+the verified chroot with its required filesystems. Keep that fallback ready
+before rebooting. Avoid adding packages during the outage.
+
 For RimuHosting VMs, the optional [API rescue procedure](rimuhosting.md#recover-access-with-rescue-boot)
 accepts one-off public keys. Other providers require their own verified procedure.
 
@@ -62,6 +68,12 @@ Add the key there when it should remain available after normal boot.
   the installed SSH daemon alongside rescue's daemon on the same port.
   Use the installed manual for version-specific behavior; the current
   [OpenSSH daemon manual](https://man.openbsd.org/sshd) describes these test modes.
+
+Treat effective SSH settings as records. For example, installed `sshd -T` may
+emit two lines, `allowusers customer` and `allowusers root@192.0.2.10`. Keep both
+approved values when evaluating login policy. A single-value projection loses
+the first rule. Return only the permitted settings and key fingerprints; key
+comments and full configuration belong outside the audit output.
 
 Keep configuration reads and returned evidence within the job's
 [sensitive-data scope](sensitive-data.md). Record changed paths and recovery

@@ -71,6 +71,59 @@ immediately. Attempts are bounded to 20, delay to 5 seconds and each query to
 10 seconds. A successful service-manager start does not bypass this readiness
 checkpoint.
 
+### Compare database retention settings
+
+When a workload contract checks MariaDB retention, project only the approved
+numeric settings to protected JSON such as `{"expire_logs_days":"10.000000"}`.
+Use the same keys in the original and observed projections. The
+`database-retention --before ORIGINAL --after OBSERVED` evidence action compares
+`expire_logs_days` and `binlog_expire_logs_seconds` as exact decimals. It accepts
+integer values and decimal strings and returns the names of changed settings.
+A change from `10` to `10.000000` passes; `10.25` remains distinct.
+Missing or malformed projections require review. If the contract pins this
+check, review and update the dependent artifact digests together.
+
+## Size and verify a cold copy
+
+Use a representative sample on the approved copy route, including the actual
+storage and intended concurrency. Supply the available copy time after
+deducting verification time and the approved recovery lead time:
+
+```bash
+python3 scripts/execution-evidence.py cold-copy-budget \
+  --size-bytes 5583457485 --sample-bytes 134217728 --sample-seconds 8 \
+  --available-seconds 900 --receipt /protected/job/copy-budget.json
+```
+
+The helper budgets twice the measured-rate estimate for transfer variability.
+If the budget will not fit, revise preparation or use the agreed alternative
+before stopping writes. Track the actual outage deadline separately.
+
+After an interrupted regular-file copy, verify the exact existing bytes while
+writes remain stopped. Use the protected paths covered by the job:
+
+```bash
+python3 scripts/execution-evidence.py verify-copy-prefix \
+  --source /approved/database/original-file \
+  --destination /approved/recovery/partial-file \
+  --receipt /protected/job/copy-prefix.json
+```
+
+A matching prefix is evidence for a reviewed continuation, not completion.
+For a shorter, verified partial in private recovery staging, the existing copy
+procedure can use an installed, reviewed rsync with
+[`--append-verify`](https://rsync.samba.org/ftp/rsync/rsync.1) on the exact
+original and partial regular file. Apply the plan's metadata-preservation
+options. This mode updates the partial in place, so keep it outside the set of
+usable recovery points until full verification. Use a new attempt or the agreed
+fallback if the same stopped original and exact prefix cannot be established.
+After copying, repeat with `--complete` and a new receipt. The check reads both
+files, returns only byte counts and status, and makes no writes to either file.
+Include this full read in the verification budget. For a directory copy, check
+the whole inventory and metadata separately and verify each file reused from a
+partial attempt. If a prefix differs or the source changed, reconcile the
+attempt before using the planned retry or fallback.
+
 ## Process listeners and stale executables
 
 ```bash

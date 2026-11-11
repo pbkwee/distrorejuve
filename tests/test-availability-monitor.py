@@ -227,6 +227,35 @@ class SamplingTests(unittest.TestCase):
             self.assertEqual(summary['stop_reason'], 'sample_limit')
             self.assertEqual(clock.value, 0)
 
+    def test_full_disk_does_not_publish_partial_json(self):
+        with tempfile.TemporaryDirectory() as folder:
+            receipt = Path(folder) / 'summary.json'
+
+            def fail_after_write(_value, stream, **_kwargs):
+                stream.write('{')
+                raise OSError(errno.ENOSPC, 'fixture storage exhausted')
+
+            with patch.object(MODULE.json, 'dump', side_effect=fail_after_write), self.assertRaises(OSError):
+                MODULE.write_json(receipt, {'status': 'fixture'})
+            self.assertEqual(list(Path(folder).iterdir()), [])
+            MODULE.write_json(receipt, {'status': 'old'})
+            with self.assertRaises(FileExistsError):
+                MODULE.write_json(receipt, {'status': 'new'})
+            self.assertEqual(json.loads(receipt.read_text()), {'status': 'old'})
+
+    def test_observer_records_storage_failure_without_reporting_service_failure(self):
+        clock = Clock()
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / 'run'
+            with self.assertRaises(OSError):
+                MODULE.run(config(), output, 10, 1, 1,
+                           probe_fn=Mock(side_effect=OSError(errno.ENOSPC, 'fixture')),
+                           monotonic=clock.monotonic, now=clock.now, sleep=clock.sleep)
+            summary = json.loads((output / 'summary.json').read_text())
+            self.assertEqual(summary['stop_reason'], 'storage_error')
+            self.assertTrue(summary['targets'][0]['unobserved'])
+            self.assertEqual(summary['targets'][0]['failure_windows'], [])
+
     def test_cancel_finalizes_summary(self):
         stop = MODULE.Stop()
         clock = Clock()

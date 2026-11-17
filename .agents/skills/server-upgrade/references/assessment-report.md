@@ -49,8 +49,16 @@ Cover these questions in this order, combining sections for simple cases:
    Include the OS and relevant application/database/panel versions. Distinguish
    observed, customer-reported and inferred facts; mark missing facts as unknown.
    Say what should continue unchanged and what users may need to do differently.
-   Name the websites and distinguish currently live sites from inactive retained
-   applications. Default to preserving the live sites and their behaviour while
+   List the primary hostname for every configured website, grouped by
+   application. Show where DNS points and whether HTTPS is configured on the
+   source, with the observed HTTPS result for that hostname. Highlight
+   certificate errors and relevant expiry dates. Group aliases with the same
+   result and name any with a distinct destination, certificate issue or cutover.
+   Distinguish currently live sites from inactive retained applications.
+   Describe [mail activity](#assess-mail-activity) for each role found or unknown.
+   Name [retirement candidates](#identify-retirement-candidates), the proposed
+   treatment and any customer decision needed before leaving them out of scope.
+   Default to preserving the live sites and their behaviour while
    leaving inactive sites and applications inactive. File presence, an installed
    runtime or an exited startup wrapper is not proof of live use. Note required
    symlink targets and separate retention decisions; do not infer deletion or
@@ -79,6 +87,65 @@ Cover these questions in this order, combining sections for simple cases:
    Name owners, unresolved scope/costs, prerequisites and the next decision.
    Explain backup coverage and recovery limits in ordinary language. An assessment
    is not permission to make changes, buy resources or send customer messages.
+
+## Assess mail activity
+
+Start with public MX and relevant host records, running mail daemons and listener
+bindings, and the manifest's mailbox and spool measurements. Check conventional
+local storage such as mbox and Maildir using counts, sizes and recent file
+activity within approved scope. Record which locations were checked. MX records
+describe public routing. Listeners show what can accept connections. Stored
+messages may predate current use.
+
+When the role affects migration and the first pass leaves it unclear, use
+already approved activity evidence or ask for a bounded summary of recent
+mail-log or journal activity. Before a log read, agree the source paths or
+journal units, observation window, purpose, output fields and processing scope
+under the [sensitive-data rules](../../../../docs/sensitive-data.md). Reuse
+existing approval. Where direct access is unavailable, use operator-supplied
+counts and outcomes. Aggregate on the source and record only coverage, counts
+and delivery roles. Keep raw log lines, addresses, message IDs, headers and
+contents out of returned evidence.
+
+Correlate accepted external SMTP with successful local delivery or forwarding
+to another server. Count app or system submissions separately from forwarding.
+Keep rejected connections, deferred mail and currently queued deliveries
+distinct from completed delivery. Report the period actually covered and say
+when activity is unknown, including when logs are unavailable or too sparse.
+Use the findings to decide whether the migration needs an inbound route,
+mailbox data, forwarding rules or an application sending path.
+
+## Identify retirement candidates
+
+During the initial assessment, look for customer-installed packages and services,
+local applications, enabled jobs, and custom settings with no current purpose or
+consumer. Start with the manifest and supplied evidence. Check references and
+observed use before proposing what to leave behind. Include retired-runtime
+overrides, stale service units, timers, cron jobs and local scripts when they
+affect migration or continued maintenance.
+
+| Candidate | Evidence to compare |
+| --- | --- |
+| Website, vhost or alias | Match public A/AAAA and CNAME results to the source and verify any CDN, proxy, load balancer or redirect path. Check private access, origin routes and the aliases using the same backend. Check authorized per-host request counts, the newest matching event and the period covered by current and rotated origin or proxy logs. A quiet origin can still serve a cached or privately accessed site. |
+| Mail domain, mailbox or alias | Compare MX and backup/fallback routes with accepted SMTP, completed local delivery and forwarding within the covered period. Check authorized mbox/Maildir activity summaries and account dependencies. Consider internal delivery, catch-all routing, clients and application sending. Preserve historical mail according to agreed retention, even when new delivery goes elsewhere. |
+| Custom service, package, job or setting | Check package ownership and dependencies, running processes, enabled units and timers, schedules, application references and the customer’s intended use. Consider infrequent jobs and standby functions before treating an inactive component as a retirement candidate. |
+
+Record the actual observation window, coverage gaps and conflicting evidence.
+Use periods appropriate to the workload, including infrequent or seasonal use.
+Keep activity unknown when proxy or log coverage is insufficient. Use approved
+source-side counts or timestamps, or operator-supplied summaries. Scope any
+additional log, journal or mailbox metadata access under the
+[sensitive-data rules](../../../../docs/sensitive-data.md). Keep request paths,
+client addresses, message details and raw records out of returned evidence.
+
+In the customer report, give each supported candidate a name, evidence summary,
+proposed disposition and owner for the decision. Say whether to omit it from the
+new build, keep it inactive with its data retained, replace it, or remove it
+after approval. Include a cost, maintenance or migration implication where
+material. In the appendix, record the checks and what would verify the decision.
+When evidence is sparse or conflicting, name the missing check and preserve the
+component pending review. Get separate approval for disabling or removal and
+agree data retention and recovery before acting.
 
 ## Write concrete findings
 

@@ -96,6 +96,39 @@ printf 'COUNTS %s %s\\n' "${{#manifest_dns_names[@]}}" "$manifest_http_count"
             self.assertIn('--proto =http,https', capabilities[0])
         return output, [event for event in events if event[0] != 'capability'], counts
 
+    def test_customer_alias_leads_existing_probe_budget(self):
+        body = ''.join(self.site(f'site{n}.example.invalid', f'/srv/{n}') for n in range(23))
+        body += self.site('apex.example.invalid,www.publisher.example.invalid', '/srv/publisher')
+        body += 'manifest_website_queue_finish\n'
+        _, events, counts = self.collect(
+            body, setup='DR_MANIFEST_PRIORITY_HOSTS=WWW.PUBLISHER.example.invalid,unconfigured.example.invalid')
+        self.assertEqual(events[0], ('dns', 'www.publisher.example.invalid'))
+        self.assertFalse(any('unconfigured' in value for _, value in events))
+        self.assertLessEqual(counts[0], 20)
+        self.assertLessEqual(counts[1], 40)
+
+    def test_literal_apache_bind_and_redirect_authority(self):
+        conf = '''<VirtualHost 192.0.2.1:80 [2001:db8::1]:80>
+ServerName origin.example.invalid
+Redirect permanent / https://publish.example.invalid:8443/path?token=SECRET
+<IfModule mod_alias.c>
+Redirect permanent / https://conditional.example.invalid/
+</IfModule>
+</VirtualHost>
+<VirtualHost *:80>
+ServerName other.example.invalid
+Redirect / https://user:SECRET@private.example.invalid/
+</VirtualHost>
+'''
+        out, _, _ = self.collect('manifest_websites', setup=r'''
+manifest_config_files() { if [ "$1" = apache ]; then printf '%s\n' "$manifest_root/vhost.conf"; fi; }
+manifest_read_metadata() { cat -- "$1"; }
+manifest_lighttpd_websites() { :; }
+''', extra=['manifest_websites'], files={'vhost.conf': conf})
+        self.assertIn('bind_selectors 192.0.2.1:80,[2001:db8::1]:80 redirect_authority https://publish.example.invalid:8443', out)
+        for private in ('SECRET', 'conditional.example', 'private.example'):
+            self.assertNotIn(private, out)
+
     def test_legacy_curl_leaves_each_http_probe_unknown(self):
         output, events, counts = self.collect(
             'manifest_http one.example.invalid http 80\n'

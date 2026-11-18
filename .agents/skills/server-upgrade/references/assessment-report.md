@@ -88,6 +88,41 @@ Cover these questions in this order, combining sections for simple cases:
    Explain backup coverage and recovery limits in ordinary language. An assessment
    is not permission to make changes, buy resources or send customer messages.
 
+## Follow up on workloads
+
+A source-associated manifest can support a short provisional assessment. For
+agent-led work, corroborate the findings in scope. Identify the deployed
+application from conventional version markers, package metadata, and narrowly
+scoped README or CHANGELOG headings. Treat a document heading as a lead. Trace
+the configured handler and runtime. Where needed, check the approved application
+configuration for database engine, host and port using the
+[sensitive-data scope](../../../../docs/sensitive-data.md).
+
+For sites with aliases, record the configured primary hostname. Choose the main
+hostname for the report using the DNS names on the TLS certificate, A/AAAA records,
+proxy routes, and configured or observed redirects. Include any website hostname
+the customer supplied in those checks. Prefer the confirmed working canonical
+destination when aliases redirect there. Shared and wildcard certificates can cover multiple sites.
+Report working aliases, names pointing elsewhere, names without DNS and names
+still untested. Check the redirect destination's response independently.
+
+Pass up to five known in-scope names in the comma-separated
+`DR_MANIFEST_PRIORITY_HOSTS` setting for collection. The manifest prioritizes
+matching configured names within its existing budgets. If guest curl cannot
+perform the safe probes, run
+`scripts/assessment-web.py --manifest PRIVATE_JSON --source-address VERIFIED_IP`
+on the runner when the recorded scope covers these probes. Match the address to
+the job. This returns bounded source-pinned HEAD results with normal certificate
+validation. Record public DNS and proxy results separately. Inspect public
+certificate SANs when a hostname's role remains unclear.
+
+Review established connection counts by local IP and port when retiring an IP.
+Trace the specific configured service relationship and verify the socket type,
+listener and owning roles within scope. For example, compare Postfix's
+`smtpd_sasl_type=dovecot` and effective `smtpd_sasl_path` with the Dovecot listener
+before moving authentication. Rehearse required dependencies and scheduled
+scripts during acceptance.
+
 ## Assess mail activity
 
 Start with public MX and relevant host records, running mail daemons and listener
@@ -96,6 +131,14 @@ local storage such as mbox and Maildir using counts, sizes and recent file
 activity within approved scope. Record which locations were checked. MX records
 describe public routing. Listeners show what can accept connections. Stored
 messages may predate current use.
+
+Check SMTP bind addresses before assigning its role. Loopback-only SMTP
+usually serves local submissions. Look for applications and system jobs that
+send mail. Ordinary root and Unix-user spools can hold system notifications.
+To identify public mailbox hosting, verify the named mail destination domains,
+actual routing or accepted delivery, and user mailbox stores such as Maildir.
+Record IMAP/POP3 services and account use where observed. Track public
+forwarding, authenticated submission and mailbox delivery independently.
 
 When the role affects migration and the first pass leaves it unclear, use
 already approved activity evidence or ask for a bounded summary of recent
@@ -114,6 +157,24 @@ distinct from completed delivery. Report the period actually covered and say
 when activity is unknown, including when logs are unavailable or too sparse.
 Use the findings to decide whether the migration needs an inbound route,
 mailbox data, forwarding rules or an application sending path.
+
+For approved Postfix or Dovecot logs, pipe effective journal records in
+short-ISO format or approved syslog records, including decompressed rotations,
+into `scripts/assessment-mail.py` on the source. Select effective inputs and
+the time period before streaming. Avoid overlapping sources and propagate
+file, journal or decompression errors. Keep the raw stream on the source.
+Use an operator-provided aggregate when source Python 3 is unavailable.
+The helper returns counts and the first and last recognized timestamps in
+input order. Record the timezone, year and rotation order for legacy syslog.
+Compare available coverage with the requested window and record any gaps.
+Use approved role evidence to verify whether accepted SMTP came from outside,
+whether relay was forwarding or outbound, and where LMTP delivered.
+
+Carry separate keep, replace or retire decisions for application sending,
+public SMTP and auth, inbound delivery and forwarding, IMAP/POP3 and retained
+mail. Verify a specific script before attributing a message to it. Before
+cutover, test expected notifications and scheduled jobs with an isolated mail
+sink. Verify inbound delivery and mailbox access for the agreed domains.
 
 ## Identify retirement candidates
 

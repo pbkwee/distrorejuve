@@ -7,6 +7,11 @@ description: Assess a Linux server from a distrorejuve manifest or authorized SS
 
 Read the [user journey](../../../docs/ai-assisted-migration.md) and relevant
 sections of the [operator procedure](../../../docs/upgrade-and-migration.md).
+Use the manifest as a starting point. With authorized discovery, follow the
+[workload checks](references/assessment-report.md#follow-up-on-workloads) to
+resolve material application, website and mail gaps before finalizing the plan.
+A manifest-only assessment can give a short provisional recommendation.
+
 Use the [assessment report guide](references/assessment-report.md) after usable
 source inventory is available. Assessment can begin at any provider without a hosting account or
 API key. When invoked through a service workflow, also follow

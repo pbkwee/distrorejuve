@@ -75,3 +75,16 @@ Verify primary/alias ordering and skipped coverage with the offline fixture:
 ```sh
 python3 tests/test-website-probe-priority.py
 ```
+
+### Listener transport and HTTP probe coverage
+
+Listener records include the TCP or UDP transport and the local bind scope.
+A socket bind leaves external reachability unknown. UDP inventory is bounded;
+an unavailable query or an inventory limit is reported explicitly.
+
+Website HTTP coverage has its own probe status. If an old curl cannot accept
+the required safe request options, the collector reports the client as
+unsupported and leaves HTTP results unknown. Site and runtime inventory remains
+available. For an installed MariaDB server, the manifest includes a reminder to
+review [client TLS compatibility](application-transitions.md#mariadb-client-tls-compatibility)
+when planning a target at MariaDB 11.4 or later.

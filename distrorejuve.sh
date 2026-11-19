@@ -9432,6 +9432,10 @@ function upgrade_remove_retired_packages() {
   if [ -z "$current_signature" ] || [ "$current_signature" != "$signature" ]; then
     echo 'dss:error: Package, source or index state changed during cleanup planning; no removal attempted. Retry with stable package state.' >&2; return 1
   fi
+  # The separately reviewed main upgrade plan does not include this cleanup.
+  # Log the exact guarded simulation results before the matching native action.
+  printf 'dss:info: Obsolete cleanup planned removals (plan %s):\n' "$attempt/final.plan" >&2
+  cat -- "$attempt/removals.requested" >&2
   LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
     -o APT::Get::AutomaticRemove=false --no-download remove "${selected[@]}" 2>&1 | tee "$attempt/removal.log" || return 1
   dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\t${Essential}\t${Priority}\n' > "$attempt/packages.after" || return 1
@@ -9552,6 +9556,10 @@ function upgrade_autoremove_packages() {
   if [ -z "$current_signature" ] || [ "$current_signature" != "$signature" ]; then
     echo 'dss:error: Package/repository state changed during autoremove planning; no removal attempted.' >&2; return 1
   fi
+  # The separately reviewed main upgrade plan does not include this cleanup.
+  # Log the exact guarded simulation results before the matching native action.
+  printf 'dss:info: Autoremove planned removals (plan %s):\n' "$directory/plan.final" >&2
+  cat -- "$directory/removals.final" >&2
   LC_ALL=C apt-get "${options[@]}" -o APT::Get::Purge=false -o APT::Get::allow-remove-essential=false \
     -o APT::Get::AutomaticRemove=false --no-download remove "${selected[@]}" 2>&1 | tee "$directory/removal.log" || return 1
   dpkg-query -W -f='${Status}\t${Package}\t${Architecture}\t${Version}\n' > "$directory/packages.after" || return 1
@@ -11597,7 +11605,7 @@ function manifest_output_review_record() {
   local type=$1 key value
   shift
   # Process IDs and counts are transient observations, not migration configuration.
-  case "$type:${2:-}" in collector_launch:*|security_indicator:*|collection_status:*|collection_scope:*|probe_status:*|website_probe:*|capacity:*|upgrade_directory:*|language_consumer:process_comm|warning:security_*) return 0;; esac
+  case "$type:${2:-}" in tcp_activity:*|collector_launch:*|security_indicator:*|collection_status:*|collection_scope:*|probe_status:*|website_probe:*|capacity:*|upgrade_directory:*|language_consumer:process_comm|warning:security_*) return 0;; esac
   printf '%s' "$type"
   while [ "$#" -ge 2 ]; do
     key=$1; value=$2; shift 2
@@ -11618,7 +11626,7 @@ function manifest_emit() {
       # Only reviewed general facts pass through; new fields default to redacted.
       # website:name=shop.example.invalid -> [redacted]; website:port=443 -> 443.
       case "$record_type:$key" in
-        system:package_backend|ssh_host_key:status|ssh_host_key:key_type|listener:service|listener:port|listener:application|listener:binding|listener:reachability|\
+        tcp_activity:local_port|tcp_activity:connection_count|tcp_activity:basis|system:os_id|system:os_version|system:package_architecture|system:kernel|system:kernel_architecture|system:init|system_release_hint:source|system_release_hint:debian_base_release|system:package_backend|ssh_host_key:status|ssh_host_key:key_type|listener:service|listener:transport|listener:port|listener:application|listener:binding|listener:reachability|\
         service:name|service:package|service:version|service:running|service:enabled|service:status_source|service:enabled_source|\
         package:name|package:version|package:architecture|package:package_backend|\
         runtime:kind|runtime:version|runtime:package|runtime:package_version|runtime:version_source|runtime:conditional|\
@@ -11678,86 +11686,156 @@ function manifest_emit() {
   fi
 }
 
-# A listening socket proves a local bind, not public reachability. Firewalls,
-# NAT and proxies can change which service an external visitor reaches.
-function manifest_listeners() {
-  local raw parsed source protocol address port program scope application listener_options=-lntp
-  if "${manifest_unprivileged:-false}"; then listener_options=-lnt; fi
-  if command -v ss >/dev/null 2>&1 && raw=$(ss "$listener_options" 2>/dev/null); then
-    source=ss
-  elif command -v netstat >/dev/null 2>&1 && raw=$(netstat "$listener_options" 2>/dev/null); then
-    source=netstat
-  else
-    manifest_emit warning area listeners reason 'ss/netstat unavailable or permission denied'
-    manifest_collection_failed=true
-    return
-  fi
-  # ss: LISTEN 0 128 127.0.0.1:25 *:* users:(("master",pid=12,fd=3))
-  # Older ss -lntp omits State: header "Recv-Q Send-Q ...", then "0 128 127.0.0.1:25 *:* ...".
-  # netstat: tcp 0 0 0.0.0.0:80 0.0.0.0:* LISTEN 12/apache2
-  # These yield address=127.0.0.1, port=25, program=master (ss), or 0.0.0.0/80/apache2 (netstat).
-  if ! parsed=$(printf '%s\n' "$raw" | awk -v source="$source" '
-    source == "ss" && $1 == "Recv-Q" && $2 == "Send-Q" { implicit_listen=1; next }
-    source == "ss" && $1 == "State" { implicit_listen=0; next }
-    source == "ss" {
-      if ($1 == "LISTEN") endpoint=$4
-      else if (implicit_listen && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) {
-        # A wildcard peer distinguishes these listener rows from current connections.
-        if ($4 !~ /^(\*|0[.]0[.]0[.]0|::|\[::\]):\*$/) next
-        endpoint=$3
-      } else next
-      program="unknown"
-      if (match($0, /users:\(\("[^"]+/)) {
-        program=substr($0, RSTART+9, RLENGTH-9)
-      }
-      port=endpoint; sub(/^.*:/,"",port); address=endpoint; sub(/:[^:]*$/,"",address)
-      print "tcp\t" address "\t" port "\t" program
+# ss -lntp: LISTEN 0 128 127.0.0.1:25 *:* users:(("master",pid=12,fd=3))
+# ss -lnup: UNCONN 0 0 [::]:9987 [::]:* users:(("ts3server",pid=42,fd=3))
+# Older ss: "Recv-Q Send-Q ..." then "0 0 *:9987 *:*"; UDP owner is unknown.
+# netstat -lnup: udp6 0 0 :::9987 :::* 42/ts3server
+# These yield address, port, program (e.g. [::], 9987, ts3server).
+function manifest_listener_rows() {
+  local source=$1 transport=$2
+  LC_ALL=C awk -v source="$source" -v transport="$transport" '
+    function wildcard(peer) {
+      return peer ~ /^(\*|0[.]0[.]0[.]0|::|\[::\]):\*$/
     }
-    source == "netstat" && $1 ~ /^tcp/ && $6 == "LISTEN" {
-      endpoint=$4; program=$7; sub(/^[0-9]+\//,"",program)
+    function emit(endpoint, program, address, port) {
+      if (endpoint !~ /:[0-9]+$/) return
+      port=endpoint; sub(/^.*:/,"",port)
+      address=endpoint; sub(/:[^:]*$/,"",address)
+      if (address == "" || port+0 < 1 || port+0 > 65535) return
       if (program == "-" || program == "") program="unknown"
-      port=endpoint; sub(/^.*:/,"",port); address=endpoint; sub(/:[^:]*$/,"",address)
-      print "tcp\t" address "\t" port "\t" program
-    }'); then
-    manifest_emit warning area listeners reason 'listener parser failed; inventory unknown'
-    manifest_collection_failed=true
-    return
-  fi
-  while IFS=$'\t' read -r protocol address port program; do
-    [ -n "$port" ] || continue
-    case "$address" in
-      127.*|::1|'[::1]') scope=loopback ;;
-      '*'|0.0.0.0|::|'[::]') scope=all_interfaces ;;
-      *) scope=specific_interface ;;
-    esac
-    application=unknown
-    case "$program" in
-      master|postfix*|smtpd) application=Postfix ;;
-      exim*) application=Exim ;;
-      sendmail*) application=Sendmail ;;
-      dovecot*|imap-login|pop3-login) application=Dovecot ;;
-      courier*) application=Courier ;;
-      apache2|httpd) application=Apache ;;
-      nginx*) application=nginx ;;
-      caddy*) application=Caddy ;;
-      lighttpd*) application=lighttpd ;;
-      proxysql*) application=ProxySQL ;;
-    esac
-    case "$port" in
-      25|465|587) protocol=smtp ;;
-      110|995) protocol=pop3 ;;
-      143|993) protocol=imap ;;
-      80|443|8080|8443) protocol=http ;;
-      *) protocol=tcp ;;
-    esac
-    manifest_emit listener service "$protocol" address "$address" port "$port" program "$program" application "$application" binding "$scope" reachability unknown
-    # program=.example -> dot_prefixed_listener; program=nginx -> no name-based indicator.
-    case "$program" in .*)
-      manifest_emit security_indicator indicator dot_prefixed_listener program "$program" address "$address" port "$port" assessment requires_review reason 'Dot-prefixed listening process name; inspect its owner and executable to distinguish expected activity from a possible compromise.';;
-    esac
-  done <<< "$parsed"
+      if (++count <= 4096) print address "\t" port "\t" program
+    }
+    source == "ss" && $1 == "Recv-Q" && $2 == "Send-Q" { implicit_state=1; next }
+    source == "ss" && $1 == "State" { implicit_state=0; next }
+    source == "ss" {
+      if (transport == "tcp" && $1 == "LISTEN" || transport == "udp" && $1 == "UNCONN") endpoint=$4
+      else if (implicit_state && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && wildcard($4)) endpoint=$3
+      else next
+      program="unknown"
+      if (match($0, /users:\(\("[^"]+/)) program=substr($0,RSTART+9,RLENGTH-9)
+      emit(endpoint,program)
+    }
+    source == "netstat" {
+      if (transport == "tcp" && $1 ~ /^tcp[46]?$/ && $6 == "LISTEN") program=$7
+      else if (transport == "udp" && $1 ~ /^udp[46]?$/ && wildcard($5)) program=$6
+      else next
+      sub(/^[0-9]+\//,"",program)
+      emit($4,program)
+    }
+    END { if (count > 4096) print "limit" }
+  '
 }
 
+# A socket bind establishes local inventory. Public reachability depends on
+# firewalls, NAT and proxies. Probe separately to support older ss layouts and
+# keep an unavailable UDP query from losing already observed TCP listeners.
+function manifest_listeners() {
+  local parsed transport protocol address port program scope application listener_options
+  local result=0
+  local -a socket_command
+  for transport in tcp udp; do
+    case "$transport" in tcp) listener_options=-lnt;; udp) listener_options=-lnu;; esac
+    if ! "${manifest_unprivileged:-false}"; then listener_options=${listener_options}p; fi
+    socket_command=(manifest_run_bounded 4)
+    # Older minimal systems without timeout or Perl still support the original
+    # TCP inventory. Report unavailable UDP coverage instead of losing TCP.
+    if [ "$transport" = tcp ] && ! command -v timeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; then socket_command=(); fi
+    if parsed=$(set -o pipefail; "${socket_command[@]}" ss "$listener_options" 2>/dev/null | manifest_listener_rows ss "$transport") ||
+       parsed=$(set -o pipefail; "${socket_command[@]}" netstat "$listener_options" 2>/dev/null | manifest_listener_rows netstat "$transport"); then
+      :
+    else
+      manifest_emit warning area listeners reason "Unable to collect $transport sockets with ss or netstat."
+      # Preserve the original core TCP failure signal. UDP is additional coverage.
+      if [ "$transport" = tcp ]; then manifest_collection_failed=true; result=1; fi
+      continue
+    fi
+    while IFS=$'\t' read -r address port program; do
+      if [ "$address" = limit ]; then
+        manifest_emit warning area listeners reason "The $transport socket inventory reached 4096 entries; remaining bindings are unknown."
+        continue
+      fi
+      [ -n "$port" ] || continue
+      case "$address" in
+        127.*|::1|'[::1]') scope=loopback ;;
+        '*'|0.0.0.0|::|'[::]') scope=all_interfaces ;;
+        *) scope=specific_interface ;;
+      esac
+      application=unknown
+      case "$program" in
+        master|postfix*|smtpd) application=Postfix ;;
+        exim*) application=Exim ;;
+        sendmail*) application=Sendmail ;;
+        dovecot*|imap-login|pop3-login) application=Dovecot ;;
+        courier*) application=Courier ;;
+        apache2|httpd) application=Apache ;;
+        nginx*) application=nginx ;;
+        caddy*) application=Caddy ;;
+        lighttpd*) application=lighttpd ;;
+        proxysql*) application=ProxySQL ;;
+      esac
+      protocol=$transport
+      if [ "$transport" = tcp ]; then
+        case "$port" in
+          25|465|587) protocol=smtp ;;
+          110|995) protocol=pop3 ;;
+          143|993) protocol=imap ;;
+          80|443|8080|8443) protocol=http ;;
+          *) protocol=tcp ;;
+        esac
+      fi
+      manifest_emit listener service "$protocol" transport "$transport" address "$address" port "$port" program "$program" application "$application" binding "$scope" reachability unknown
+      # program=.example -> dot_prefixed_listener; program=nginx -> no name-based indicator.
+      case "$program" in .*)
+        manifest_emit security_indicator indicator dot_prefixed_listener program "$program" address "$address" port "$port" assessment requires_review reason 'Dot-prefixed listening process name; inspect its owner and executable to distinguish expected activity from a possible compromise.';;
+      esac
+    done <<< "$parsed"
+  done
+  return "$result"
+}
+
+# Report aggregate local endpoint use for migration planning. Avoid peer
+# addresses, arbitrary command lines and collecting socket ownership here.
+function manifest_tcp_activity() {
+  local tool=ss rows address port count
+  if ! rows=$(LC_ALL=C manifest_run_bounded 3 ss -nt state established 2>/dev/null); then
+    tool=netstat
+    if ! rows=$(LC_ALL=C manifest_run_bounded 3 netstat -nt 2>/dev/null); then
+      manifest_emit collection_scope probe tcp_activity coverage unavailable
+      return 0
+    fi
+  fi
+  # ss -nt state established:
+  # Recv-Q Send-Q Local Address:Port Peer Address:Port
+  # 0 0 192.0.2.5:22 192.0.2.6:53321 -> local 192.0.2.5, 22.
+  # netstat -nt: tcp 0 0 192.0.2.5:22 192.0.2.6:53321 ESTABLISHED -> same.
+  rows=$(LC_ALL=C awk -v tool="$tool" '
+    tool=="ss" && $1=="Recv-Q" { column=3; next }
+    tool=="ss" && $1=="State" { column=4; next }
+    tool=="ss" && $1=="Netid" { column=5; next }
+    tool=="ss" && column { if (column==3 || $(column-3)=="ESTAB") endpoint=$column; else next }
+    tool=="netstat" && $1 ~ /^tcp[46]?$/ && $6=="ESTABLISHED" { endpoint=$4 }
+    endpoint!="" {
+      address=endpoint; sub(/:[0-9]+$/,"",address)
+      port=substr(endpoint,length(address)+2)
+      endpoint=""
+      if (address !~ /^[][0-9A-Fa-f.:]+$/ || port !~ /^[0-9]+$/ || port+0<1 || port+0>65535) next
+      key=address SUBSEP port
+      if (++total>4096) { limited=1; exit }
+      count[key]++
+    }
+    END {
+      if (limited) print "limit"
+      for(key in count) { split(key,parts,SUBSEP); print parts[1], parts[2], count[key] }
+    }
+  ' <<< "$rows") || return 1
+  while read -r address port count; do
+    case "$address" in
+      '') continue;;
+      limit) manifest_emit collection_scope probe tcp_activity coverage connection_limit;;
+      *) manifest_emit tcp_activity local_address "$address" local_port "$port" connection_count "$count" basis established_tcp_snapshot;;
+    esac
+  done <<< "$rows"
+}
 # Output process names from kernel status metadata only; do not read cmdline/environ.
 # /proc/553/status metadata (literal tabs):
 # Name:	lighttpd
@@ -12250,6 +12328,11 @@ function manifest_service() {
   fi
   case "$name" in postgresql-*) enabled=unknown; enabled_source=cluster_start_policy_not_checked;; esac
   manifest_emit service name "$name" package "$package" version "$version" running "$running" enabled "$enabled" status_source "$running_source" enabled_source "$enabled_source"
+  # A package version cannot establish how a remote driver negotiates TLS.
+  # Raise this once per MariaDB service as planning advice, without client probes.
+  if [ "$name" = mariadb ]; then
+    manifest_emit warning area mariadb_client_tls reason 'For a target at MariaDB 11.4 or later, verify application and replication clients against the target TLS defaults. Plan compatible clients and verified trust before upgrading.'
+  fi
 }
 
 # Resolver addresses only: no search domains, environment or credential configuration.
@@ -12441,7 +12524,7 @@ function manifest_capacity() {
 
 # Interpreter names establish observed consumers; arguments and cron commands never leave the parser.
 function manifest_language_consumers() {
-  local records status language count file line interpreter file_count=0
+  local records status language count file line interpreter script file_count=0 script_paths=${DR_MANIFEST_PHP_CRON_PATHS:-false}
   if "${manifest_processes_available:-false}"; then
     records=$(printf '%s\n' "$manifest_processes" | awk '
       # ps -eo comm=: python2.7 -> Python process count; worker.py is not an interpreter.
@@ -12478,7 +12561,7 @@ function manifest_language_consumers() {
     # /etc/crontab: 0 * * * * root /usr/bin/python2.7 /srv/task.py --token SECRET
     # -> line=1 interpreter=python2.7; command, user, arguments and SECRET are omitted.
     # User crontabs omit the username; @daily uses one schedule field.
-    records=$(printf '%s\n' "$records" | awk -v system_file="${file#"$manifest_root"}" '
+    records=$(printf '%s\n' "$records" | awk -v system_file="${file#"$manifest_root"}" -v script_paths="$script_paths" '
       /^[[:space:]]*(#|$)/ { next }
       /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/ { next }
       {
@@ -12492,11 +12575,24 @@ function manifest_language_consumers() {
         else if (token ~ /^ruby([0-9]+([.][0-9]+)*)?$/) language="Ruby"
         else if (token ~ /^perl([0-9]+([.][0-9]+)*)?$/) language="Perl"
         else if (token ~ /^node(js)?$/) language="JavaScript"
-        if (language != "") print NR, language, token
+        script="unknown"
+        # cron: 0 * * * * root /usr/bin/php -f "/srv/report.php" --token SECRET
+        # -> /srv/report.php. Ignore arguments, shell-expanded paths and wrappers.
+        if (language=="PHP" && script_paths=="true") {
+          operand=$(command+1)
+          if (operand=="-f" || operand=="--file" || operand=="--") operand=$(command+2)
+          if (operand ~ /^"[^"]+"$/ || operand ~ /^\047[^\047]+\047$/) operand=substr(operand,2,length(operand)-2)
+          if (operand ~ /^\/[A-Za-z0-9._\/-]+[.]php$/ && length(operand)<=512) script=operand
+        }
+        if (language != "") print NR, language, token, script
       }')
-    while read -r line language interpreter; do
+    while read -r line language interpreter script; do
       [ -n "$line" ] || continue
-      manifest_emit language_consumer source cron source_file "${file#"$manifest_root"}" source_line "$line" language "$language" interpreter "$interpreter"
+      if [ "$script_paths" = true ] && [ "$language" = PHP ]; then
+        manifest_emit language_consumer source cron source_file "${file#"$manifest_root"}" source_line "$line" language "$language" interpreter "$interpreter" script_path "$script"
+      else
+        manifest_emit language_consumer source cron source_file "${file#"$manifest_root"}" source_line "$line" language "$language" interpreter "$interpreter"
+      fi
     done <<< "$records"
   done
   return 0
@@ -13353,6 +13449,32 @@ function manifest_application() {
     # First line #!/usr/bin/perl -> language=Perl; #!/usr/bin/python3 -> language=Python.
     language=$(awk 'NR == 1 { if ($0 ~ /^#!.*perl/) print "Perl"; else if ($0 ~ /^#!.*python/) print "Python"; else print "unknown"; exit }' <<< "$(manifest_read_metadata "$manifest_root$document_root/index.cgi")")
   fi
+  if [ "$application" = unknown ] && [ "$language" != unknown ] && [ "$execution" != static_file_only ]; then
+    local marker hint hint_name hint_version
+    for marker in README.md README.txt README CHANGELOG.md CHANGELOG.txt CHANGELOG; do
+      marker="$manifest_root$document_root/$marker"
+      [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+      # README.md: "# Example Publisher v2.4.1" -> Example Publisher, 2.4.1.
+      # Generic headings and free-form text stay private.
+      hint=$(head -c 16384 -- "$marker" 2>/dev/null | LC_ALL=C awk '
+        NR <= 8 && length($0)<=100 {
+          line=$0; sub(/\r$/,"",line); sub(/^#[ \t]+/,"",line)
+          if (!match(line,/ (v|version )[0-9]+([.][0-9]+)+([-+][A-Za-z0-9.-]+)?$/)) next
+          name=substr(line,1,RSTART-1); version=substr(line,RSTART+1)
+          sub(/^(v|version )/,"",version)
+          if (name ~ /^[A-Za-z][A-Za-z0-9 -]+$/ && length(name)<=60 &&
+              tolower(name) !~ /^(readme|changelog|release|version|installation|dependencies|password|token|secret)( |$)/) {
+            print name "\t" version; exit
+          }
+        }
+      ')
+      if [ -n "$hint" ]; then
+        IFS=$'\t' read -r hint_name hint_version <<< "$hint"
+        manifest_emit application_hint name "$hint_name" version "$hint_version" document_root "$document_root" marker "${marker#"$manifest_root"}" basis unverified_document_heading
+        break
+      fi
+    done
+  fi
   if [ "$application" = vBulletin ]; then
     local vbulletin_version_pattern='^[0-9]+([.][0-9]+){1,3}( Patch Level [0-9]+)?$'
     [[ "$version" =~ $vbulletin_version_pattern ]] || version=unknown
@@ -13399,7 +13521,8 @@ function manifest_packaged_wordpress() {
 # Observe configured authorities only. Never send URL credentials, request data,
 # browser cookies or redirected requests; curl configuration/proxies are disabled.
 function manifest_http() {
-  local name=$1 scheme=$2 port=$3 key url output status=not_run code=unknown address=unknown verify=unknown reason=observed probe_started=$SECONDS
+  local name=$1 scheme=$2 port=$3 key url output capability_status status=not_run code=unknown address=unknown verify=unknown reason=observed probe_started=$SECONDS
+  local -a curl_options=(-q --silent --head --output /dev/null --noproxy '*' --connect-timeout 2 --max-time 4 --max-redirs 0 --proto '=http,https' --write-out '%{http_code}|%{remote_ip}|%{ssl_verify_result}')
   local host_pattern='^([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])$'
   # example.test/443 -> https://example.test:443/; user@example.test and wildcard names are skipped.
   if [[ ! "$name" =~ $host_pattern ]] || [[ ! "$port" =~ ^[0-9]{1,5}$ ]] ||
@@ -13417,21 +13540,43 @@ function manifest_http() {
   elif [ "${manifest_http_count:-0}" -ge 40 ] || [ $((SECONDS - (${manifest_http_started:-$SECONDS}))) -ge 45 ]; then reason=probe_limit
   elif "${manifest_probe_cache_only:-false}"; then reason=priority_queue_limit
   else
-    manifest_http_count=$(( ${manifest_http_count:-0} + 1 ))
-    # curl write-out: 301|192.0.2.10|0 -> status=301, remote_ip=192.0.2.10, tls_verify_result=0.
-    # Exit 6/28/60 retains DNS/timeout/certificate failure numerically; stderr and response headers are discarded.
-    output=$(manifest_run_bounded 6 curl -q --silent --head --output /dev/null --noproxy '*' --connect-timeout 2 --max-time 4 --max-redirs 0 --proto '=http,https' --write-out '%{http_code}|%{remote_ip}|%{ssl_verify_result}' -- "$url" 2>/dev/null)
-    status=$?
-    IFS='|' read -r code address verify <<< "$output"
-    case "$code" in [0-9][0-9][0-9]) :;; *) code=unknown;; esac
-    case "$address" in ''|*[!0-9A-Fa-f:.]*) address=unknown;; esac
-    case "$verify" in ''|*[!0-9]*) verify=unknown;; esac
-    [ "$status" -eq 0 ] || reason=curl_error
-    if [ "$scheme" = https ]; then
-      # curl can return its default verify=0 before TLS starts (e.g. DNS failure).
-      if [ "$code" = 000 ] && [ "$verify" = 0 ]; then verify=unknown; fi
-    else verify=not_applicable; fi
+    # Old curl rejected the safety options on every request. Test the same
+    # options once without a URL. Never probe with a weaker option set.
+    if [ "${manifest_http_capability:-unchecked}" = unchecked ]; then
+      if manifest_run_bounded 4 curl "${curl_options[@]}" --version >/dev/null 2>&1; then
+        manifest_http_capability=supported
+      else
+        capability_status=$?
+        if [ "$capability_status" -eq 2 ]; then
+          manifest_http_capability=unsupported
+        else
+          manifest_http_capability=capability_unknown
+        fi
+      fi
+    fi
+    if [ "$manifest_http_capability" != supported ]; then
+      reason=curl_$manifest_http_capability
+    else
+      manifest_http_count=$(( ${manifest_http_count:-0} + 1 ))
+      # curl write-out: 301|192.0.2.10|0 -> status=301, remote_ip=192.0.2.10, tls_verify_result=0.
+      # Exit 6/28/60 retains DNS/timeout/certificate failure numerically; stderr and response headers are discarded.
+      output=$(manifest_run_bounded 6 curl "${curl_options[@]}" -- "$url" 2>/dev/null)
+      status=$?
+      IFS='|' read -r code address verify <<< "$output"
+      case "$code" in [0-9][0-9][0-9]) :;; *) code=unknown;; esac
+      case "$address" in ''|*[!0-9A-Fa-f:.]*) address=unknown;; esac
+      case "$verify" in ''|*[!0-9]*) verify=unknown;; esac
+      if [ "$status" -ne 0 ]; then reason=curl_error
+      elif [ "$code" = unknown ] || [ "$code" = 000 ]; then reason=invalid_http_status; fi
+      if [ "$scheme" = https ]; then
+        # curl can return its default verify=0 before TLS starts (e.g. DNS failure).
+        if [ "$code" = 000 ] && [ "$verify" = 0 ]; then verify=unknown; fi
+      else verify=not_applicable; fi
+    fi
   fi
+  case "$reason" in
+    curl_unsupported|curl_capability_unknown|curl_unavailable|curl_error|invalid_http_status|probe_limit|priority_queue_limit) manifest_http_incomplete=true;;
+  esac
   # Network waiting must not consume the separate website-file sampling budget.
   if [ -n "${manifest_web_started:-}" ]; then
     manifest_web_started=$((manifest_web_started + SECONDS - probe_started))
@@ -13481,6 +13626,11 @@ function manifest_website_queue_finish() {
   local manifest_probe_name manifest_probe_scheme manifest_probe_port
   local aliases=0 overflow=false network_started saved_web_started=${manifest_web_started:-$SECONDS}
   local -a group_keys=() group_names=() group_schemes=() group_ports=() group_ranks=() alias_names=()
+  local priority_name requested_name priority_hosts=${DR_MANIFEST_PRIORITY_HOSTS:-}
+  local -a requested_names=()
+  if [ "${#priority_hosts}" -le 1024 ]; then
+    IFS=', ' read -r -a requested_names <<< "$(printf '%s' "$priority_hosts" | LC_ALL=C tr 'A-Z' 'a-z')"
+  fi
   # A queue entry is twelve original manifest_website arguments, not executable
   # shell text: apache | example.invalid,www.example.invalid | 443 | true | ...
   # names are normalized individually so one alias's explicit port cannot leak
@@ -13509,6 +13659,12 @@ function manifest_website_queue_finish() {
       # rank key: WWW.Example.invalid -> www; keep the configured authority intact.
       label=${name%%.*}; label=$(printf '%s' "$label" | LC_ALL=C tr 'A-Z' 'a-z'); rank=0
       case "$label" in www|www[0-9]|webmail|admin|cpanel|whm|autoconfig|autodiscover|mail|ftp) rank=1;; esac
+      if [ "${#requested_names[@]}" -gt 0 ]; then
+        priority_name=$(printf '%s' "$name" | LC_ALL=C tr 'A-Z' 'a-z')
+        for requested_name in "${requested_names[@]:0:5}"; do
+          if [ "$priority_name" = "$requested_name" ]; then rank=-1; break; fi
+        done
+      fi
       if [ "$found" -lt 0 ]; then
         if [ "${#group_keys[@]}" -ge 2048 ]; then overflow=true; continue; fi
         group_keys=("${group_keys[@]}" "$key"); group_names=("${group_names[@]}" "$name")
@@ -13523,7 +13679,7 @@ function manifest_website_queue_finish() {
   # Generated-only admin/webmail mappings can also precede later main vhosts.
   # A representative-first pass alone still exhausted the budget on those maps;
   # finish non-generated representatives before generated-only representatives.
-  for priority_rank in 0 1; do
+  for priority_rank in -1 0 1; do
     for ((group_index=0;group_index<${#group_keys[@]};group_index++)); do
       [ "${group_ranks[group_index]}" -eq "$priority_rank" ] || continue
       manifest_website_probe_network "${group_names[group_index]}" "${group_schemes[group_index]}" "${group_ports[group_index]}"
@@ -13671,7 +13827,7 @@ function manifest_website() {
 }
 
 function manifest_websites() {
-  local server file names port tls document_root user runtime certificate proxy default_user
+  local server file names port tls document_root user runtime certificate proxy default_user binds redirect
   local files records metadata apache_defaults apache_name=unknown apache_root=unknown apache_tls=unknown apache_certificate=unknown apache_http_vhost=false apache_default_tls=false
   for server in apache nginx caddy; do
     default_user=unknown
@@ -13738,7 +13894,7 @@ function manifest_websites() {
       [ -n "$file" ] || continue
       metadata=$(manifest_read_metadata "$file") || { manifest_collection_failed=true; continue; }
       records=$(awk -v server="$server" -v default_user="$default_user" -v apache_name="$apache_name" -v apache_root="$apache_root" -v apache_tls="$apache_tls" -v apache_certificate="$apache_certificate" '
-        function reset( i) { names="unknown"; port="unknown"; tls="unknown"; root="unknown"; user=default_user; runtime="unknown"; certificate="unknown"; proxy="unknown"; tls_ambiguous=0; listeners=0; for (i in ports) delete ports[i]; for (i in secure) delete secure[i] }
+        function reset( i) { names="unknown"; port="unknown"; tls="unknown"; root="unknown"; user=default_user; runtime="unknown"; certificate="unknown"; proxy="unknown"; tls_ambiguous=0; binds="unknown"; redirect="unknown"; context_depth=0; listeners=0; for (i in ports) delete ports[i]; for (i in secure) delete secure[i] }
         function emit( i) {
           if (!active) return
           if (server=="apache") {
@@ -13747,8 +13903,8 @@ function manifest_websites() {
             if (tls=="unknown" && !tls_ambiguous) tls=apache_tls
             if (certificate=="unknown") certificate=apache_certificate
           }
-          if (!listeners) print names "\t" port "\t" tls "\t" root "\t" user "\t" runtime "\t" certificate "\t" proxy
-          else for (i=1; i<=listeners; i++) print names "\t" ports[i] "\t" secure[i] "\t" root "\t" user "\t" runtime "\t" certificate "\t" proxy
+          if (!listeners) print names "\t" port "\t" tls "\t" root "\t" user "\t" runtime "\t" certificate "\t" proxy "\t" binds "\t" redirect
+          else for (i=1; i<=listeners; i++) print names "\t" ports[i] "\t" secure[i] "\t" root "\t" user "\t" runtime "\t" certificate "\t" proxy "\t" binds "\t" redirect
         }
         function certificate_path(value) {
           sub(/^[ \t]*[^ \t]+[ \t]+/,"",value); sub(/[; \t]+$/,"",value)
@@ -13788,15 +13944,41 @@ function manifest_websites() {
             # live probes; unconditional SSLEngine off remains a definite false.
             if (key ~ /^<if(module|define|version)?([ \t>]|$)/ || key ~ /^<if(module|define|version)?$/) { conditional_depth++; next }
             if (key ~ /^<\/if(module|define|version)?>$/) { if(conditional_depth>0) conditional_depth--; next }
-            if (key == "<virtualhost") { emit(); reset(); active=1; port=$2; gsub(/[>]/,"",port); sub(/^.*:/,"",port); next }
+            # <VirtualHost 192.0.2.1:80 [2001:db8::1]:80> -> both literal selectors.
+            if (key == "<virtualhost") {
+              emit(); reset(); active=1; port=$2; sub(/>$/,"",port); sub(/^.*:/,"",port)
+              for (j=2; j<=NF && j<=17; j++) {
+                bind=$j; sub(/>$/,"",bind)
+                if (bind ~ /^([*]|_default_|[0-9.]+|\[[A-Fa-f0-9:.]+\]):([0-9]+|[*])$/) {
+                  if (binds=="unknown") binds=bind; else binds=binds "," bind
+                }
+              }
+              next
+            }
             if (key == "</virtualhost>") { emit(); active=0; next }
             if (!active) next
+            if (key ~ /^<(location|directory|files|proxy)(match)?$/) { context_depth++; next }
+            if (key ~ /^<\/(location|directory|files|proxy)(match)?>$/) { if(context_depth>0) context_depth--; next }
             # ServerName is primary even when ServerAlias appears first.
             if (key == "servername") {
               value=$2; gsub(/[;\042\047]/,"",value)
               if (names == "unknown") names=value; else names=value "," names
             }
             if (key == "serveralias") append_names(2,NF)
+            # Redirect permanent / https://main.example:8443/path?token=x
+            # -> https://main.example:8443. Dynamic and conditional routes need follow-up.
+            if (key == "redirect" && !conditional_depth && !context_depth &&
+                (($2=="/" && NF==3) || ($2 ~ /^(permanent|temp|30[12378])$/ && $3=="/" && NF==4))) {
+              target=$NF; gsub(/^[\047\042]|[\047\042]$/,"",target)
+              scheme=substr(target,1,index(target,"://")+2)
+              sub(/^https?:\/\//,"",target); sub(/[\/?#].*$/,"",target)
+              if (scheme ~ /^https?:\/\/$/ && (target ~ /^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?$/ || target ~ /^\[[A-Fa-f0-9:.]+\](:[0-9]+)?$/)) {
+                target=scheme target
+                if (redirect=="unknown") redirect=target
+                else if (redirect!=target) redirect="ambiguous"
+              }
+            }
+
             if (key == "proxypass" || key == "proxypassmatch") record_proxy($3)
             if (key == "sslcertificatefile") record_certificate(certificate_path($0))
             if (key == "documentroot") { root=$0; sub(/^[ \t]*[^ \t]+[ \t]+/,"",root); gsub(/^[\042\047]|[\042\047][ \t]*$/,"",root) }
@@ -13855,8 +14037,11 @@ function manifest_websites() {
           }
         }
         END { emit() }' <<< "$metadata") || { manifest_collection_failed=true; continue; }
-      while IFS=$'\t' read -r names port tls document_root user runtime certificate proxy; do
+      while IFS=$'\t' read -r names port tls document_root user runtime certificate proxy binds redirect; do
         [ -n "$names" ] || continue
+        if [ "$server" = apache ] && { [ "$binds" != unknown ] || [ "$redirect" != unknown ]; }; then
+          manifest_emit website_route server apache names "$names" config "${file#"$manifest_root"}" bind_selectors "$binds" redirect_authority "$redirect"
+        fi
         manifest_website "$server" "$names" "$port" "$tls" "$document_root" "$user" "$runtime" "${file#"$manifest_root"}" "$certificate" "$proxy"
       done <<< "$records"
     done <<< "$files"
@@ -14659,6 +14844,55 @@ function manifest_ssh_host_keys() {
   fi
 }
 
+function manifest_system() {
+  local os_id=unknown os_version=unknown package_architecture=unknown kernel=unknown kernel_architecture=unknown init=unknown system_release
+  # /etc/os-release: ID=debian and VERSION_ID="12" -> debian, 12.
+  # Legacy /etc/lsb-release: DISTRIB_ID=Ubuntu and DISTRIB_RELEASE=10.04 -> ubuntu, 10.04.
+  for system_release in "$manifest_root/etc/os-release" "$manifest_root/usr/lib/os-release" "$manifest_root/etc/lsb-release"; do
+    [ -f "$system_release" ] || continue
+    IFS=$'\t' read -r os_id os_version <<< "$(head -c 16384 -- "$system_release" 2>/dev/null | LC_ALL=C awk '
+      /^(ID|DISTRIB_ID|VERSION_ID|DISTRIB_RELEASE)=/ {
+        key=$0; sub(/=.*/,"",key)
+        value=substr($0,length(key)+2); sub(/\r$/,"",value)
+        if (value ~ /^"[^"]*"$/ || value ~ /^\047[^\047]*\047$/) value=substr(value,2,length(value)-2)
+        if (seen[key]++) bad=1
+        if (value !~ /^[A-Za-z0-9][A-Za-z0-9._+-]*$/ || length(value)>64) next
+        if (key=="ID" || key=="DISTRIB_ID") id=tolower(value); else version=value
+      }
+      END { printf "%s\t%s\n", (bad || id=="")?"unknown":id, (bad || version=="")?"unknown":version }
+    ')"
+    [ "$os_id" = unknown ] || break
+  done
+  if [ "$os_id" = unknown ] && [ "$manifest_package_backend" = rpm ]; then
+    system_release=$(rpm_distro_output_identity "$manifest_root" 2>/dev/null) || system_release=''
+    if [ -n "$system_release" ]; then IFS=$'\t' read -r os_id os_version _ <<< "$system_release"; fi
+  fi
+  if [ "$os_id" = unknown ] && [ "$manifest_package_backend" = dpkg ] && [ -f "$manifest_root/etc/debian_version" ]; then
+    # Debian derivatives may carry this file too. Identify the base release only.
+    system_release=$(head -c 64 -- "$manifest_root/etc/debian_version" 2>/dev/null)
+    if [[ "$system_release" =~ ^[0-9]+([.][0-9]+)*$ ]]; then
+      manifest_emit system_release_hint source debian_version debian_base_release "$system_release"
+    fi
+  fi
+  if [ -z "$manifest_root" ]; then
+    case "$manifest_package_backend" in
+      dpkg) package_architecture=$(manifest_run_bounded 2 dpkg --print-architecture 2>/dev/null) || package_architecture=unknown;;
+      rpm) package_architecture=$(manifest_run_bounded 2 rpm --eval '%{_arch}' 2>/dev/null) || package_architecture=unknown;;
+    esac
+    kernel=$(uname -r 2>/dev/null) || kernel=unknown
+    kernel_architecture=$(uname -m 2>/dev/null) || kernel_architecture=unknown
+  fi
+  init=$(readlink "$manifest_root/proc/1/exe" 2>/dev/null) || init=unknown
+  init=${init##*/}; init=${init% (deleted)}
+  local system_identifier='^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$'
+  [[ "$package_architecture" =~ $system_identifier ]] || package_architecture=unknown
+  [[ "$kernel" =~ $system_identifier ]] || kernel=unknown
+  [[ "$kernel_architecture" =~ $system_identifier ]] || kernel_architecture=unknown
+  [[ "$init" =~ $system_identifier ]] || init=unknown
+  manifest_emit system package_backend "$manifest_package_backend" hostname "$(hostname 2>/dev/null || printf unknown)" generated_utc "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" local_addresses "${manifest_local_addresses:-unknown}" \
+    os_id "${os_id:-unknown}" os_version "${os_version:-unknown}" package_architecture "$package_architecture" kernel "$kernel" kernel_architecture "$kernel_architecture" init "$init"
+}
+
 function manifest_output() (
   local manifest_format="${1:-text}" manifest_dns_enabled="${2:-${DR_MANIFEST_DNS:-true}}" manifest_root="${3:-/}"
   local manifest_unprivileged=${DR_UNPRIVILEGED:-false} manifest_redact=${MANIFEST_REDACT:-false}
@@ -14674,6 +14908,7 @@ function manifest_output() (
   local manifest_web_roots=0 manifest_web_files=0 manifest_web_findings=0 manifest_web_incomplete=false manifest_web_started=$SECONDS
   local manifest_dns_limit=20 manifest_mail_metrics="${DR_MANIFEST_MAIL_METRICS:-true}"
   local manifest_http_enabled=${DR_MANIFEST_HTTP:-true} manifest_http_seen='' manifest_http_count=0 manifest_http_started=$SECONDS
+  local manifest_http_capability=unchecked manifest_http_incomplete=false
   case "$manifest_http_enabled" in true|false) :;; *) return 1;; esac
   local manifest_dns_addresses manifest_dns_result manifest_dns_reason
   local manifest_apache_php_available=false manifest_apache_php_version=unknown manifest_apache_php_package=unknown
@@ -14699,7 +14934,7 @@ function manifest_output() (
   fi
   [ "$manifest_format" != json ] || printf '{"schema_version":1,"records":['
   manifest_package_backend=$(packages_output_backend "$manifest_root") || manifest_package_backend=unknown
-  manifest_emit system package_backend "$manifest_package_backend" hostname "$(hostname 2>/dev/null || printf unknown)" generated_utc "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" local_addresses "${manifest_local_addresses:-unknown}"
+  manifest_system
   if $manifest_redact; then
     manifest_emit warning area privacy reason 'Server and website identifiers are redacted. Software versions, counts and general configuration remain visible; review before posting.'
   fi
@@ -14710,6 +14945,7 @@ function manifest_output() (
   manifest_probe ssh_host_keys manifest_ssh_host_keys
   manifest_probe hosting_panels manifest_hosting_panels || manifest_collection_failed=true
   manifest_probe listeners manifest_listeners
+  if ! $manifest_unprivileged; then manifest_probe tcp_activity manifest_tcp_activity; fi
   manifest_probe process_indicators manifest_process_indicators
   manifest_probe executable_indicators manifest_executable_indicators
   manifest_probe schedule_indicators manifest_schedule_indicators
@@ -14731,6 +14967,11 @@ function manifest_output() (
   manifest_website_queue_active=true
   manifest_probe websites manifest_websites
   manifest_website_queue_finish
+  if $manifest_http_incomplete; then
+    manifest_emit probe_status probe website_http result partial coverage 'Some HTTP observations could not be made; see individual website_probe reasons.'
+  elif [ "$manifest_http_count" -gt 0 ]; then
+    manifest_emit probe_status probe website_http result observed coverage bounded_head_requests
+  fi
   manifest_probe packaged_wordpress manifest_packaged_wordpress
   if $manifest_web_incomplete; then
     manifest_emit warning area security_websites reason 'Website security sampling is incomplete: unreadable, large or indirect files, failed probes or limits (20 roots, 200 files/findings, 256 KiB per file, 15 seconds plus the final probe). Only top-level files and common upload/cache and WordPress plugin directories to depth 3 are sampled.'

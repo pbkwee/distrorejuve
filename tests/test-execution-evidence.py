@@ -257,6 +257,55 @@ class ExecutionAndModeTests(unittest.TestCase):
                 with self.subTest(path=bad), self.assertRaises(ValueError):
                     MODULE.capture_modes(root, [bad])
 
+    def test_readiness_compares_full_permission_mode_without_restoring_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / 'group-dir'
+            nested.mkdir()
+            nested.chmod(0o2775)
+            executable = nested / 'worker'
+            executable.touch()
+            executable.chmod(0o4755)
+            paths = root / 'paths.json'
+            paths.write_text(json.dumps(['group-dir/worker']))
+            expected = root / 'original.json'
+            snapshot = MODULE.capture_modes(root, ['group-dir/worker'])
+            self.assertEqual([row['mode'] for row in snapshot['paths']], [0o2775, 0o4755])
+            MODULE.write_receipt(expected, snapshot)
+            args = ['capture-modes', '--root', str(root), '--paths', str(paths),
+                    '--expected', str(expected)]
+            with patch('builtins.print'):
+                self.assertEqual(MODULE.main(args), 0)
+                nested.chmod(0o775)
+                self.assertEqual(MODULE.main(args), 1)
+            self.assertEqual(stat.S_IMODE(nested.stat().st_mode), 0o775)
+
+    def test_database_retention_keeps_decimal_semantics(self):
+        before = {'expire_logs_days': 10}
+        self.assertEqual(MODULE.compare_database_retention(before, {'expire_logs_days': '10.000000'})['status'], 'passed')
+        changed = MODULE.compare_database_retention(before, {'expire_logs_days': '10.25'})
+        self.assertEqual(changed['changed_settings'], ['expire_logs_days'])
+        for after in ({}, {'expire_logs_days': 10.0}, {'expire_logs_days': '10 days'}, {'unrelated': '10'}):
+            with self.subTest(after=after), self.assertRaises(ValueError):
+                MODULE.compare_database_retention(before, after)
+
+    def test_cold_copy_budget_and_partial_verification(self):
+        self.assertEqual(MODULE.cold_copy_budget(5200, 100, 5, 600)['copy_budget_seconds'], 520)
+        self.assertEqual(MODULE.cold_copy_budget(5200, 100, 5, 300)['status'], 'failed')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, partial = root / 'original', root / 'partial'
+            source.write_bytes(b'original data')
+            partial.write_bytes(b'original')
+            self.assertEqual(MODULE.verify_copy_prefix(source, partial)['status'], 'passed')
+            self.assertEqual(MODULE.verify_copy_prefix(source, partial, complete=True)['status'], 'failed')
+            partial.write_bytes(b'modified')
+            self.assertEqual(MODULE.verify_copy_prefix(source, partial)['status'], 'failed')
+            partial.write_bytes(source.read_bytes())
+            self.assertTrue(MODULE.verify_copy_prefix(source, partial, complete=True)['complete'])
+            with self.assertRaises(ValueError):
+                MODULE.verify_copy_prefix(source, source)
+
     def test_deployment_rejects_special_files_and_hardlinks_without_blocking(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

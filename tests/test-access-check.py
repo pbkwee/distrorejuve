@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -70,6 +71,33 @@ class AccessTests(unittest.TestCase):
             run.side_effect = subprocess.TimeoutExpired('ssh-add', 5)
             self.assertEqual(MODULE.check_agent(path)['status'], 'agent_timeout')
         self.with_socket(None, verify)
+
+    def test_real_stalled_socket_produces_a_bounded_cli_result(self):
+        with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_UNIX) as server:
+            path = str(Path(directory) / 'agent')
+            try:
+                server.bind(path)
+            except PermissionError:
+                self.skipTest('local Unix socket bind is restricted in this sandbox')
+            server.listen()
+            with subprocess.Popen(['python3', str(SPEC.origin), 'agent', '--socket', path, '--timeout', '1'],
+                                  stdout=subprocess.PIPE, text=True) as client:
+                server.settimeout(2)
+                connection, _ = server.accept()
+                with connection:
+                    out, _ = client.communicate(timeout=3)
+            result = json.loads(out)
+            self.assertEqual(result['status'], 'agent_timeout')
+            self.assertEqual(result['fingerprints'], [])
+            self.assertIn('responsive_designated_socket', result['next_action'])
+
+    def test_separate_negotiation_from_trust_and_server_denial(self):
+        for diagnostic, status in (
+                ('Unable to negotiate: no matching host key type found. Their offer: ssh-rsa', 'host_key_algorithm_mismatch'),
+                ('send_pubkey_test: no mutual signature algorithm\\nPermission denied (publickey).', 'login_signature_mismatch'),
+                ('Host key verification failed', 'host_trust_unresolved'),
+                ('Permission denied (publickey).', 'authentication_denied')):
+            self.assertEqual(MODULE.classify_ssh(255, diagnostic)['status'], status)
 
     def test_regular_file_is_not_queried_as_socket(self):
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(MODULE.subprocess, 'run') as run:

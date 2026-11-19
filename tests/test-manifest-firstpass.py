@@ -66,6 +66,69 @@ manifest_language_consumers
         self.assertNotIn('worker.py', result.stdout)
         self.assertNotIn('language PHP process_count', result.stdout)
 
+    def test_scoped_cron_operand_and_connection_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'etc').mkdir()
+            (root / 'etc/crontab').write_text(
+                '@daily root /usr/bin/php -f "/srv/weekly.php" --token SECRET\n'
+                '@daily root php -d password=SECRET /srv/unresolved.php\n')
+            result = run(['manifest_language_consumers', 'manifest_read_metadata', 'manifest_tcp_activity'], f'''
+manifest_root={directory!r}
+DR_MANIFEST_PHP_CRON_PATHS=true
+manifest_emit() {{ printf '%s\\n' "$*"; }}
+manifest_language_consumers
+manifest_run_bounded() {{
+  printf '%s\\n' 'Recv-Q Send-Q Local Address:Port Peer Address:Port' \
+    '0 0 192.0.2.5:22 192.0.2.6:50001' '0 0 192.0.2.5:22 192.0.2.6:50002' \
+    '0 0 [2001:db8::1]:443 [2001:db8::2]:54443'
+}}
+manifest_tcp_activity
+''')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('script_path /srv/weekly.php', result.stdout)
+            self.assertIn('script_path unknown', result.stdout)
+            self.assertIn('192.0.2.5 local_port 22 connection_count 2', result.stdout)
+            self.assertIn('[2001:db8::1] local_port 443 connection_count 1', result.stdout)
+            for private in ('SECRET', 'unresolved.php', '192.0.2.6', '[2001:db8::2]'):
+                self.assertNotIn(private, result.stdout)
+
+    def test_system_reports_release_and_mixed_architectures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'etc').mkdir()
+            (root / 'etc/os-release').write_text('ID=debian\nVERSION_ID="12"\n')
+            result = run(['manifest_system'], f'''
+manifest_root={directory!r}
+manifest_package_backend=dpkg
+manifest_emit() {{ printf '%s\\n' "$*"; }}
+readlink() {{ printf '/lib/systemd/systemd\\n'; }}
+manifest_system
+manifest_root=
+head() {{ printf 'DISTRIB_ID=Ubuntu\\nDISTRIB_RELEASE=10.04\\n'; }}
+manifest_run_bounded() {{ printf '%s\\n' i386; }}
+uname() {{ case "$1" in -m) printf 'x86_64\\n';; -r) printf '6.1.0-fixture\\n';; esac; }}
+manifest_system
+''')
+            self.assertIn('os_id debian os_version 12 package_architecture unknown', result.stdout)
+            self.assertIn('os_id ubuntu os_version 10.04 package_architecture i386 kernel 6.1.0-fixture kernel_architecture x86_64 init systemd', result.stdout)
+
+    def test_application_hint_is_distinct_from_confirmed_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'site').mkdir()
+            (root / 'site/index.php').touch()
+            (root / 'site/README.md').write_text('# Example Publisher v2.4.1\nPrivate body SECRET\n')
+            result = run(['manifest_application'], f'''
+manifest_root={directory!r}
+manifest_emit() {{ printf '%s\\n' "$*"; }}
+manifest_application /site
+''')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('application_hint name Example Publisher version 2.4.1', result.stdout)
+            self.assertIn('application unknown version unknown', result.stdout)
+            self.assertNotIn('SECRET', result.stdout)
+
     def test_reduced_mode_and_missing_snapshot(self):
         result = run(['manifest_language_consumers'], r'''
 manifest_root=/fixture
@@ -79,6 +142,45 @@ manifest_language_consumers
         self.assertIn('reason process_snapshot_unavailable', result.stdout)
         self.assertIn('cron skipped_unprivileged', result.stdout)
         self.assertNotIn('SECRET', result.stdout)
+
+    def test_tcp_and_udp_listeners_preserve_transport_and_ownership(self):
+        result = run(['manifest_listeners', 'manifest_listener_rows'], r'''
+manifest_emit() { printf '%s\n' "$*"; }
+manifest_run_bounded() {
+  case "$2:$3" in
+    ss:-lntp) printf '%s\n' 'LISTEN 0 128 127.0.0.1:25 *:* users:(("master",pid=12,fd=3))';;
+    ss:-lnup) printf '%s\n' 'UNCONN 0 0 [::]:9987 [::]:* users:(("ts3server",pid=42,fd=3))' 'UNCONN 0 0 0.0.0.0:443 0.0.0.0:*' 'UNCONN 0 0 missing-port *:*' 'ESTAB 0 0 127.0.0.1:53 192.0.2.10:123';;
+    ss:-lnt) printf '%s\n' 'Recv-Q Send-Q Local Address:Port Peer Address:Port' '0 128 *:10011 *:*';;
+    ss:-lnu) return 1;;
+    netstat:-lnu) printf '%s\n' 'udp6 0 0 :::9987 :::*' 'udp 0 0 127.0.0.1:53 0.0.0.0:*';;
+    *) return 1;;
+  esac
+}
+manifest_listeners
+manifest_unprivileged=true
+manifest_listeners
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('service smtp transport tcp address 127.0.0.1 port 25 program master', result.stdout)
+        self.assertIn('service udp transport udp address [::] port 9987 program ts3server', result.stdout)
+        self.assertIn('service udp transport udp address 0.0.0.0 port 443 program unknown', result.stdout)
+        self.assertIn('service tcp transport tcp address * port 10011 program unknown', result.stdout)
+        self.assertIn('service udp transport udp address :: port 9987 program unknown', result.stdout)
+        self.assertIn('service udp transport udp address 127.0.0.1 port 53 program unknown', result.stdout)
+        self.assertEqual(result.stdout.count('reachability unknown'), 6)
+
+    def test_mariadb_tls_manifest_finding_is_advisory(self):
+        result = run(['manifest_service'], r'''
+manifest_emit() { printf '%s\n' "$*"; }
+manifest_root=/nonexistent-fixture
+manifest_unprivileged=true
+manifest_processes=mariadbd
+manifest_service mariadb mariadb-server 10.11
+manifest_service mysql mysql-server 8.0
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count('warning area mariadb_client_tls'), 1)
+        self.assertIn('verify application and replication clients', result.stdout)
 
     def test_service_state_failures_preserve_partial_rows_and_fail_probe(self):
         with tempfile.TemporaryDirectory() as directory:

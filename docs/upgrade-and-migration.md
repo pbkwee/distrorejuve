@@ -232,6 +232,8 @@ separate disks. Plan database-format recovery and preservation of writes accepte
 after cutover alongside system-file and snapshot restoration. Specify database consistency,
 backup scope, encryption-key references, off-server storage, integrity/restore
 evidence, console/rescue access, retention and compatible startup order.
+For database paths outside the datadir and a writer-stopped copy, use
+[database recovery coverage and cold copies](application-transitions.md#database-recovery-coverage-and-cold-copies).
 Plan a verified [rescue access route](rescue-access.md) for SSH or networking
 failures, including the key, outage authority and return to normal boot.
 Rescue access repairs the installed system; it does not provide data rollback.

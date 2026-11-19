@@ -266,6 +266,10 @@ what was retained and why; rerun affected service/application and post-boot chec
 An empty upgrade simulation does not mean obsolete packages or residual configs
 have disappeared. See [Debian's cleanup guidance](https://www.debian.org/releases/trixie/release-notes/upgrading.en.html#cleanup-after-the-upgrade).
 
+Before each cleanup removal, the normal execution log prints the exact selected
+package and architecture list and points to the saved guarded simulation.
+The main release plan and the later cleanup simulations remain separate records.
+
 There are three different cases:
 
 | Case | Meaning | Treatment |

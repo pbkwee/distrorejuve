@@ -126,3 +126,11 @@ purpose or returned fields, or the existing authority is missing or withdrawn.
 A supplied manifest alone permits offline analysis. Addresses inside it do not
 authorize a connection. Assessment discovery does not authorize service changes,
 resource purchases, backup transfers or external correspondence.
+
+During collector revision review, account for the literal PHP script operands
+projected from conventional cron files, local established TCP counts and
+endpoints, and name/version hints from bounded top-level README or CHANGELOG
+prefixes. Cron arguments and peer addresses stay private. Generic document
+hints and private paths are redacted from public manifests. Scope any separate
+mail log projection by the approved files or journal units and period. Run it
+on the source and retain only the aggregate result.

@@ -22,7 +22,14 @@ def classify_ssh(status, diagnostic):
         reason, action = 'connected', 'continue_with_recorded_discovery_scope'
     elif 'remote host identification has changed' in lower or 'offending ' in lower and ' key in ' in lower:
         reason, action = 'changed_host_key', 'resolve_expected_identity_before_retry'
-    elif 'host key verification failed' in lower or 'no matching host key type found' in lower:
+    # OpenSSH: "no matching host key type found. Their offer: ssh-rsa" and
+    # "send_pubkey_test: no mutual signature algorithm" refer to distinct stages.
+    # Neither outcome changes the recorded host-key pin.
+    elif 'no matching host key type found' in lower:
+        reason, action = 'host_key_algorithm_mismatch', 'review_host_scoped_legacy_host_key_options'
+    elif 'no mutual signature algorithm' in lower or 'not in pubkeyacceptedalgorithms' in lower:
+        reason, action = 'login_signature_mismatch', 'review_host_scoped_legacy_login_signature_options'
+    elif 'host key verification failed' in lower:
         reason, action = 'host_trust_unresolved', 'reuse_or_resolve_recorded_host_trust_policy'
     elif 'agent refused operation' in lower or 'communication with agent failed' in lower:
         # OpenSSH appends a generic authentication denial after a signing-agent
@@ -98,6 +105,8 @@ def main(argv=None):
     try:
         if args.command == 'agent':
             result = check_agent(args.socket, args.expected_fingerprint, args.timeout)
+            if result['status'] == 'agent_timeout':
+                result['next_action'] = 'refresh_forwarding_or_supply_a_responsive_designated_socket'
             success = result['status'] == 'agent_ready'
         else:
             # A bounded excerpt must also be a regular file: opening a FIFO can

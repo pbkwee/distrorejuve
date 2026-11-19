@@ -50,7 +50,7 @@ manifest_apache_php_available=false
 manifest_fpm_sockets=(); manifest_fpm_users=(); manifest_fpm_versions=(); manifest_fpm_packages=()
 manifest_seen_roots=''
 manifest_web_started=$SECONDS
-fixture_dns=true; fixture_timeout=true; fixture_curl=true
+fixture_dns=true; fixture_timeout=true; fixture_curl=true; fixture_legacy_curl=false
 manifest_emit() {{ printf '%s\\n' "$*"; }}
 manifest_application() {{ printf 'application-metadata %s\\n' "$1"; }}
 manifest_web_indicators() {{ printf 'file-metadata %s\\n' "$1"; }}
@@ -65,6 +65,11 @@ manifest_run_bounded() {{
     getent) printf 'dns\\t%s\\n' "$3" >> "$fixture_trace"; printf '192.0.2.10 STREAM example.invalid\\n';;
     curl)
       fixture_url="${{@: -1}}"
+      if [ "$fixture_url" = --version ]; then
+        printf 'capability\\t%s\\n' "$*" >> "$fixture_trace"
+        if "$fixture_legacy_curl"; then return 2; fi
+        return 0
+      fi
       printf 'http\\t%s\\n' "$fixture_url" >> "$fixture_trace"
       case "$fixture_url" in https://streamproxy.example.invalid:443/)
         printf '000||60\\n'; return 60;;
@@ -84,7 +89,56 @@ printf 'COUNTS %s %s\\n' "${{#manifest_dns_names[@]}}" "$manifest_http_count"
         output,trace=result.stdout.split('TRACE-BEGIN\n')
         events=[tuple(line.split('\t',1)) for line in trace.splitlines() if '\t' in line]
         counts=tuple(map(int,re.search(r'COUNTS (\d+) (\d+)',trace).groups()))
-        return output,events,counts
+        capabilities = [value for kind, value in events if kind == 'capability']
+        self.assertLessEqual(len(capabilities), 1)
+        if capabilities:
+            self.assertIn('--noproxy *', capabilities[0])
+            self.assertIn('--proto =http,https', capabilities[0])
+        return output, [event for event in events if event[0] != 'capability'], counts
+
+    def test_customer_alias_leads_existing_probe_budget(self):
+        body = ''.join(self.site(f'site{n}.example.invalid', f'/srv/{n}') for n in range(23))
+        body += self.site('apex.example.invalid,www.publisher.example.invalid', '/srv/publisher')
+        body += 'manifest_website_queue_finish\n'
+        _, events, counts = self.collect(
+            body, setup='DR_MANIFEST_PRIORITY_HOSTS=WWW.PUBLISHER.example.invalid,unconfigured.example.invalid')
+        self.assertEqual(events[0], ('dns', 'www.publisher.example.invalid'))
+        self.assertFalse(any('unconfigured' in value for _, value in events))
+        self.assertLessEqual(counts[0], 20)
+        self.assertLessEqual(counts[1], 40)
+
+    def test_literal_apache_bind_and_redirect_authority(self):
+        conf = '''<VirtualHost 192.0.2.1:80 [2001:db8::1]:80>
+ServerName origin.example.invalid
+Redirect permanent / https://publish.example.invalid:8443/path?token=SECRET
+<IfModule mod_alias.c>
+Redirect permanent / https://conditional.example.invalid/
+</IfModule>
+</VirtualHost>
+<VirtualHost *:80>
+ServerName other.example.invalid
+Redirect / https://user:SECRET@private.example.invalid/
+</VirtualHost>
+'''
+        out, _, _ = self.collect('manifest_websites', setup=r'''
+manifest_config_files() { if [ "$1" = apache ]; then printf '%s\n' "$manifest_root/vhost.conf"; fi; }
+manifest_read_metadata() { cat -- "$1"; }
+manifest_lighttpd_websites() { :; }
+''', extra=['manifest_websites'], files={'vhost.conf': conf})
+        self.assertIn('bind_selectors 192.0.2.1:80,[2001:db8::1]:80 redirect_authority https://publish.example.invalid:8443', out)
+        for private in ('SECRET', 'conditional.example', 'private.example'):
+            self.assertNotIn(private, out)
+
+    def test_legacy_curl_leaves_each_http_probe_unknown(self):
+        output, events, counts = self.collect(
+            'manifest_http one.example.invalid http 80\n'
+            'manifest_http two.example.invalid https 443\n'
+            'printf "incomplete=%s\\n" "$manifest_http_incomplete"',
+            setup='fixture_legacy_curl=true')
+        self.assertEqual(counts, (0, 0))
+        self.assertEqual(events, [])
+        self.assertEqual(output.count('reason curl_unsupported'), 2)
+        self.assertIn('incomplete=true', output)
 
     def site(self,name,root,server='apache',port='80',tls='false',config='sites.conf',proxy='unknown'):
         return 'manifest_website '+ ' '.join(shlex.quote(s) for s in [server,name,str(port),tls,root,'www-data','unknown',config,'unknown',proxy])+'\n'

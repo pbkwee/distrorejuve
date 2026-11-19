@@ -151,6 +151,9 @@ connection limit and four-second total limit. The website phase probes at most 4
 unique protocol/authority pairs with a 45-second shared budget. Duplicate pairs
 are cached. DNS and mail metrics retain their existing controls. Comparison
 snapshots disable HTTP probing to keep them local.
+Use `DR_MANIFEST_PRIORITY_HOSTS` for up to five comma-separated known names.
+Matching configured names can take their vhost's first probe slot.
+
 
 For an owner assessment, group aliases by application and explain the upgrade
 implications for each workload. Put vhost/version-file paths, routing, precise
@@ -365,3 +368,19 @@ for current-release package work and `--to-next-ubuntu` for one Ubuntu release
 step. S2I provides the standard recovery-archive commands. Per-job orchestration
 may supply approved paths, supervision and log destinations; reusable discovery
 and upgrade logic belongs in the tools.
+
+## Assessment leads for site and service follow-up
+
+The system record includes OS ID and version, native package architecture,
+running kernel release and architecture, and PID 1 executable name where
+available. An old Debian-family release file may identify only a base release.
+Apache literal bind selectors and unconditional root redirect authorities are
+reported separately from public reachability. Full collection includes sampled
+established TCP counts by local endpoint.
+
+An unidentified application with a conventional runtime marker may have an
+unverified title and version in a top-level README or CHANGELOG. Direct PHP
+cron calls may include an absolute literal script operand when the job allows
+paths and sets `DR_MANIFEST_PHP_CRON_PATHS=true`. Dynamic commands
+and unsupported options need targeted follow-up. See the
+[workload checks](../.agents/skills/server-upgrade/references/assessment-report.md#follow-up-on-workloads).

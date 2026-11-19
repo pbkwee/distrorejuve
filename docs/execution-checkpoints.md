@@ -138,6 +138,14 @@ replacement timers/services before recording an old unit as retired. Preserve
 the failed-state evidence before an approved targeted restart or reset; avoid
 blanket restarts, resets or authentication-policy changes.
 
+At a no-reboot checkpoint, verify a new SSH session alongside the existing
+connection. If session creation fails, or a session manager is known to retain
+a replaced binary, run the bounded
+[stale-process check](execution-evidence.md#process-listeners-and-stale-executables)
+as part of that checkpoint. After a targeted refresh covered by the plan,
+verify a fresh session, the same boot ID, and the original SSH and workload
+processes that the plan requires to remain active.
+
 For PAM/session failures during a version transition, compare installed versions
 with the running executable identity of logind, D-Bus and the affected user
 manager. Check runtime-directory ownership, cgroups and PID 1 independently.

@@ -657,6 +657,7 @@ upgrade_php_output_default_branch
                 result = run(['upgrade_remove_retired_packages', 'upgrade_cleanup_plan_has_dependency_conflict',
                               'upgrade_cleanup_output_removals'], rf'''
 mode={mode}
+exec 3>&2
 APT_GET_INSTALL_OPTIONS=
 id() {{ printf '0\n'; }}
 config_state_output_baseline() {{ printf '%s\n' {str(baseline)!r}; }}
@@ -687,7 +688,7 @@ apt-get() {{
           return 100;;
         *) printf 'Remv libold1 [1]\n';;
       esac;;
-    *--no-download*) printf 'applied:%s\n' "$*";;
+    *--no-download*) printf 'starting-actual-removal\n' >&3; printf 'applied:%s\n' "$*";;
     check) :;;
   esac
 }}
@@ -701,6 +702,10 @@ upgrade_remove_retired_packages ubuntu jammy noble
                     self.assertTrue(all('libaio1' not in line and 'mysql-server-core' not in line for line in applied))
                     self.assertIn('libold1:amd64', result.stdout)
                     self.assertIn('Retaining obsolete packages', result.stderr)
+                    preview = result.stderr.index('Obsolete cleanup planned removals')
+                    action = result.stderr.index('starting-actual-removal')
+                    self.assertLess(preview, action)
+                    self.assertIn('\nlibold1:amd64\n', result.stderr[preview:action])
                 elif mode == 'protected_conflict':
                     self.assertIn('record:obsolete deferred - protected dependency conflict', result.stdout)
                     self.assertIn('APT status 100', result.stderr)

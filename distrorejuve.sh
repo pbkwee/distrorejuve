@@ -98,17 +98,14 @@ function print_usage() {
   echo "
 # distrorejuve
 
-distrorejuve is a utility that helps with upgrading distros. It works on a number of different distros (Ubuntu,
-Debian, Centos). It uses apt, yum and repository corrections as appropriate. It can dist upgrade between
-multiple versions for Ubuntu and Debian.  It can convert (some) distros from 32bit to 64 bit (a cross grade).
+distrorejuve checks and upgrades Linux servers. It upgrades Debian and Ubuntu through successive releases
+and updates packages on supported RPM systems. Some Debian and Ubuntu releases can move from i386 to amd64.
 
-If you are using the script to make changes, please take a full backup first.
+Start with a read-only check of this server and its upgrade path:
 
-Example usage to download the latest version of the script, then dist upgrade to latest Debian or Ubuntu disto.
+sudo bash distrorejuve.sh --check-upgrade
 
-wget -O distrorejuve.sh --no-check-certificate https://raw.githubusercontent.com/pbkwee/distrorejuve/master/distrorejuve.sh
-
-sudo bash distrorejuve.sh --to-latest
+Take a full backup before running an upgrade.
 
 Uses:
 - Enable lts archive for Debian squeeze servers and old-releases for Ubuntu
@@ -1428,7 +1425,8 @@ function apt_sources_check_releases_and_vendors() {
       fi
       case "$suite" in *-backports*)
         if ! "${DR_ALLOW_BACKPORTS:-false}"; then
-          echo "dss:warn: $file:$line enables backports ($suite); disable before upgrading or export DR_ALLOW_BACKPORTS=true." >&2; ret=1
+          printf 'dss:error: The APT source at %s:%s enables %s. Disable that backports entry before upgrading. To keep it after review, set DR_ALLOW_BACKPORTS=true for the upgrade command.\n' "$file" "$line" "$suite" >&2
+          ret=1
         fi;;
       esac
       continue
@@ -2041,12 +2039,13 @@ function upgrade_precondition_checks() {
   fi
   if [  ! -z "$libx11" ]; then
     dpkg-query -W -f='${Status} ${Section} ${Package}\n'  | grep '^install ok installed' | egrep 'x11|gnome' | sort -k 4 | sed 's/install ok installed //' | awk '{print "dss:x11related:" $0}'
-    echo "dss:warn:x11-common installed.  You may hit conflicts.  To resolve: apt-get -y remove x11-common $libx11; apt-get -y autoremove.  To skip this check run: export DR_SKIP_X11_CHECK=true.  To automatically remove X11 libs use export DR_REMOVE_X11_PACKAGES=true"
+    printf 'dss:warn: Review these installed X11 or desktop packages before upgrading: %s\n' "${libx11% }" >&2
     if "${DR_REMOVE_X11_PACKAGES:-false}"; then
       apt_get_apply -y remove $libx11 || ret=$(($ret+1))
       apt_get_apply -y autoremove
-    else
-      "${DR_SKIP_X11_CHECK:-false}" || ret=$(($ret+1))
+    elif ! "${DR_SKIP_X11_CHECK:-false}"; then
+      echo 'dss:error: The X11 package check stopped the upgrade. Check which applications use the listed packages. Set DR_SKIP_X11_CHECK=true to keep them or DR_REMOVE_X11_PACKAGES=true if you have reviewed their removal.' >&2
+      ret=$((ret+1))
     fi
   fi
 
@@ -4979,12 +4978,24 @@ function upgrade_services_check() {
   local directory=$1 baseline=${2:-${1%.services}} roles family selector package state status=0 result
   if [ ! -f "$directory/services.before" ] || [ -L "$directory/services.before" ] || [ ! -r "$directory/services.before" ]; then
     upgrade_services_check_legacy "$baseline"
-    return $?
+    result=$?
+    if [ "$result" -eq 2 ]; then
+      printf 'dss:warn: The pre-upgrade service list is unavailable at %s/services.before. Check SSH, mail, databases, and other services this server provides.\n' "$directory" >&2
+    fi
+    return "$result"
   fi
-  roles=$(upgrade_services_output_roles) || return 2
+  roles=$(upgrade_services_output_roles) || {
+    echo 'dss:warn: The installed service package list could not be read. Check the dpkg-query output in the run log.' >&2
+    return 2
+  }
   while IFS=$'\t' read -r family selector package state; do
     [ -n "$family" ] || continue
-    case "$state" in inactive) continue;; active) :;; *) [ "$status" -eq 1 ] || status=2; continue;; esac
+    case "$state" in
+      inactive) continue;;
+      active) :;;
+      *) printf 'dss:warn: The pre-upgrade check could not tell whether %s (%s) was running. Check its current status if this server uses it.\n' "$family" "$selector" >&2
+         [ "$status" -eq 1 ] || status=2; continue;;
+    esac
     if upgrade_services_package_was_retired "$baseline" "$package"; then
       if upgrade_services_is_active "$family" "$selector"; then
         echo "dss:error: Approved retired service $family ($selector) is still running." >&2
@@ -4993,20 +5004,32 @@ function upgrade_services_check() {
         result=$?
         if [ "$result" -eq 1 ]; then
           echo "dss:info: Approved retired service $family ($selector) is inactive; removed package $package retained in the original inventory." >&2
-        else [ "$status" -eq 1 ] || status=2; fi
+        else
+          printf 'dss:warn: Could not confirm that retired service %s (%s) stopped. Check its current status.\n' "$family" "$selector" >&2
+          [ "$status" -eq 1 ] || status=2
+        fi
       fi
       continue
     else
       result=$?
-      if [ "$result" -ne 1 ]; then [ "$status" -eq 1 ] || status=2; continue; fi
+      if [ "$result" -ne 1 ]; then
+        printf 'dss:warn: Could not check the retirement record for %s (%s). Check whether the service should still be running.\n' "$family" "$selector" >&2
+        [ "$status" -eq 1 ] || status=2; continue
+      fi
     fi
     if upgrade_services_package_was_purged "$baseline" "$package"; then continue
-    else result=$?; if [ "$result" -ne 1 ]; then [ "$status" -eq 1 ] || status=2; continue; fi; fi
+    else
+      result=$?
+      if [ "$result" -ne 1 ]; then
+        printf 'dss:warn: Could not check the package removal record for %s. Check whether %s (%s) should still be running.\n' "$package" "$family" "$selector" >&2
+        [ "$status" -eq 1 ] || status=2; continue
+      fi
+    fi
     if awk -F '\t' -v family="$family" '$1 == family { found=1 } END { exit !found }' <<< "$roles"; then :
     else
       result=$?
       if [ "$result" -eq 1 ]; then
-        echo "dss:error: Previously active $family ($selector) no longer has its installed service role; removal was not recorded as intentional." >&2
+        printf 'dss:error: Previously active service %s (%s) is missing from the installed packages. Check the package removals for %s in the run log.\n' "$family" "$selector" "$package" >&2
         status=1
       else [ "$status" -eq 1 ] || status=2; fi
       continue
@@ -5022,10 +5045,10 @@ function upgrade_services_check() {
     else
       result=$?
       if [ "$result" -eq 1 ]; then
-        echo "dss:error: Previously active $family ($selector) is now stopped/failed; no automatic restart was attempted." >&2
+        printf 'dss:error: Previously active service %s (%s) is now stopped or failed. Read its service log before restarting it.\n' "$family" "$selector" >&2
         status=1
       else
-        echo "dss:warn: Cannot verify previously active $family ($selector); service health is incomplete." >&2
+        printf 'dss:warn: The status check could not tell whether %s (%s) is still running. Check its status and service log.\n' "$family" "$selector" >&2
         [ "$status" -eq 1 ] || status=2
       fi
     fi
@@ -5136,10 +5159,13 @@ function upgrade_workload_check() {
   local baseline=$1 phase=$2 contract="$1.workload/contract.tsv" baseline_digest contract_digest kind id subject expected last result state status=0 report=''
   case "$phase" in before|after) :;; *) return 1;; esac
   if [ ! -f "$contract" ]; then
-    echo 'dss:warn: Workload acceptance is not recorded; application completion remains unverified.' >&2
+    echo 'dss:stage: No application tests were supplied. Test the functions this server provides, such as loading a site or delivering mail.' >&2
     return 2
   fi
-  upgrade_workload_validate_contract "$contract" || { echo 'dss:error: Invalid or unprotected workload acceptance contract.' >&2; return 1; }
+  upgrade_workload_validate_contract "$contract" || {
+    printf 'dss:error: Cannot use the application test list at %s. Check its format and permissions. Use a root-owned file with mode 600 in a root-owned directory with mode 700.\n' "$contract" >&2
+    return 1
+  }
   baseline_digest=$(sha256sum -- "$baseline") && contract_digest=$(sha256sum -- "$contract") || return 1
   baseline_digest=${baseline_digest%% *}; contract_digest=${contract_digest%% *}
   if [ -n "${DR_RUN_DIRECTORY:-}" ]; then
@@ -5210,8 +5236,11 @@ function upgrade_workload_prepare() {
 function upgrade_services_verify() {
   local baseline status
   if baseline=$(config_state_output_baseline); then upgrade_services_check "$baseline.services" "$baseline"; status=$?
-  else status=2; fi
-  case "$status" in 0) return 0;; 1) return 1;; *) echo 'dss:warn: Common-service verification is incomplete; review service status before treating the upgrade as fully verified.' >&2; return 0;; esac
+  else
+    echo 'dss:warn: No pre-upgrade snapshot is available. Check the services this server provides, such as SSH, mail, or databases.' >&2
+    status=2
+  fi
+  case "$status" in 1) return 1;; *) return 0;; esac
 }
 
 # A selected original also selects one durable, source-local release checkpoint.
@@ -5520,7 +5549,7 @@ function upgrade_finish_run() {
     return "$1"
   fi
   if [ -f /etc/redhat-release ]; then rpm_packages_finish_run "$@"; return $?; fi
-  local action_status=$1 logfile=$2 baseline='' services=2 web_failed=false status category state detail reason audit='' plan=''
+  local action_status=$1 logfile=$2 baseline='' services=2 web_failed=false status category state detail reason='' audit='' plan=''
   local findings='' web_complete=false comparison_status workload_status=2 workload=unknown
   local release='not verified' packages='not verified' cleanup='' php_removals='' service_summary='unknown' package_verified=false
   local directory=${DR_RUN_DIRECTORY:-} removed=0 deferred=0 obsolete_removed=0 obsolete_deferred=0 autoremove_skipped=''
@@ -5545,17 +5574,24 @@ function upgrade_finish_run() {
   fi
   # Cleanup may have changed package state since a completion marker was recorded.
   if $package_verified; then
-    if audit=$(LC_ALL=C dpkg --audit 2>&1) && [ -z "$audit" ] &&
-        plan=$(LC_ALL=C apt-get -s dist-upgrade 2>&1) &&
-        awk '/^(Inst|Remv|Purg|Conf) / { bad=1 } END { exit bad }' <<< "$plan"; then
+    if ! audit=$(LC_ALL=C dpkg --audit 2>&1); then
+      reason='The final dpkg --audit command failed.'
+    elif [ -n "$audit" ]; then
+      reason='The final dpkg --audit check reported unfinished package work.'
+    elif ! plan=$(LC_ALL=C apt-get -s dist-upgrade 2>&1); then
+      reason='The final apt-get -s dist-upgrade command failed.'
+    elif ! awk '/^(Inst|Remv|Purg|Conf) / { bad=1 } END { exit bad }' <<< "$plan"; then
+      reason='The final APT simulation still lists packages to install, remove, or configure.'
+    else
       # Keep the operation's existing completion/exit policy. Recovery wording also
       # requires a complete zero-work summary, including packages held back by APT.
       if is_complete_package_plan <<< "$plan"; then
         echo 'dss:trace: Package recovery health: verified.' >&2
       else echo 'dss:trace: Package recovery health: unverified.' >&2; fi
-    else
+    fi
+    if [ -n "$reason" ]; then
       [ -z "$audit$plan" ] || printf '%s\n' "$audit" "$plan" >&2
-      echo 'dss:error: Final package state is incomplete or could not be verified; review package repair and the detailed log before continuing.' >&2
+      printf 'dss:error: %s Read the command output in %s before retrying.\n' "$reason" "$logfile" >&2
       packages='failed final verification'; [ "$status" -ne 0 ] || status=1
     fi
   fi
@@ -5563,13 +5599,17 @@ function upgrade_finish_run() {
     upgrade_services_check "$baseline.services" "$baseline"; services=$?
     if ! upgrade_php_runtime_check "$baseline.php-runtime"; then web_failed=true; fi
     findings="${directory:-$baseline.php-runtime}/php-runtime.findings.tsv"
-    if upgrade_php_runtime_findings_complete "$findings"; then web_complete=true; fi
+    if upgrade_php_runtime_findings_complete "$findings"; then web_complete=true
+    else
+      printf 'dss:warn: The web server and PHP-FPM listener checks did not finish. Read the check output in %s.\n' "$logfile" >&2
+    fi
+  else
+    echo 'dss:warn: No pre-upgrade snapshot is available. Distrorejuve skipped the service, PHP-FPM, and application checks that need it.' >&2
   fi
   if [ "$services" -eq 1 ] || $web_failed; then
     service_summary=failed; [ "$status" -ne 0 ] || status=1
   elif [ "$services" -eq 0 ] && $web_complete; then service_summary=verified; fi
   if [ "$services" -eq 2 ] || ! $web_complete; then
-    echo 'dss:warn: Service health is incomplete; unknown checks are not a successful verification.' >&2
     if [ -n "$directory" ]; then
       if [ -L "$directory/outcome.incomplete" ] || ! (umask 077; : > "$directory/outcome.incomplete" && chmod 600 -- "$directory/outcome.incomplete"); then
         echo 'dss:error: Cannot record incomplete service verification.' >&2
@@ -5629,13 +5669,14 @@ function upgrade_finish_run() {
   fi
   printf 'dss:stage: Cleanup: %s.\n' "${cleanup:-not run (no release transition reached cleanup in this run)}" >&2
   # Inventory changes are observations; package/service checks determine operational success.
-  comparison_status=0
-  manifest_compare_baseline "$baseline" || comparison_status=$?
-  # Application inventory can be excluded or unavailable. Replaced system
-  # conffiles still need a path-only review under the approved config scope.
-  if [ "$comparison_status" -eq 2 ] && [ -n "$baseline" ]; then
-    print_pkg_to_modified_diff review "$baseline" ||
-      echo 'dss:warn: Configuration replacement review is incomplete; inspect the private change report before handoff.' >&2
+  if [ -n "$baseline" ]; then
+    comparison_status=0
+    manifest_compare_baseline "$baseline" || comparison_status=$?
+    # Replaced conffiles still need review when the application inventory is unavailable.
+    if [ "$comparison_status" -eq 2 ]; then
+      print_pkg_to_modified_diff review "$baseline" ||
+        echo 'dss:warn: Could not list the configuration files that package updates replaced. Read the private change report before handoff.' >&2
+    fi
   fi
   if [ -n "$baseline" ] && declare -F upgrade_workload_check >/dev/null; then
     upgrade_workload_check "$baseline" after; workload_status=$?
@@ -9384,9 +9425,11 @@ function upgrade_remove_retired_packages() {
     if removals=$(upgrade_cleanup_output_removals "$plan" "$allowed" "$native"); then :
     else
       status=$?
-      if [ "$status" -ne 3 ]; then
-        echo "dss:error: Cannot validate removal-only cleanup plan. Review $plan; no cleanup attempted." >&2; return 1
-      fi
+      case "$status" in
+        3) :;;
+        4) printf 'dss:error: APT proposed installing, configuring, or purging packages during obsolete-package cleanup. Cleanup stopped before removing packages. Review the proposed changes in %s.\n' "$plan" >&2; return 1;;
+        *) printf 'dss:error: Could not read the proposed obsolete-package removals in %s. Check the file and run log.\n' "$plan" >&2; return 1;;
+      esac
       rejection='protected or unknown packages'
     fi
     if [ -z "$rejection" ]; then
@@ -10543,7 +10586,6 @@ fi
 # Evaluate only the final attempt; its successful refresh supersedes earlier download errors.
 if [ "$ret" -eq 0 ] && apt_get_update_has_failed_indexes "$tmplog"; then
   ret=1; phase=index_downloads
-  echo 'dss:error: APT index downloads failed; stale indexes cannot authorize package selection.' >&2
 fi
 
 # A stale APT::Default-Release can break package selection even after a good update.
@@ -10564,8 +10606,19 @@ if [ "$ret" -eq 0 ] && [ "$warning_status" -eq 1 ]; then
     apt_state_updated=$completed
   fi
 fi
+if [ "$ret" -ne 0 ]; then
+  case "$phase" in
+    indexes|index_downloads)
+      if grep -Fq 'The HTTP server sent an invalid reply header' "$tmplog"; then
+        echo 'dss:error: APT received an invalid HTTP reply while downloading package indexes. Check the connection to the repository and any APT proxy. The run log identifies the affected repositories.' >&2
+      else
+        echo 'dss:error: APT could not download all package indexes. Read the apt-get update errors in the run log.' >&2
+      fi;;
+    index_log_capture) echo 'dss:error: Could not save the apt-get update output. Check space and permissions in the working directory.' >&2;;
+  esac
+  echo "dss:error:apt_get_update failed (phase $phase, status $ret)." >&2
+fi
 rm -f "$tmplog"
-[ "$ret" -ne 0 ] && echo "dss:error:apt_get_update failed (phase $phase, status $ret)." >&2
 return $ret
 }
 
@@ -10729,7 +10782,7 @@ function apt_get_upgrade() {
       fi
       return 0
     else
-      echo "dss:warn: apt-get upgrade/dist-upgrade failed."
+      printf 'dss:error: The package upgrade and its apt-get dist-upgrade retry failed. The retry exited with status %s. Read the APT output in the run log.\n' "$operation_ret" >&2
       ret=1
       return 1
     fi
@@ -10815,14 +10868,14 @@ function apt_get_dist_upgrade() {
     $cacheable && apt_state_healthy=$completed
   else
     cacheable=false
-    echo "dss:warn: Got an error after an apt-get dist-upgrade. trying an apt-get -f install"
+    printf 'dss:stage: apt-get dist-upgrade exited with status %s. Running apt-get -f install to repair package dependencies.\n' "$ret" >&2
     apt_get_f_install "after the full upgrade failed (APT status $ret)"
     echo "dss:stage: Retrying the full upgrade after the dependency repair attempt" >&2
     apt_get_apply $APT_GET_INSTALL_OPTIONS dist-upgrade
     ret=$?
     if [ "$ret" -ne 0 ]; then
       check_systemd_install_matches_init
-      echo "dss:error: Got an error after an apt-get dist-upgrade"
+      printf 'dss:error: apt-get dist-upgrade still failed after the dependency repair attempt (status %s). Read the APT and dpkg output in the run log before retrying.\n' "$ret" >&2
     fi
   fi
   # Config repairs may change packages or fail after the final successful dist-upgrade.
@@ -15045,7 +15098,7 @@ function manifest_compare_baseline() {
   case "${DR_UPGRADE_MANIFEST:-true}" in
     true) :;;
     false)
-      echo 'dss:warn: Automatic application comparison disabled by DR_UPGRADE_MANIFEST=false; application behavior remains unverified by inventory.' >&2
+      echo 'dss:info: Application inventory comparison disabled by DR_UPGRADE_MANIFEST=false.' >&2
       return 2;;
     *) echo 'dss:error: DR_UPGRADE_MANIFEST must be true or false.' >&2; return 1;;
   esac
@@ -15054,32 +15107,35 @@ function manifest_compare_baseline() {
   if [ -z "$baseline" ] || [ -L "$original" ] || [ ! -f "$original/manifest.json" ] ||
       [ -L "$original/manifest.json" ] || [ ! -f "$original/manifest.review" ] || [ -L "$original/manifest.review" ] ||
       [ "$(head -n 1 -- "$original/manifest.review")" != manifest-review-v1 ]; then
-    printf 'dss:warn: Manifest comparison unavailable: no comparable original inventory at %s. Use the recorded checkpoints and direct service checks.\n' "$original" >&2
+    printf 'dss:warn: Cannot compare application inventories. Check for the original manifest.json and manifest.review in %s.\n' "$original" >&2
     return 2
   fi
   if [ "$(stat -c '%u' -- "$original")" != 0 ]; then
-    echo 'dss:warn: Manifest comparison unavailable: original inventory directory is not root-owned.' >&2; return 2
+    printf 'dss:warn: Cannot use the application inventory in %s. Check that the directory belongs to root.\n' "$original" >&2; return 2
   fi
   for file in "$original/manifest.json" "$original/manifest.review"; do
     if [ "$(stat -c '%u:%h' -- "$file")" != 0:1 ]; then
-      echo 'dss:warn: Manifest comparison unavailable: original inventory owner/links require review.' >&2; return 2
+      printf 'dss:warn: Cannot use application inventory file %s. Check that root owns it and it has one hard link.\n' "$file" >&2; return 2
     fi
   done
   # Repair inherited file modes without replacing or retimestamping the original observations.
   if ! chmod 700 -- "$original" || ! chmod 600 -- "$original/manifest.json" "$original/manifest.review"; then
-    echo 'dss:warn: Manifest comparison unavailable: cannot secure the original inventory.' >&2; return 2
+    printf 'dss:warn: Cannot secure the original inventory in %s. Check directory mode 700 and file modes 600.\n' "$original" >&2; return 2
   fi
-  directory=$(mktemp -d "$original/review.XXXXXX") || return 2
+  directory=$(mktemp -d "$original/review.XXXXXX") || {
+    printf 'dss:warn: Cannot create an application inventory review directory in %s. Check available space and directory permissions.\n' "$original" >&2
+    return 2
+  }
   if ! chmod 700 -- "$directory"; then
-    echo 'dss:warn: Manifest comparison unavailable: cannot secure the review directory.' >&2; return 2
+    printf 'dss:warn: Cannot set mode 700 on the application inventory review directory %s.\n' "$directory" >&2; return 2
   fi
   if ! manifest_capture "$directory/current" "${2:-/}"; then
-    printf 'dss:warn: Manifest comparison incomplete: current inventory failed; review %s.\n' "$directory" >&2
+    printf 'dss:warn: Could not collect the current application inventory. Read the inventory errors above. Review files in %s.\n' "$directory" >&2
     return 2
   fi
   if ! { : > "$directory/changes.diff" && chmod 600 -- "$directory/changes.diff" &&
       : > "$directory/summary.txt" && chmod 600 -- "$directory/summary.txt"; }; then
-    echo 'dss:warn: Manifest comparison unavailable: cannot create a private changes report.' >&2; return 2
+    printf 'dss:warn: Cannot save the private application changes report in %s. Check available space and directory permissions.\n' "$directory" >&2; return 2
   fi
   diff -u --label original-manifest --label current-manifest "$original/manifest.review" "$directory/current/manifest.review" > "$directory/changes.diff"
   result=$?
@@ -15088,7 +15144,7 @@ function manifest_compare_baseline() {
     1)
       printf 'dss:stage: Manifest comparison: changes observed; review %s/changes.diff against expected upgrade changes and service checks.\n' "$directory" >&2
       cat -- "$directory/changes.diff" || return 2;;
-    *) printf 'dss:warn: Manifest comparison failed; review %s.\n' "$directory" >&2; return 2;;
+    *) printf 'dss:warn: Application inventory comparison failed. Check the diff error above and the files in %s.\n' "$directory" >&2; return 2;;
   esac
   if ! manifest_print_key_changes "$original/manifest.review" "$directory/current/manifest.review" "$baseline" > "$directory/summary.txt"; then
     echo 'dss:warn: Key-change summary is incomplete; review the detailed configuration report.' >> "$directory/summary.txt" || return 2
@@ -15121,13 +15177,13 @@ function upgrade_print_check() {
     echo 'dss:info: Same-major CentOS conversion, where eligible, uses DR_RPM_MIGRATION_TARGET with --upgrade; it is not a major-release upgrade.'
     return 1
   fi
-  current=$(distro_output_codename) || { echo 'dss:error: Cannot identify the installed distribution.' >&2; return 1; }
+  current=$(distro_output_codename) || { echo 'dss:error: Cannot identify the installed release. Check /etc/os-release and /etc/debian_version.' >&2; return 1; }
   case " $ALL_DEBIAN " in
     *" $current "*) family=debian; target=trixie;;
     *)
       case " $ALL_UBUNTU " in
         *" $current "*) family=ubuntu; target=$(ubuntu_output_latest_lts "$current") || return 1;;
-        *) echo "dss:error: No known upgrade path for $current." >&2; return 1;;
+        *) printf 'dss:error: Distrorejuve has no release upgrade path for %s. Check the vendor upgrade instructions for this release.\n' "$current" >&2; return 1;;
       esac;;
   esac
   native=$(dpkg --print-architecture) || { native=unknown; status=1; }
@@ -15142,11 +15198,11 @@ function upgrade_print_check() {
   fi
   upgrade_check_path "$family" "$current" "$target" review || status=1
   if [ "$status" -eq 0 ]; then
-    echo 'dss:info: No known checked blockers found; application compatibility and target repository/package availability still need review.'
+    echo 'dss:info: The upgrade readiness checks passed.'
   else
-    echo 'dss:error: Upgrade readiness blocked or incomplete; resolve the checks above.' >&2
+    echo 'dss:error: Fix the issues listed above, then run --check-upgrade again.' >&2
   fi
-  echo 'dss:info: Read-only review: no package indexes refreshed and no system changes made.'
+  echo 'dss:info: Read-only review. The script used the existing package indexes.'
   return "$status"
 }
 
@@ -15671,13 +15727,13 @@ function logging_run() (
 		logging_expected_stop=true
 	fi
 	if $logging_expected_stop; then
-		printf 'dss:stage Upgrade not started; resolve the preflight checks above and retry. Details: %s\n' "$logging_log" >&2
+		printf 'dss:stage Upgrade not started. Fix the issues listed above before retrying. Run log: %s\n' "$logging_log" >&2
 	elif [ "$logging_status" -ne 0 ]; then
-		printf 'dss:error Action failed (status %s); details: %s\n' "$logging_status" "$logging_log" >&2
+		printf 'dss:error Action failed (status %s). Read the command output in %s before retrying.\n' "$logging_status" "$logging_log" >&2
 	elif [ -f "$logging_dir/panel.handoff" ]; then
 		printf 'dss:stage Vendor upgrade handoff; final completion is not verified. Details: %s\n' "$logging_log" >&2
 	elif [ -f "$logging_dir/outcome.incomplete" ]; then
-		printf 'dss:warn Action finished with incomplete service or workload verification; details: %s\n' "$logging_log" >&2
+		printf 'dss:stage The command finished. Follow the check instructions above. Run log: %s\n' "$logging_log" >&2
 	elif [ -f "$logging_dir/configuration-review.txt" ]; then
 		printf 'dss:warn Action complete; configuration review required: %s/configuration-review.txt; details: %s\n' "$logging_dir" "$logging_log" >&2
 	else
@@ -15697,10 +15753,12 @@ function logging_run() (
 	if ! $logging_expected_stop && { [ "$logging_status" -ne 0 ] || [ -f "$logging_dir/outcome.incomplete" ]; }; then
 		if declare -F support_print_report >/dev/null; then
 			if (umask 077; : > "$logging_dir/support-report.txt" && chmod 600 -- "$logging_dir/support-report.txt" && support_print_report "$logging_dir" > "$logging_dir/support-report.txt"); then
-				printf 'dss:stage Review the minimal support report before posting: %s/support-report.txt\n' "$logging_dir" >&2
+				printf 'dss:stage Saved a support report at %s/support-report.txt. Review it before sharing.\n' "$logging_dir" >&2
 			else printf 'dss:warn Support report is incomplete; review %s/support-report.txt.\n' "$logging_dir" >&2; fi
 		fi
-		printf '%s\n' 'dss:stage Report the problem at https://github.com/pbkwee/distrorejuve/issues/new; do not attach private detailed logs or configuration.' >&2
+		if [ "$logging_status" -ne 0 ]; then
+			printf '%s\n' 'dss:stage To report a script problem, share the reviewed support report at https://github.com/pbkwee/distrorejuve/issues/new. Keep the detailed run log and configuration private.' >&2
+		fi
 	fi
 	return "$logging_status"
 )
@@ -15731,6 +15789,10 @@ if [ "${DR_ACTION:-$1}" = --support-report ]; then
   return $?
 fi
 [ "${DR_ACTION:-$1}" = --manifest ] || [ "${DR_ACTION:-$1}" = --manifest-json ] || [ "${DR_ACTION:-$1}" = --upgrade-report ] || echo "dss:trace:distrorejuve:main:starting:$(date -u '+%Y-%m-%d %H:%M:%S'):args:$@"
+if [ "${DR_ACTION:-$1}" = --dist-update ] && [ -n "${2:-}" ]; then
+  echo 'dss:error: --dist-update takes no arguments. Use --dist-update to update packages on the installed release. Use --to-latest to upgrade to a newer Debian or Ubuntu release.' >&2
+  return 1
+fi
 case "${DR_ACTION:-${1:-}}" in
   --upgrade|--dist-update|--to-latest|--to-debian-release|--to-next-ubuntu|--to-64bit|--remove-leftover-packages|--remove-deprecated-packages)
     apt_package_lock_warn
@@ -15815,7 +15877,6 @@ elif [ "--to-latest" = "${DR_ACTION:-$1}" ] ; then
   [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
   [ $ret -eq 0 ] && echo "dss:info:  --to-latest completed ok.  use $0 --show-changes to see changes"
 elif [ "--dist-update" = "${DR_ACTION:-$1}" ] ; then
-  [ ! -z "$2" ] && print_usage && exit 1
   print_info
   packages_upgrade || exit 1
   if [ -f /etc/debian_version ]; then apt_get_dist_upgrade; else true; fi

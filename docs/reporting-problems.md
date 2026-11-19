@@ -102,11 +102,15 @@ After copying, inspect `/root/distrorejuve.sh` on the old server and run
 
 ## Reporting upgrade problems
 
-Unexpected upgrade failures save a small `support-report.txt` beside the private detailed log.
-The console prints the report path and the project's issue link.
-Expected preflight refusals keep their diagnostic and log path without suggesting an issue.
-When a supported option addresses a blocker, the console suggests a retry command for review.
-Runs with incomplete service verification also produce this report.
+If the upgrade stops, read the error above the summary. It names the failed
+check or package step when the script can identify it. Read `output.log` in the
+run directory printed on the console for the underlying APT, dpkg, or service
+output before retrying.
+
+Unexpected failures and incomplete checks save a small `support-report.txt`
+beside `output.log`. Review it before sharing it. When preflight stops the
+upgrade, fix the reported problem first. The console may suggest a retry
+command for a specific blocker.
 
 Missing upstream sockets in locally managed NGINX configuration are reported for operator review.
 These findings do not stop package upgrades when the required services pass their checks.

@@ -2,7 +2,7 @@
 
 | Option | Purpose |
 | --- | --- |
-| `--check-upgrade` (or no argument) | Read-only review of the current distro, intended newer release and known upgrade blockers. RPM major-release upgrades require a reviewed migration procedure. |
+| `--check-upgrade` (or no argument) | Show the installed release, target release, and problems to fix before upgrading. This check leaves packages and repository indexes alone. |
 | `--upgrade` | Update native APT or DNF/YUM packages. End-of-life CentOS requires an explicit repository/migration choice below. |
 | `--capture-baseline` | Capture the selected private original before preparatory changes; requires root and `DR_CONFIG_BASELINE`. Preserves existing usable originals and refuses incomplete attempts. |
 | `--dist-update` | Perform a full package upgrade on the current release. |
@@ -22,7 +22,16 @@
 | `--remove-deprecated-packages` | Remove packages left over from older releases. |
 | `--pause` / `--resume` | Pause or resume a running upgrade at its next pause check. |
 
-## Archived releases
+## Release upgrade paths
+
+On Debian 10 (Buster), `--to-latest` plans Debian 11 (Bullseye), then Debian 12
+(Bookworm), then Debian 13 (Trixie). On Ubuntu LTS, it selects successive LTS
+releases up to the configured target. Run `--check-upgrade` on the server to
+see the target and any blockers for its packages, architecture, and repositories.
+For panel-specific options, see [Hosting panels](hosting-panels.md). RPM
+major-release changes use a separate [migration procedure](rpm-upgrades.md).
+
+### Archived releases
 
 The Debian release sequence starts with 3.0 (Woody) → 3.1 (Sarge) → 4 (Etch).
 Use `--to-debian-release 4` to stop at Etch for a boot and package check.

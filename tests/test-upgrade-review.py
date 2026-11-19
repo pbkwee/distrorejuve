@@ -564,7 +564,8 @@ upgrade_php_prepare_normal_upgrade_plan {directory!r}
 
     def test_apt_update_rejects_exit_zero_failed_indexes_and_allows_clean_retry(self):
         for mode, expected, calls in [('dns_failure', 1, 2), ('clean_retry', 0, 2),
-                                      ('benign_warning', 0, 1), ('signature_failure', 1, 2)]:
+                                      ('benign_warning', 0, 1), ('signature_failure', 1, 2),
+                                      ('invalid_http_reply', 100, 2)]:
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 script = '\n'.join(declaration(name) for name in ['apt_get_update', 'apt_get_update_has_failed_indexes'])
                 result = subprocess.run(['bash'], cwd=directory, text=True, capture_output=True,
@@ -586,6 +587,9 @@ apt-get() {{
   if [ "$mode" = signature_failure ]; then
     printf 'W: An error occurred during the signature verification. The repository is not updated and the previous index files will be used.\n'; return 0
   fi
+  if [ "$mode" = invalid_http_reply ]; then
+    printf '%s\n' 'E: Failed to fetch https://private.example.invalid/dists/buster/Release  The HTTP server sent an invalid reply header'; return 100
+  fi
   printf '%s\n' 'Err:1 http://security.ubuntu.com/ubuntu resolute-security InRelease' \
     "  Temporary failure resolving 'security.ubuntu.com'" \
     "W: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/resolute/InRelease  Temporary failure resolving 'archive.ubuntu.com'" \
@@ -599,8 +603,12 @@ exit "$status"
 ''')
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertEqual(int((pathlib.Path(directory) / 'calls').read_text()), calls)
-                if expected:
-                    self.assertIn('stale indexes cannot authorize', result.stderr)
+                if mode == 'invalid_http_reply':
+                    self.assertIn('APT received an invalid HTTP reply', result.stderr)
+                    self.assertIn('apt_get_update failed (phase indexes, status 100).', result.stderr)
+                    self.assertNotIn('private.example.invalid', result.stderr)
+                elif expected:
+                    self.assertIn('APT could not download all package indexes', result.stderr)
                     self.assertIn('cache=\n', result.stdout)
                 elif mode == 'clean_retry':
                     self.assertIn('cache=repositories-state', result.stdout)

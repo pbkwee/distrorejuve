@@ -98,6 +98,17 @@ distrorejuve_run {action}
             self.assertNotIn(action, result.stdout)
         self.assertIn('--check-upgrade', result.stdout)
 
+    def test_dist_update_rejects_a_second_action_before_dispatch(self):
+        result = run(['distrorejuve_main'], '''
+upgrade_panel_dispatch() { echo unexpected-panel-dispatch; return 77; }
+packages_upgrade() { echo unexpected-package-upgrade; return 78; }
+distrorejuve_main --dist-update --to-latest
+''')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn('unexpected-', result.stdout)
+        self.assertIn('--dist-update takes no arguments.', result.stderr)
+        self.assertIn('Use --to-latest to upgrade', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -238,6 +238,23 @@ upgrade_finish_run 0 /fixture/log
                 self.assertEqual((pathlib.Path(directory) / 'outcome.incomplete').exists(), incomplete)
                 self.assertIn('stage-workload=' + ('verified' if gate == 0 else 'unknown'), r.stdout)
 
+    def test_early_failure_explains_which_checks_were_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = run(['upgrade_finish_run'], f'''
+DR_RUN_DIRECTORY={shlex.quote(directory)}
+config_state_output_baseline() {{ return 1; }}
+upgrade_stage_finish() {{ :; }}
+upgrade_finish_run 7 /fixture/log
+''')
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertTrue((pathlib.Path(directory) / 'outcome.incomplete').exists())
+            self.assertIn('No pre-upgrade snapshot is available', result.stderr)
+            self.assertIn('skipped the service, PHP-FPM, and application checks', result.stderr)
+            self.assertIn('dss:stage: Outcome: release not verified; packages not verified; services unknown.',
+                          result.stderr.splitlines())
+            self.assertIn('dss:stage: Workload acceptance: unknown.', result.stderr.splitlines())
+            self.assertNotIn('.applications', result.stderr)
+
     def test_invalid_contract_never_runs_checks(self):
         for rows in ('', 'service\tx\tnginx\tmaybe\t-\n', 'service\tx\tnginx\tactive\t-\nservice\tx\tssh\tactive\t-\n', 'functional\tx\t/root/script\tbad-hash\t-\n'):
             self.assertNotEqual(self.check(rows).returncode, 0)

@@ -83,6 +83,7 @@ sudo env DR_MIN_FREE_DISK_MIB=6144 bash distrorejuve.sh --to-latest
 | `DR_RPM_MIGRATION_TARGET` | Unset; required for end-of-life CentOS: `alma`, `rocky` or `centos-vault`. |
 | `DR_RPM_MIGRATION_SCRIPT` | Absolute path to the reviewed vendor script; required for an Alma/Rocky conversion. |
 | `DR_ALLOW_UNAUTHENTICATED_ARCHIVES` | `false`; explicit official APT archive exception. Never affects RPM signature checks. |
+| `DR_ALLOW_DEBIAN_ARCHIVE_HTTP` | Unset; choose HTTPS for official Debian archives when APT supports it, otherwise use HTTP. Set `true` to force archive HTTP or `false` to require HTTPS. Package authentication has its own setting. |
 | `DR_ACTION` | Unset; override the action selected from command-line arguments. Prefer a command-line action. |
 | `DR_CONFIGURATION_HISTORY_DAYS` | `7`; days to look back for the pre-upgrade comparison baseline when no explicit path is selected. |
 | `DR_CONFIG_BASELINE` | Unset; absolute source-local file path for the job's original configuration snapshot. Existing usable originals are retained without an age limit; new captures require an existing private parent. Current reports are written beside it. Other log/recovery locations are unchanged. |

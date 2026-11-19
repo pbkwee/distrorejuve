@@ -7,7 +7,7 @@
 # Validate operator settings before logging or system work.
 function environment_validate_settings() {
   local name value
-  for name in DR_ALLOW_BACKPORTS DR_ALLOW_CROSSGRADE_BLOCKERS DR_ALLOW_UNAUTHENTICATED_ARCHIVES \
+  for name in DR_ALLOW_BACKPORTS DR_ALLOW_CROSSGRADE_BLOCKERS DR_ALLOW_UNAUTHENTICATED_ARCHIVES DR_ALLOW_DEBIAN_ARCHIVE_HTTP \
       DR_ENABLE_UBUNTU_CROSSGRADE DR_MANIFEST_DNS DR_MANIFEST_HTTP DR_MANIFEST_MAIL_METRICS \
       DR_UPGRADE_MANIFEST DR_PRECOMPILED_LOCALES DR_PREFER_PACKAGED_USRMERGE_FILES \
       DR_ACCEPT_USRMERGE_SKIP_MARKER DR_REFRESH_STALE_SYSTEMD \
@@ -393,7 +393,7 @@ function apt_sources_process() {
   local mode=$1 file=$2 family=$3 from=$4 to=$5
   awk -v mode="$mode" -v family="$family" -v from="$from" -v to="$to" \
     -v add_security="${apt_sources_add_security:-false}" -v add_updates="${apt_sources_add_updates:-false}" \
-    -v add_lts="${apt_sources_add_lts:-false}" -v ports="${apt_sources_ports:-false}" -v debian_archive="$DEBIAN_ARCHIVE" -v ubuntu_archive="$OLD_RELEASES_UBUNTU" '
+    -v archive_scheme="${apt_sources_debian_archive_scheme:-https}" -v add_lts="${apt_sources_add_lts:-false}" -v ports="${apt_sources_ports:-false}" -v debian_archive="$DEBIAN_ARCHIVE" -v ubuntu_archive="$OLD_RELEASES_UBUNTU" '
   function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
   function contains(words, word) { return index(" " words " ", " " word " ") > 0 }
   function provider(uri, host, path) {
@@ -455,8 +455,8 @@ function apt_sources_process() {
     if (family == "debian") {
       if (archived && ((suffix == "-updates" && !contains("buster bullseye", to)) || suffix == "/volatile" || suffix == "/non-US")) { drop=1; return }
       if (archived) {
-        newuri="https://archive.debian.org/" (security ? "debian-security" : "debian")
-        if (suffix ~ /^-backports/ && contains("sarge etch lenny squeeze", to)) newuri="https://archive.debian.org/debian-backports"
+        newuri=archive_scheme "://archive.debian.org/" (security ? "debian-security" : "debian")
+        if (suffix ~ /^-backports/ && contains("sarge etch lenny squeeze", to)) newuri=archive_scheme "://archive.debian.org/debian-backports"
       }
       else if (uri ~ /archive.debian.org/ || mode == "upgrade" || generated)
         newuri="https://deb.debian.org/" (security ? "debian-security" : "debian")
@@ -679,7 +679,17 @@ function apt_sources_rewrite() {
   local mode=$1 family=$2 from=$3 to=$4 stage backup file index=0 changed=false ret=0
   local -a source_files=()
   local -a activated=()
-  local apt_sources_ports=false arch
+  local apt_sources_ports=false apt_sources_debian_archive_scheme=https apt_https_available=true arch
+  if [ "$family" = debian ]; then
+    [ -f "/usr/lib/apt/methods/https" ] && [ -x "/usr/lib/apt/methods/https" ] || apt_https_available=false
+    case " $DEBIAN_ARCHIVE " in
+      *" $to "*)
+        case "${DR_ALLOW_DEBIAN_ARCHIVE_HTTP:-}" in
+          true) apt_sources_debian_archive_scheme=http;;
+          '') if ! $apt_https_available; then apt_sources_debian_archive_scheme=http; fi;;
+        esac;;
+    esac
+  fi
   arch=$(dpkg --print-architecture) || return 1
   case "$arch" in amd64|i386) :;; *) apt_sources_ports=true;; esac
   stage=$(mktemp -d "/etc/apt/.distrorejuve.XXXXXX") || return 1
@@ -700,8 +710,10 @@ function apt_sources_rewrite() {
   done < <(apt_sources_files)
   if ! $changed; then rm -r -- "$stage"; return 0; fi
   # Older APT needs apt-transport-https before canonical Debian sources can use HTTPS.
-  if [ "$family" = debian ] && { [ ! -f "/usr/lib/apt/methods/https" ] || [ ! -x "/usr/lib/apt/methods/https" ]; }; then
-    echo 'dss:error: APT HTTPS transport is unavailable. Install apt-transport-https using the existing repositories, then retry; APT sources were preserved.' >&2
+  if [ "$apt_sources_debian_archive_scheme" = http ]; then
+    echo 'dss:warn: Using HTTP for this Debian archive rewrite. APT package authentication is controlled separately.' >&2
+  elif ! $apt_https_available; then
+    echo 'dss:error: APT HTTPS transport is unavailable. Install apt-transport-https using the existing repositories, then retry; APT sources were preserved. For archived Debian releases, unset DR_ALLOW_DEBIAN_ARCHIVE_HTTP to select transport automatically.' >&2
     rm -r -- "$stage"; return 1
   fi
   mkdir -p "/root/distrorejuveinfo/apt-sources" || { rm -r -- "$stage"; return 1; }
@@ -764,6 +776,7 @@ function distro_output_codename() {
   if [ -f /etc/debian_version ]; then
     read -r version < /etc/debian_version
     case "$version" in
+      3.0|3.0r*|3.0.*) name=woody;; 3.1|3.1r*|3.1.*) name=sarge;;
       4.*) name=etch;; 5.*) name=lenny;; 6.*) name=squeeze;; 7.*) name=wheezy;; 8.*) name=jessie;;
       9.*) name=stretch;; 10.*) name=buster;; 11.*) name=bullseye;; 12.*) name=bookworm;; 13.*) name=trixie;; *) return 1;;
     esac
@@ -6220,7 +6233,7 @@ function upgrade_preflight_action() {
   esac
   case "$action" in
     --to-debian-release)
-      case "$version" in 6) target=squeeze;; 7) target=wheezy;; 8) target=jessie;; 9) target=stretch;; 10) target=buster;; 11) target=bullseye;; 12) target=bookworm;; 13) target=trixie;; *) return 1;; esac;;
+      case "$version" in 4) target=etch;; 5) target=lenny;; 6) target=squeeze;; 7) target=wheezy;; 8) target=jessie;; 9) target=stretch;; 10) target=buster;; 11) target=bullseye;; 12) target=bookworm;; 13) target=trixie;; *) return 1;; esac;;
     --to-next-ubuntu) remaining=1;;
     --to-latest)
       if [ "$family" = ubuntu ]; then
@@ -6410,6 +6423,16 @@ function print_failed_dist_upgrade_tips() {
   #echo "dss:warn: May be worth trying: aptitude -vv full-upgrade"
   #echo "dss:warn: after attempting a fix manually, rerun the bash distrorejuve.sh  command"
   return 0
+}
+
+function dist_upgrade_woody_to_sarge() {
+  local old_distro=woody old_ver="inux 3.0" new_distro=sarge new_ver="inux 3.1"
+  dist_upgrade_x_to_y
+}
+
+function dist_upgrade_sarge_to_etch() {
+  local old_distro=sarge old_ver="inux 3.1" new_distro=etch new_ver="inux 4"
+  dist_upgrade_x_to_y
 }
 
 function dist_upgrade_etch_to_lenny() {
@@ -11520,6 +11543,8 @@ function dist_upgrade_to_latest() {
   fi
   if [ "$family" = debian ]; then
     debian_target=trixie
+    dist_upgrade_woody_to_sarge || return $?
+    dist_upgrade_sarge_to_etch || return $?
     if ! dist_upgrade_etch_to_lenny; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_etch_to_lenny:failed" && return 1; fi
     if ! dist_upgrade_lenny_to_squeeze; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_lenny_to_squeeze:failed" && return 1; fi
     if ! dist_upgrade_squeeze_to_wheezy; then echo "dss:error:dist_upgrade_to_latest:dist_upgrade_squeeze_to_wheezy:failed" && return 1; fi
@@ -15488,6 +15513,8 @@ elif [ "--to-debian-release" = "${DR_ACTION:-$1}" ] ; then
   [ -z "$version" ] && echo "dss:error: Need a version e.g. 11 for --to-debian-release" && exit 1
   [ ! -z "$3" ] && print_usage && exit 1
   case "$version" in
+      4) debian_target=etch;;
+      5) debian_target=lenny;;
       6) debian_target=squeeze;;
       7) debian_target=wheezy;;
       8) debian_target=jessie;;
@@ -15497,12 +15524,14 @@ elif [ "--to-debian-release" = "${DR_ACTION:-$1}" ] ; then
       12) debian_target=bookworm;;
       13) debian_target=trixie;;
       *)
-      echo "dss:error: Expecting a --to-debian-release version of 6 to 13" && exit 1
+      echo "dss:error: Expecting a --to-debian-release version of 4 to 13" && exit 1
       ;;
   esac
   upgrade_preflight_action --to-debian-release "${2:-}" || exit $?
   print_info
-  dist_upgrade_etch_to_lenny || exit 1
+  dist_upgrade_woody_to_sarge || exit 1
+  dist_upgrade_sarge_to_etch || exit 1
+  if [ "$version" -gt 4 ]; then dist_upgrade_etch_to_lenny || exit 1; fi
   if [ "$version" -gt 5 ]; then dist_upgrade_lenny_to_squeeze || exit 1; fi
   if [ "$version" -gt 6 ]; then dist_upgrade_squeeze_to_wheezy || exit 1; fi
   if [ "$version" -gt 7 ]; then dist_upgrade_wheezy_to_jessie || exit 1; fi

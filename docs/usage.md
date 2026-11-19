@@ -22,6 +22,22 @@
 | `--remove-deprecated-packages` | Remove packages left over from older releases. |
 | `--pause` / `--resume` | Pause or resume a running upgrade at its next pause check. |
 
+## Archived releases
+
+The Debian release sequence starts with 3.0 (Woody) → 3.1 (Sarge) → 4 (Etch).
+Use `--to-debian-release 4` to stop at Etch for a boot and package check.
+The Ubuntu LTS sequence starts with 6.06 (Dapper) → 8.04 (Hardy).
+These paths use historical packages and require a compatible shell, tools and
+working archives on the guest. Test on a disposable copy first.
+
+Before each Debian archive rewrite, the script checks APT's HTTPS method.
+It uses HTTPS when available and HTTP otherwise. A package upgrade can add
+the HTTPS method, so later hops can switch to HTTPS automatically. Set
+`DR_ALLOW_DEBIAN_ARCHIVE_HTTP=true` to force HTTP for archived releases, or
+`false` to require HTTPS. Live Debian mirror rewrites require HTTPS.
+The selected transport must reach the archive from the guest. Review
+[archive authentication](apt-authentication.md) separately.
+
 ## Release upgrades from i386
 
 Native i386 upgrades stop at **Debian 12 (bookworm)** or **Ubuntu 18.04 LTS

@@ -6,6 +6,10 @@ inventory without giving the assistant server access, or authorize SSH discovery
 You do not need a RimuHosting account for this assessment or for an upgrade at
 your existing hosting provider.
 
+If you'd like RimuHosting to handle the upgrade and move your server to its
+hosting, [request a free assessment at DistroRejuve](https://distrorejuve.com/).
+You'll get a report and can review the plan before agreeing to any work.
+
 The assistant helps explain the options and carry out agreed work. It cannot
 establish application compatibility from a package list alone. Someone who knows
 your applications needs to check the result.

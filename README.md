@@ -40,6 +40,10 @@ an upgraded copy or a fresh-server migration. Agents can use the
 [server-upgrade skill](.agents/skills/server-upgrade/SKILL.md).
 For a new RimuHosting destination, see [account and API setup](docs/rimuhosting.md).
 
+If you'd like RimuHosting to handle the upgrade and move your server to its
+hosting, [request a free assessment at DistroRejuve](https://distrorejuve.com/).
+You'll get a report and can review the plan before agreeing to any work.
+
 ## Documentation
 
 - [Usage](docs/usage.md): upgrade actions, reports and logs.
@@ -51,8 +55,7 @@ For a new RimuHosting destination, see [account and API setup](docs/rimuhosting.
 - [Branding](docs/branding.md): logos, colours and artwork.
 
 Developed by the team at [RimuHosting](https://rimuhosting.com/), where we use it
-to help maintain Linux virtual machines. We also offer
-[server upgrade and migration assistance](https://blog.rimuhosting.com/2021/07/12/distro-upgrade-as-a-service/).
+to help maintain Linux virtual machines.
 
 Workload acceptance, exact-stage recovery, transaction capacity and status-only
 observations are described in [workload acceptance](docs/workload-acceptance.md),

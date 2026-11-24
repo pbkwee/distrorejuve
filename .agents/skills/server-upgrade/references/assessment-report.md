@@ -123,6 +123,34 @@ listener and owning roles within scope. For example, compare Postfix's
 before moving authentication. Rehearse required dependencies and scheduled
 scripts during acceptance.
 
+## Assess Java runtimes and updates
+
+Identify the Java executable each service uses and record its vendor, full
+version, and installation source. Use process or approved service configuration
+evidence, since the shell's `java -version` can report a different JVM. For
+containers and applications with a bundled JVM, check the image or application
+vendor's update path.
+
+Check current application compatibility, JDK vendor support, and target OS and
+architecture. Recommend the latest security-patched build available for a
+supported major the application can run. Prefer staying on the current major
+when it meets those requirements. For a major upgrade, compare maintained long-term
+support (LTS) releases. If the customer wants the latest feature release,
+verify that it is stable and supported for this workload.
+Give the current and proposed versions, update source, and any compatibility
+tests or restart needed in the report.
+
+Prefer a maintained package source when it provides the chosen major. For an
+approved host JDK installation or update, review the selected revision of
+[install-jdk](https://github.com/pbkwee/install-jdk) and its
+[usage guide](https://github.com/pbkwee/install-jdk/blob/main/docs/usage.md).
+Pass the chosen major explicitly with `--jdk-version` and use `--dry-run`
+with the planned options and privileges to check the install method, source,
+and activation. Agree how the JDK will receive future updates. Use the
+service's own Java path when switching it, preserve the previous selection
+for rollback where practical, and verify the running JVM and application
+checks after the approved restart.
+
 ## Assess mail activity
 
 Start with public MX and relevant host records, running mail daemons and listener

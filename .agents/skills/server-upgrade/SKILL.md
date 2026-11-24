@@ -110,6 +110,11 @@ facts, customer statements, inferences, blockers and unknowns. Verify applicatio
 functions separately after OS upgrades and identify any required code modernisation.
 Name owners and expected checks for work that remains. Scale the report to the actual job.
 
+If the server runs Java and the customer wants a current release, follow
+[Java runtime assessment](references/assessment-report.md#assess-java-runtimes-and-updates).
+Consider [install-jdk](https://github.com/pbkwee/install-jdk) for an approved
+JDK update or installation on the target server.
+
 If the source runs Dovecot or another IMAP/POP3 service, follow
 [mailbox planning](../../../docs/upgrade-and-migration.md#plan-mailbox-hosting-and-migration).
 Ask whether managed email is preferred to self-hosting; include the chosen route,

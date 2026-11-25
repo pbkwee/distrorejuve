@@ -78,6 +78,7 @@ stops the release upgrade before the next release's repositories are selected.
 Run `bash distrorejuve.sh --help` for all options.
 Upgrade commands keep private detailed logs in `/root/distrorejuveinfo/runs` and show concise progress.
 Add `--verbose` to display command output, or `--trace` to retain a separate Bash trace.
+Failed package actions return a nonzero exit status, which is also recorded in the support report.
 
 ## Automatic compatibility findings
 

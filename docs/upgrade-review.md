@@ -17,6 +17,14 @@ policy; archived releases do not gain security support, and removed archive
 pockets are not added. Sources are staged and backed up before replacement.
 No source completion is performed by read-only checks.
 
+`--upgrade` and `--dist-update` repair recognized official archive sources, then
+check third-party sources before refreshing APT indexes. Known unsupported
+combinations, such as Sury PHP on Debian 10, stop with the source filename,
+line, and installed release. Review a supported replacement or disable the
+entry after checking application dependencies.
+The official archive repairs remain in place when a vendor source is refused.
+Third-party sources remain unchanged pending that decision.
+
 See the [Ubuntu repository example](https://ubuntu.com/server/docs/tutorial/managing-software/)
 and [Debian source configuration](https://www.debian.org/releases/trixie/release-notes/upgrading.html).
 RPM repository requirements are described in [RPM updates](rpm-upgrades.md).

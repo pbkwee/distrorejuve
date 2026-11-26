@@ -1,11 +1,13 @@
 # Initial upgrade assessment report
 
 Issue this report only after receiving a usable source-associated manifest or
-successfully collecting source inventory. If neither is available, give a short
-access/collection status with the blocker and next action, and retain resumable
-job notes. General upgrade research, a successful login alone and another
-server's configuration are not a substitute. An operator-supplied manifest is
-enough to begin without SSH; a source-based report may identify remaining gaps.
+successfully collecting source inventory. If collection is blocked, give the
+attempted step, observed failure, and exact next action. Keep resumable job
+notes. An operator-supplied manifest is enough to begin without SSH. Use the
+installed panel, actual per-site runtimes and database dependencies, and data
+sizes to ground the recommendation. Mark gaps explicitly. Require source
+inventory for route selection and outage estimates, even when the order names
+an OS or the source address is known.
 
 Write for two readers: the customer deciding what to do, and the sysadmin or
 agent preparing the work. Scale detail to the actual setup. A small, well-understood
@@ -81,7 +83,8 @@ Cover these questions in this order, combining sections for simple cases:
 4. **Why this route?** Compare in-place and separate-server work using the rules
    below. Explain the production outage, opportunity to test, extra work/cost and
    recovery limits. Keep elapsed work time, service interruption and labour separate;
-   give assumptions or say an estimate is not yet justified.
+   state assumptions and confidence for each estimate. Where evidence is too
+   limited for an estimate, name the missing facts.
 5. **What remains and what happens next?** Distinguish the automated OS upgrade
    from application fixes, configuration, data transfers and customer checks.
    Name owners, unresolved scope/costs, prerequisites and the next decision.

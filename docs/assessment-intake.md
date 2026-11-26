@@ -4,15 +4,16 @@ Collect the missing answers together before discovery. Reuse supplied context
 and existing approvals. For a continuation, recover the job record first and ask
 only about gaps or changes. Unknown outage/cost details need not block assessment.
 Obtain usable source inventory or a source-associated supplied manifest before
-issuing the assessment. While collection is blocked, return access/collection
-status and the next action, not a generic upgrade assessment or route proposal.
+issuing the assessment. With neither available, request a privately supplied
+manifest or arrange authorized collection at intake. While collection is blocked,
+report the attempted step, observed failure, and exact next action.
 
 | Topic | Short question and recorded choice |
 | --- | --- |
 | Job and context | New job or existing ID? Which server, what outcome, and what customer notes or initial findings should inform it? Associate correspondence before importing it. |
 | Inventory | Will the operator supply a manifest, or should the agent collect it? Standard/reduced or fuller collection, within which reviewed input categories and AI-processing/output limits? |
 | Access | Direct SSH or a named bastion/VPN/firewall route? Use known settings; otherwise default source access to root:22. Identify the designated agent and any different bastion account. |
-| Host identity | Use existing verified trust or supplied fingerprints, or permit first-use trust for authorised job endpoints? Record the chosen policy before connecting. |
+| Host identity | Use existing verified trust or supplied fingerprints, or apply first-use trust under the service's default or the operator's approval? Record the policy before connecting. |
 | Constraints | Critical services, linked replicas/writers, must-keep IPs, known backup/recovery arrangements, target requirements, downtime/window and budget constraints? Unknown answers remain explicit. |
 | Working arrangement | Assessment only, or assessment followed by a proposed plan? Which later checkpoints and progress detail does the operator prefer? Execution still needs approval of a concrete plan. |
 
@@ -52,19 +53,19 @@ trusted keys/CA configuration or store the matched public key privately, and use
 `StrictHostKeyChecking=yes`. Do not ask the
 operator to confirm the same pinned key again on reconnects or in a new chat.
 
-**First-use trust, when explicitly permitted:** accept previously unseen keys
-for authorised job endpoints without individual fingerprint prompts, and pin
+**First-use trust:** under a documented service default or explicit operator
+approval, accept previously unseen keys for authorised job endpoints and pin
 them in the job's private `known_hosts`. Record the endpoint, key/fingerprint,
 time and first-use policy as the trust basis. This accepts the risk that the
 first connection could reach an impostor. OpenSSH's
 [`StrictHostKeyChecking=accept-new`](https://man.openbsd.org/ssh_config#StrictHostKeyChecking)
 accepts new keys while rejecting changed keys. Never use `no`/`off` or discard
 known-hosts state. If the client lacks `accept-new`, record and pin the first
-observed public key under the same explicit policy, then connect with strict
+observed public key under the same policy, then connect with strict
 checking; do not weaken the check globally.
 
-If no policy is supplied, retain verified-identity checks and ask once for the
-missing policy or trusted evidence. Do not interpret silence as first-use consent.
+Without a documented service default or operator-approved policy, retain
+verified-identity checks and ask once for the missing policy or trusted evidence.
 A changed key requires resolution against the expected host/reinstall/rotation;
 never remove the old entry and accept its replacement automatically.
 
@@ -98,8 +99,8 @@ large inventory. Record a failed layer accurately and seek only the missing
 access detail. Do not install tools or alter production to obtain the manifest.
 Test an operator-supplied alternative socket if the configured agent is
 unresponsive, returning only public identity metadata. Keep a working socket
-scoped to the job's commands. Discovery of other sockets needs an authorised,
-bounded scope and account-ownership checks; never search for private keys.
+scoped to the job's commands. Keep manifest access diagnostics to the
+designated agent and any replacement authorized by the operator.
 
 Save the context, collection scope, access route, host-key policy/trust basis,
 constraints and checkpoint preferences in `job.md`. Preserve these through

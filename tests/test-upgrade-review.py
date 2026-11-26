@@ -219,7 +219,8 @@ class UpgradeReview(unittest.TestCase):
         function = declaration('packages_upgrade').replace('if [ -f /etc/debian_version ]; then', 'if true; then')
         noops = ['crossgrade_bookworm_recover_bootstrap', 'usrmerge_recover_pending',
                  'upgrade_prepare_nss_lookup', 'upgrade_precondition_checks', 'apt_sources_prepare',
-                 'fix_missing_lsb_release', 'add_missing_debian_keys', 'apt_get_update', 'record_config_state']
+                 'apt_sources_check_releases_and_vendors', 'fix_missing_lsb_release',
+                 'add_missing_debian_keys', 'apt_get_update', 'record_config_state']
         body = '\n'.join(name + '() { :; }' for name in noops) + '''
 ALL_DEBIAN=
 ALL_UBUNTU='resolute'

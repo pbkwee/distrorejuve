@@ -1476,6 +1476,14 @@ function apt_sources_check_releases_and_vendors() {
     esac
     case "$status" in 0) support=supported;; 1) support=unsupported;; esac
     echo "dss:info: $file:$line: $provider repository; target ${target:-$current} availability: $support."
+    # Name known unsupported combinations before APT refresh. Preserve the source
+    # until an operator reviews a replacement against its application dependencies.
+    if [ "$status" -eq 1 ]; then
+      printf 'dss:error: Unsupported %s repository for %s %s at %s:%s.\n' "$provider" "$family" "${target:-$current}" "$file" "$line" >&2
+      printf '%s\n' 'dss:error: Review a supported package source or disable this entry after checking application dependencies; sources are unchanged.' >&2
+      ret=1
+      continue
+    fi
     if [ -n "$target" ] || [ "$status" -ne 0 ]; then
       echo "dss:warn: Review or disable $provider source at $file:$line before continuing. Switching package repositories or publishers requires application/version checks; sources are unchanged." >&2
       ret=1
@@ -11556,9 +11564,14 @@ if [ "$backend" = rpm ]; then rpm_packages_upgrade; return $?; fi
 crossgrade_bookworm_recover_bootstrap "${UPGRADE_CROSSGRADE:-false}" packages || return $?
 usrmerge_recover_pending || return $?
 upgrade_prepare_nss_lookup
-upgrade_precondition_checks || return $?
+# Keep general preconditions before source edits, but let official archive repair
+# complete before refusing a vendor source. Scope this override to one call.
+DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK=true upgrade_precondition_checks || return $?
 
 apt_sources_prepare || return 1
+# Restore the operator's repository policy before bootstrap helpers can refresh
+# indexes. Unsupported vendors leave the repaired official sources in place.
+apt_sources_check_releases_and_vendors || return 1
 
 fix_missing_lsb_release || return $?
 
@@ -15767,6 +15780,9 @@ function logging_run() (
 
 function distrorejuve_main() {
 ret=0
+# Package helpers and diagnostics reuse ret. Keep the action status local so
+# printing a summary cannot turn a failed APT action into a successful command.
+local package_action_status=0
 if [ "${DR_ACTION:-$1}" = --resume-stage ]; then
   [ "$#" -eq 2 ] || { echo 'dss:error: Use --resume-stage STAGE_RECORD.' >&2; return 1; }
   upgrade_stage_resume "$2"
@@ -15860,14 +15876,13 @@ elif [ "--source" = "${DR_ACTION:-$1}" ] ; then
 elif [ "--upgrade" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   print_info
-  DR_SKIP_CURRENT_RELEASE_REPOSITORY_CHECK=true
-  packages_upgrade
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  if [ "$ret" -eq 0 ]; then
+  packages_upgrade || package_action_status=$?
+  [ "$package_action_status" -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  if [ "$package_action_status" -eq 0 ]; then
     if [ -f /etc/redhat-release ]; then echo 'dss:info: --upgrade completed; review the RPM evidence directory in the detailed run log.'
     else echo "dss:info: --upgrade completed ok. Use $0 --show-changes to see changes."; fi
   fi
+  return "$package_action_status"
 elif [ "--to-latest" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   upgrade_preflight_action --to-latest "${2:-}" || exit $?
@@ -15879,13 +15894,13 @@ elif [ "--to-latest" = "${DR_ACTION:-$1}" ] ; then
 elif [ "--dist-update" = "${DR_ACTION:-$1}" ] ; then
   print_info
   packages_upgrade || exit 1
-  if [ -f /etc/debian_version ]; then apt_get_dist_upgrade; else true; fi
-  [ $? -ne 0 ] && ret=$(($ret+1))
-  [ $ret -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
-  if [ "$ret" -eq 0 ]; then
+  if [ -f /etc/debian_version ]; then apt_get_dist_upgrade || package_action_status=$?; fi
+  [ "$package_action_status" -ne 0 ] && echo "dss:error: dist upgrade failed, see above for any details, tips to follow." && print_failed_dist_upgrade_tips && echo "dss:error: dist upgrade failed.  exiting.  use $0 --show-changes to see changes"
+  if [ "$package_action_status" -eq 0 ]; then
     if [ -f /etc/redhat-release ]; then echo 'dss:info: --dist-update completed; review the RPM evidence directory in the detailed run log.'
     else echo "dss:info: --dist-update completed ok. Use $0 --show-changes to see changes."; fi
   fi
+  return "$package_action_status"
 elif [ "--list-leftover-packages" = "${DR_ACTION:-$1}" ] ; then
   [ ! -z "$2" ] && print_usage && exit 1
   ! has_leftover_packages && echo "No leftover packages (all installed packages from the current distro.  No 32 bit packages on a 64 bit install)." && exit 0
